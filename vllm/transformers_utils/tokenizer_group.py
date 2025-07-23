@@ -25,6 +25,8 @@ class TokenizerGroup:
         max_loras = tokenizer_config.get("max_loras", 0)
         self.lora_tokenizers = LRUCache[int, AnyTokenizer](
             capacity=max(max_loras, max_num_seqs) if enable_lora else 0)
+        # [tau_chang] hardcode for now
+        self.mask_token_id = tokenizer_config.get("mask_token_id", 126336)
 
     def get_max_input_len(self,
                           lora_request: Optional[LoRARequest] = None

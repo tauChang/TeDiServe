@@ -24,6 +24,7 @@ class Request:
         self,
         request_id: str,
         prompt_token_ids: list[int],
+        mask_token_id: int,
         multi_modal_inputs: Optional[list[MultiModalKwargs]],
         multi_modal_hashes: Optional[list[str]],
         multi_modal_placeholders: Optional[list[PlaceholderRange]],
@@ -41,9 +42,14 @@ class Request:
         self.client_index = client_index
         self.priority = priority
         self.sampling_params = sampling_params
+        # [tau_chang] for now
+        assert self.sampling_params.min_tokens == self.sampling_params.max_tokens
+
         self.pooling_params = pooling_params
         # Because of LoRA, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
+        self.mask_token_id = mask_token_id
+
         self.lora_request = lora_request
         self.structured_output_request = structured_output_request
         self.arrival_time = arrival_time if arrival_time is not None else \
@@ -76,7 +82,11 @@ class Request:
         self.prompt_token_ids = prompt_token_ids
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self._output_token_ids: list[int] = []
+        # [tau_chang] _all_token_ids contains all token ids including [MASK] tokens.
         self._all_token_ids: list[int] = self.prompt_token_ids.copy()
+        # [tau_chang] append [MASK] tokens to _all_token_ids
+        self._all_token_ids.extend([self.mask_token_id] * self.max_tokens)
+
         self.num_output_placeholders = 0  # Used in async scheduling.
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
@@ -119,6 +129,7 @@ class Request:
             request_id=request.request_id,
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
+            mask_token_id=request.mask_token_id,
             multi_modal_inputs=request.mm_inputs,
             multi_modal_hashes=request.mm_hashes,
             multi_modal_placeholders=request.mm_placeholders,

@@ -434,6 +434,7 @@ class FlashAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
 
         num_actual_tokens = attn_metadata.num_actual_tokens
+        print(f"in flash attention impl, num_actual_tokens: {num_actual_tokens}")
         key_cache, value_cache = kv_cache.unbind(0)
 
         if self.kv_sharing_target_layer_name is None:
@@ -444,6 +445,7 @@ class FlashAttentionImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
+            print(f"before reshape_and_cache_flash, shape of key: {key.shape}, key_cache: {key_cache.shape}")
             reshape_and_cache_flash(
                 key,
                 value,
@@ -454,6 +456,7 @@ class FlashAttentionImpl(AttentionImpl):
                 layer._k_scale,
                 layer._v_scale,
             )
+            print(f"after reshape_and_cache_flash, shape of key: {key.shape}, key_cache: {key_cache.shape}")
 
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(torch.float8_e4m3fn)

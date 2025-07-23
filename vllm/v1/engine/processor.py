@@ -268,6 +268,7 @@ class Processor:
             processed_inputs=processed_inputs,
         )
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
+        mask_token_id = self.tokenizer.mask_token_id
 
         self._validate_model_inputs(processed_inputs, lora_request)
 
@@ -345,6 +346,7 @@ class Processor:
         return decoder_inputs.get("prompt"), EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=decoder_inputs["prompt_token_ids"],
+            mask_token_id=mask_token_id,
             mm_inputs=sorted_mm_inputs,
             mm_hashes=sorted_mm_hashes,
             mm_placeholders=sorted_mm_positions,
