@@ -256,6 +256,10 @@ _TRANSFORMERS_MODELS = {
     "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"), # noqa: E501
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
 }
+
+_DIFFUSION_LANGUAGE_MODELS = {
+    "LLaDAModelLM": ("llada", "LLaDAModelLM"),
+}
 # yapf: enable
 
 _VLLM_MODELS = {
@@ -265,6 +269,7 @@ _VLLM_MODELS = {
     **_MULTIMODAL_MODELS,
     **_SPECULATIVE_DECODING_MODELS,
     **_TRANSFORMERS_MODELS,
+    **_DIFFUSION_LANGUAGE_MODELS,
 }
 
 # This variable is used as the args for subprocess.run(). We

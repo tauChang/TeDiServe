@@ -180,6 +180,10 @@ def resolve_transformers_arch(model_config: ModelConfig,
         if arch in _TRANSFORMERS_MODELS:
             continue
 
+        logger.warning(
+            "model config is %s", model_config,
+        )
+
         if model_config.model_impl == ModelImpl.AUTO:
             logger.warning(
                 "%s has no vLLM implementation, falling back to Transformers "
@@ -227,6 +231,11 @@ def get_model_architecture(
         model_config: ModelConfig) -> tuple[type[nn.Module], str]:
     architectures = getattr(model_config.hf_config, "architectures", [])
 
+    logger.warning(
+        "model config is %s",
+        model_config,
+    )
+
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
     mixtral_supported = [
@@ -242,6 +251,16 @@ def get_model_architecture(
     is_supported = lambda arch: (arch in vllm_supported_archs and arch not in
                                  _TRANSFORMERS_MODELS)
     vllm_not_supported = not any(is_supported(arch) for arch in architectures)
+
+    # logger.warning(
+    #     "vLLM supported architectures: %s",
+    #     str(vllm_supported_archs),
+    # )
+
+    # logger.warning(
+    #     "vllm_not_supported: %s",
+    #     str(vllm_not_supported),
+    # )
 
     if vllm_not_supported:
         # try automatic conversion in adapters.py
@@ -269,7 +288,7 @@ def get_model_architecture(
           and model_config.quantization not in mixtral_supported
           and "MixtralForCausalLM" in architectures):
         architectures = ["QuantMixtralForCausalLM"]
-
+    
     model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
     if model_config.task == "embed":
         logger.debug_once("Automatic conversion using `as_embedding_model`.")

@@ -211,9 +211,13 @@ class AutoWeightsLoader:
         module: nn.Module,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[str]:
+
         if isinstance(module, PPMissingLayer):
             return
-
+        logger.warning(
+            "Loading weights for module %s with class %s",
+            base_prefix, type(module).__name__)
+        
         # Avoid infinite recursion since this function is typically
         # called inside load_weights of the module itself
         if module != self.module:
@@ -237,8 +241,24 @@ class AutoWeightsLoader:
         # that aren't registered as params, e.g., batchnorm statistics.
         self._add_loadable_non_param_tensors(module, child_params)
 
+        logger.warning(
+            "Found %d child modules and %d child parameters in module %s",
+            len(child_modules), len(child_params), base_prefix
+        )
+
+        logger.warning(
+            "Child modules are: %s",
+            str(list(child_modules.keys()))
+        )
+
+
         for child_prefix, child_weights in self._groupby_prefix(weights):
             prefix = self._get_qualname(base_prefix, child_prefix)
+            # logger.warning(
+            #     "Processing child prefix '%s' with weights: %s",
+            #     prefix,
+            #     str([name for name, _ in child_weights])
+            # )
 
             if child_prefix in child_modules:
                 if self._can_skip(prefix + "."):
@@ -285,6 +305,12 @@ class AutoWeightsLoader:
         if mapper is not None:
             weights = mapper.apply(weights)
         # filter out weights with first-prefix/substr to skip in name
+        # weights = ((name, weight) for name, weight in weights
+        #            if not self._can_skip(name))
+        # logger.warning(
+        #     "weights name: %s",
+        #     str([name for name, _ in weights])
+        # )
         weights = ((name, weight) for name, weight in weights
                    if not self._can_skip(name))
 

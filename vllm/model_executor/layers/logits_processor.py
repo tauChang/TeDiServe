@@ -107,9 +107,11 @@ class LogitsProcessor(nn.Module):
         embedding_bias: Optional[torch.Tensor],
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
+        print(f"in _get_logits, hidden_states shape: {hidden_states.shape}")
         logits = lm_head.quant_method.apply(lm_head,
                                             hidden_states,
                                             bias=embedding_bias)
+        print(f"Logits shape after lm_head.quant_method.apply: {logits.shape}")
 
         # Gather logits for TP
         logits = self._gather_logits(logits)

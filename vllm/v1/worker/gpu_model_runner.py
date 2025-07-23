@@ -1407,6 +1407,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
+            # print model_output shape
+            print(f"Model output shape: {model_output.shape}")
 
             self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = (
@@ -1442,7 +1444,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                   num_scheduled_tokens_np, finished_sending,
                                   finished_recving)
 
+            print(f"logits_indices: {logits_indices}")
             sample_hidden_states = hidden_states[logits_indices]
+            print(f"sample_hidden_states shape: {sample_hidden_states.shape}")
             logits = self.model.compute_logits(sample_hidden_states, None)
         if broadcast_pp_output:
             model_output_broadcast_data = {
@@ -1464,6 +1468,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
+            print(f"sampler_output: {sampler_output}")
         else:
             # When indexing with a tensor (bonus_logits_indices), PyTorch
             # creates a new tensor with separate storage from the original
@@ -1539,6 +1544,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Mask out the sampled tokens that should not be sampled.
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
+
+        print(f"Valid sampled token ID: {valid_sampled_token_ids}")
 
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.

@@ -97,7 +97,6 @@ class Sampler(nn.Module):
         The various logits processing functions called in this method
         may update the logits tensor in-place.
         """
-
         assert not (sampling_metadata.all_greedy
                     and sampling_metadata.all_random)
         if sampling_metadata.all_random:
@@ -105,6 +104,7 @@ class Sampler(nn.Module):
         else:
             greedy_sampled = self.greedy_sample(logits)
             if sampling_metadata.all_greedy:
+                print(f"Returning greedy sampled tokens: {greedy_sampled}")
                 return greedy_sampled
 
         assert sampling_metadata.temperature is not None
