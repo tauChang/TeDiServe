@@ -439,6 +439,8 @@ class EngineArgs:
 
     async_scheduling: bool = SchedulerConfig.async_scheduling
 
+    mask_token_id: int = ModelConfig.mask_token_id
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -540,6 +542,8 @@ class EngineArgs:
                                  **model_kwargs["model_impl"])
         model_group.add_argument("--override-attention-dtype",
                                  **model_kwargs["override_attention_dtype"])
+        model_group.add_argument("--mask-token-id",
+                                 **model_kwargs["mask_token_id"])
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
@@ -933,6 +937,7 @@ class EngineArgs:
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
+            mask_token_id=self.mask_token_id,
         )
 
     def validate_tensorizer_args(self):

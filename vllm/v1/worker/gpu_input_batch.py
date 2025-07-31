@@ -37,7 +37,10 @@ class CachedRequestState:
 
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
+    num_denoise_ran: int
     output_token_ids: list[int]
+    unmasked_token_ids: list[tuple[int, int]]
+    output_length: int
 
     mrope_positions: Optional[torch.Tensor] = None
     mrope_position_delta: Optional[int] = None
@@ -50,12 +53,17 @@ class CachedRequestState:
     @property
     def num_tokens(self) -> int:
         return self.num_prompt_tokens + len(self.output_token_ids)
+    
+    def update_output_token_id(self, pos, token_id):
+        # pos is in absolute index (relative to prompt + output)
+        pos -= len(self.prompt_token_ids)
+        self.output_token_ids[pos] = token_id
 
-    def get_token_id(self, idx: int) -> int:
-        if idx < self.num_prompt_tokens:
-            return self.prompt_token_ids[idx]
-        else:
-            return self.output_token_ids[idx - self.num_prompt_tokens]
+    # def get_token_id(self, idx: int) -> int:
+    #     if idx < self.num_prompt_tokens:
+    #         return self.prompt_token_ids[idx]
+    #     else:
+    #         return self.output_token_ids[idx - self.num_prompt_tokens]
 
 
 class InputBatch:
@@ -104,6 +112,7 @@ class InputBatch:
         )
         self.num_computed_tokens_cpu = \
             self.num_computed_tokens_cpu_tensor.numpy()
+        self.num_denoise_ran = np.zeros(max_num_reqs, dtype=np.int32)
 
         # Block table.
         self.block_table = MultiGroupBlockTable(
@@ -284,10 +293,12 @@ class InputBatch:
         self.num_prompt_tokens[req_index] = num_prompt_tokens
         self.token_ids_cpu[
             req_index, :num_prompt_tokens] = request.prompt_token_ids
+        
         start_idx = num_prompt_tokens
         end_idx = start_idx + len(request.output_token_ids)
         self.token_ids_cpu[req_index,
                            start_idx:end_idx] = request.output_token_ids
+
         # Number of token ids in token_ids_cpu.
         # NOTE(woosuk): This may include spec decode tokens.
         self.num_tokens[req_index] = request.num_tokens
@@ -295,6 +306,7 @@ class InputBatch:
         self.num_tokens_no_spec[req_index] = request.num_tokens
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
+        self.num_denoise_ran[req_index] = request.num_denoise_ran
         self.block_table.add_row(request.block_ids, req_index)
 
         if sampling_params := request.sampling_params:
@@ -448,6 +460,8 @@ class InputBatch:
             self.req_id_to_index[old_id_i2], self.req_id_to_index[old_id_i1]
         self.num_tokens[i1], self.num_tokens[i2] =\
             self.num_tokens[i2], self.num_tokens[i1]
+        self.num_denoise_ran[i1], self.num_denoise_ran[i2] =\
+            self.num_denoise_ran[i2], self.num_denoise_ran[i1]
         self.num_tokens_no_spec[i1], self.num_tokens_no_spec[i2] =\
             self.num_tokens_no_spec[i2], self.num_tokens_no_spec[i1]
         self.num_prompt_tokens[i1], self.num_prompt_tokens[i2] =\
@@ -552,6 +566,8 @@ class InputBatch:
                 last_req_index]
             self.num_computed_tokens_cpu[
                 empty_index] = self.num_computed_tokens_cpu[last_req_index]
+            self.num_denoise_ran[empty_index] = self.num_denoise_ran[
+                last_req_index]
             self.block_table.move_row(last_req_index, empty_index)
             self.temperature_cpu[empty_index] = self.temperature_cpu[
                 last_req_index]
@@ -659,6 +675,9 @@ class InputBatch:
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
             logitsprocs=self.logitsprocs,
+            num_prompt_tokens= self.num_prompt_tokens[:self.num_reqs].tolist(),
+            num_tokens=self.num_tokens[:self.num_reqs].tolist(),
+            num_denoise_ran=self.num_denoise_ran[:self.num_reqs].tolist(),
         )
 
     @property

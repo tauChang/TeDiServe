@@ -277,7 +277,7 @@ class FlashAttentionMetadataBuilder(
                                           seqlens=suffix_kv_lens,
                                           max_seq_len=max_seq_len -
                                           common_prefix_len,
-                                          causal=True)
+                                          causal=False)
         else:
             cu_prefix_query_lens = None
             prefix_kv_lens = None
@@ -288,7 +288,7 @@ class FlashAttentionMetadataBuilder(
                                           max_query_len=max_query_len,
                                           seqlens=seq_lens,
                                           max_seq_len=max_seq_len,
-                                          causal=True)
+                                          causal=False)
 
         if self.use_full_cuda_graph:
             assert scheduler_metadata is not None
@@ -434,9 +434,13 @@ class FlashAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
 
         num_actual_tokens = attn_metadata.num_actual_tokens
-        print(f"in flash attention impl, num_actual_tokens: {num_actual_tokens}")
+        # logger.debug(f"in flash attention impl, num_actual_tokens: {num_actual_tokens}")
+        # logger.debug(f"attention metadata: {attn_metadata}")
         key_cache, value_cache = kv_cache.unbind(0)
-
+        # logger.debug(f"query shape: {query.shape}, key shape: {key.shape}, "
+        #       f"value shape: {value.shape}, key_cache shape: {key_cache.shape}, "
+        #       f"value_cache shape: {value_cache.shape}")
+        
         if self.kv_sharing_target_layer_name is None:
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
@@ -445,7 +449,14 @@ class FlashAttentionImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            print(f"before reshape_and_cache_flash, shape of key: {key.shape}, key_cache: {key_cache.shape}")
+            # logger.debug(f"before reshape_and_cache_flash, shape of key: {key.shape}, key_cache: {key_cache.shape}")
+            # logger.debug(f"before reshape, value is: {value}")
+
+            # set slot_mapping to [0, 1, 2, ... len(slot_mapping) - 1]
+            # attn_metadata.slot_mapping = torch.arange(
+            #     attn_metadata.slot_mapping.shape[0],
+            #     dtype=attn_metadata.slot_mapping.dtype,
+            #     device=attn_metadata.slot_mapping.device)
             reshape_and_cache_flash(
                 key,
                 value,
@@ -456,7 +467,8 @@ class FlashAttentionImpl(AttentionImpl):
                 layer._k_scale,
                 layer._v_scale,
             )
-            print(f"after reshape_and_cache_flash, shape of key: {key.shape}, key_cache: {key_cache.shape}")
+            # logger.debug(f"after reshape, value is: {value_cache}")
+            # logger.debug(f"after reshape_and_cache_flash, shape of key: {key.shape}, key_cache: {key_cache.shape}")
 
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(torch.float8_e4m3fn)
@@ -477,6 +489,15 @@ class FlashAttentionImpl(AttentionImpl):
             scheduler_metadata = attn_metadata.scheduler_metadata
 
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
+            # logger.debug(f"q: {query[:num_actual_tokens]}")
+            # logger.debug(f"key_cache: {key_cache}")
+            # logger.debug(f"value_cache: {value_cache}")
+            # logger.debug(f"cu_seqlens_q: {cu_seqlens_q}")
+            # logger.debug(f"max_seqlen_q: {max_seqlen_q}")
+            # logger.debug(f"seqused_k: {seqused_k}")
+            # logger.debug(f"max_seqlen_k: {max_seqlen_k}")
+            # logger.debug(f"softmax_scale: {self.scale}")
+            # logger.debug(f"block_table: {block_table}")
 
             flash_attn_varlen_func(
                 q=query[:num_actual_tokens],
@@ -488,7 +509,7 @@ class FlashAttentionImpl(AttentionImpl):
                 seqused_k=seqused_k,
                 max_seqlen_k=max_seqlen_k,
                 softmax_scale=self.scale,
-                causal=True,
+                causal=False,
                 alibi_slopes=self.alibi_slopes,
                 window_size=self.sliding_window,
                 block_table=block_table,
@@ -672,7 +693,7 @@ def cascade_attention(
         max_seqlen_q=max_query_len,
         max_seqlen_k=max_kv_len - common_prefix_len,
         softmax_scale=softmax_scale,
-        causal=True,
+        causal=False,
         window_size=sliding_window,
         block_table=block_table[:, num_common_kv_blocks:],
         softcap=logits_soft_cap,

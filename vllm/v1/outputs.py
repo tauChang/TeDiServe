@@ -67,7 +67,8 @@ class SamplerOutput:
     # Different requests can have different number of generated tokens.
     # All requests are padded to max_num_generated_tokens.
     # PLACEHOLDER_TOKEN_ID (-1 by default) is used for padding.
-    sampled_token_ids: torch.Tensor
+    # sampled_token_ids: torch.Tensor
+    sampled_token_ids: list[list[tuple[int, int]]]
     logprobs_tensors: Optional[LogprobsTensors]
 
 
@@ -85,7 +86,7 @@ class ModelRunnerOutput:
     # num_generated_tokens is the number of tokens
     # generated in the current step. It can be different for
     # each request due to speculative/jump decoding.
-    sampled_token_ids: list[list[int]]
+    sampled_token_ids: list[list[tuple[int, int]]]
 
     # num_reqs x num_spec_tokens
     spec_token_ids: Optional[list[list[int]]]

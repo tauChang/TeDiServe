@@ -31,11 +31,13 @@ def main(args):
     # Completion API
     completion = client.completions.create(
         model=model,
-        prompt="A robot may not injure a human being",
+        prompt="Who am I?",
         echo=False,
         n=2,
-        stream=args.stream,
-        logprobs=3,
+        # min_tokens=16,
+        max_tokens=1024,
+        # stream=args.stream,
+        # logprobs=3,
     )
 
     print("-" * 50)

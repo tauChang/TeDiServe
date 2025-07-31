@@ -21,6 +21,14 @@ class BlockTable:
         pin_memory: bool,
         device: torch.device,
     ):
+        logger.debug(
+            "Initializing BlockTable with parameters: "
+            f"block_size={block_size}, "
+            f"max_num_reqs={max_num_reqs}, "
+            f"max_num_blocks_per_req={max_num_blocks_per_req}, "
+            f"max_num_batched_tokens={max_num_batched_tokens}, "
+            f"pin_memory={pin_memory}, device={device}"
+        )
         self.block_size = block_size
         self.max_num_reqs = max_num_reqs
         self.max_num_blocks_per_req = max_num_blocks_per_req

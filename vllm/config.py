@@ -415,6 +415,8 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation."""
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
+    mask_token_id: Optional[int] = 126336
+    """The token ID to use for the mask token."""
 
     def compute_hash(self) -> str:
         """

@@ -41,3 +41,8 @@ class SamplingMetadata:
 
     # Loaded logits processors
     logitsprocs: LogitsProcessorManager
+
+    num_prompt_tokens: list[int]
+    num_tokens: list[int]
+    num_denoise_ran: list[int]
+

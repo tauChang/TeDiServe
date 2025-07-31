@@ -95,6 +95,8 @@ class LLMEngine:
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(self.tokenizer,
+                                                mask_token_id= \
+                                                self.model_config.mask_token_id,
                                                 log_stats=self.log_stats)
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)

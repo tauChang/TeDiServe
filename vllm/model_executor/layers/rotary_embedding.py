@@ -32,12 +32,15 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from vllm.logger import init_logger
+
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 
 if current_platform.is_cuda():
     from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
 
+logger = init_logger(__name__)
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
     x1 = x[..., :x.shape[-1] // 2]
@@ -57,9 +60,17 @@ def _apply_rotary_emb_torch(
     cos: torch.Tensor,
     sin: torch.Tensor,
     is_neox_style: bool,
+    cast_cos_sin_to_x_dtype: bool = False,
+    cast_output_to_x_dtype: bool = True,
 ) -> torch.Tensor:
-    cos = cos.unsqueeze(-2).to(x.dtype)
-    sin = sin.unsqueeze(-2).to(x.dtype)
+    # logger.debug(f"x shape: {x.shape}, cos shape: {cos.shape}, sin shape: {sin.shape}")
+    cos = cos.unsqueeze(-2)
+    sin = sin.unsqueeze(-2)
+    
+    if cast_cos_sin_to_x_dtype:
+        cos = cos.to(x.dtype)
+        sin = sin.to(x.dtype)
+
     if is_neox_style:
         x1, x2 = torch.chunk(x, 2, dim=-1)
     else:
@@ -68,9 +79,14 @@ def _apply_rotary_emb_torch(
     o1 = x1 * cos - x2 * sin
     o2 = x2 * cos + x1 * sin
     if is_neox_style:
-        return torch.cat((o1, o2), dim=-1)
+        out = torch.cat((o1, o2), dim=-1)
     else:
-        return torch.stack((o1, o2), dim=-1).flatten(-2)
+        out = torch.stack((o1, o2), dim=-1).flatten(-2)
+
+    if cast_output_to_x_dtype:
+        out = out.to(x.dtype)
+
+    return out
 
 
 def _apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
@@ -122,6 +138,7 @@ class RotaryEmbedding(CustomOp):
         # use CPU to compute the cache and then move it to GPU. However, we
         # create the cache on GPU for faster initialization. This may cause
         # a slight numerical difference between the HF implementation and ours.
+        # logger.debug(f"rotary_dim: {self.rotary_dim}, base: {base}")
         inv_freq = 1.0 / (base**(torch.arange(
             0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim))
         return inv_freq
@@ -134,7 +151,11 @@ class RotaryEmbedding(CustomOp):
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = freqs.cos()
         sin = freqs.sin()
+        # logger.debug(f"sin shape: {sin.shape}")
+        # logger.debug(f"sin: {sin}")
+        # logger.debug(f"cos: {cos}")
         cache = torch.cat((cos, sin), dim=-1)
+        # logger.debug(f"cache: {cache}")
         return cache
 
     def forward_native(
@@ -149,8 +170,16 @@ class RotaryEmbedding(CustomOp):
             positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
+        # logger.debug(f"content of full cos_sin_cache: {self.cos_sin_cache}")
+        # logger.debug(f"sizeo of full cos_sin_cache: {self.cos_sin_cache.shape}")
+        # logger.debug(f"positions: {positions}")
         cos_sin = self.cos_sin_cache.index_select(0, positions)
         cos, sin = cos_sin.chunk(2, dim=-1)
+        # logger.debug(f"in forward native")
+        # logger.debug(f"sin shape: {sin.shape}")
+        # logger.debug(f"sin: {sin}")
+        # logger.debug(f"cos shape: {cos.shape}")
+        # logger.debug(f"cos: {cos}")
 
         query_shape = query.shape
         query = query.view(num_tokens, -1, self.head_size)

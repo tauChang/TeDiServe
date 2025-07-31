@@ -8,6 +8,7 @@ from typing import Any, Optional, Union, cast
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.outputs import (CompletionOutput, PoolingOutput,
                           PoolingRequestOutput, RequestOutput)
 from vllm.sampling_params import RequestOutputKind
@@ -20,6 +21,7 @@ from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
                                    RequestStateStats)
 
+logger = init_logger(__name__)
 
 class RequestOutputCollector:
     """
@@ -117,6 +119,7 @@ class RequestState:
         tokenizer: AnyTokenizer,
         request: EngineCoreRequest,
         prompt: Optional[str],
+        mask_token_id: int,
         parent_req: Optional[ParentRequest],
         request_index: int,
         queue: Optional[RequestOutputCollector],
@@ -134,6 +137,7 @@ class RequestState:
             detokenizer = IncrementalDetokenizer.from_new_request(
                 tokenizer=tokenizer,
                 request=request,
+                mask_token_id=mask_token_id
             )
             max_tokens_param = sampling_params.max_tokens
         else:
@@ -234,7 +238,7 @@ class RequestState:
 
     def _new_completion_output(
         self,
-        token_ids: list[int],
+        token_ids: list[tuple[int, int]],
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
     ) -> CompletionOutput:
@@ -243,6 +247,9 @@ class RequestState:
         assert self.logprobs_processor is not None
         finished = finish_reason is not None
         delta = self.output_kind == RequestOutputKind.DELTA
+        logger.debug(
+            f"in _new_completion_output, finished: {finished}, delta: {delta}"
+        )
 
         # Prepare text and token_ids, based on delta mode
         text = self.detokenizer.get_next_output_text(finished, delta)
@@ -277,10 +284,12 @@ class OutputProcessor:
     def __init__(
         self,
         tokenizer: TokenizerGroup,
+        mask_token_id: int,
         log_stats: bool,
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
+        self.mask_token_id = mask_token_id
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
         self.lora_states = LoRARequestStates()
@@ -331,6 +340,7 @@ class OutputProcessor:
             tokenizer=self.tokenizer.get_lora_tokenizer(request.lora_request),
             request=request,
             prompt=prompt,
+            mask_token_id=self.mask_token_id,
             parent_req=parent_req,
             request_index=request_index,
             queue=queue,

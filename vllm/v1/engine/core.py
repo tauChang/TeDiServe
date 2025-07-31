@@ -213,7 +213,8 @@ class EngineCore:
             request.mm_inputs = self.mm_input_cache_server.get_and_update_p1(
                 request.mm_inputs, request.mm_hashes)
 
-        req = Request.from_engine_core_request(request)
+        req = Request.from_engine_core_request(request, mask_token_id=
+                                    self.vllm_config.model_config.mask_token_id)
         if req.use_structured_output:
             # Start grammar compilation asynchronously
             self.structured_output_manager.grammar_init(req)
@@ -262,6 +263,7 @@ class EngineCore:
         model_output = self.execute_model(scheduler_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output)  # type: ignore
+        logger.debug(f"step about to complete, returning {engine_core_outputs}")
 
         return (engine_core_outputs,
                 scheduler_output.total_num_scheduled_tokens > 0)
@@ -295,6 +297,8 @@ class EngineCore:
                 self.batch_queue.put_nowait(
                     (future, scheduler_output))  # type: ignore
 
+                logger.debug(f"Scheduled a new batch with output: {scheduler_output}")
+
         scheduled_batch = (scheduler_output is not None
                            and scheduler_output.total_num_scheduled_tokens > 0)
 
@@ -311,7 +315,11 @@ class EngineCore:
             self.batch_queue.task_done()
             engine_core_outputs = (self.scheduler.update_from_output(
                 scheduler_output, model_output))
-
+            logger.debug(f"Got model output: {engine_core_outputs}")
+        logger.debug(f"step_with_batch_queue: ")
+        logger.debug(f"  engine_core_outputs: {engine_core_outputs}")
+        logger.debug(f"  scheduled_batch: {scheduled_batch}")
+        
         return engine_core_outputs, scheduled_batch
 
     def shutdown(self):

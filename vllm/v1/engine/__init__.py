@@ -49,7 +49,6 @@ class EngineCoreRequest(
 
     request_id: str
     prompt_token_ids: list[int]
-    mask_token_id: int 
     mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]]
     mm_hashes: Optional[list[str]]
     mm_placeholders: Optional[list[PlaceholderRange]]
@@ -104,7 +103,7 @@ class EngineCoreOutput(
         gc=False):  # type: ignore[call-arg]
 
     request_id: str
-    new_token_ids: list[int]
+    new_token_ids: list[tuple[int, int]]
 
     new_logprobs: Optional[LogprobsLists] = None
     new_prompt_logprobs_tensors: Optional[LogprobsTensors] = None

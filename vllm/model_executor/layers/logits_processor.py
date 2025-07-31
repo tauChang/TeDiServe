@@ -8,6 +8,8 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
+from vllm.logger import init_logger
+
 import vllm.envs as envs
 from vllm.distributed import (tensor_model_parallel_all_gather,
                               tensor_model_parallel_gather)
@@ -21,6 +23,7 @@ if envs.VLLM_LOGITS_PROCESSOR_THREADS is not None:
     _logits_processor_threadpool = ThreadPoolExecutor(
         envs.VLLM_LOGITS_PROCESSOR_THREADS)
 
+logger = init_logger(__name__)
 
 class LogitsProcessor(nn.Module):
     """Process logits and apply logits processors from sampling metadata.
@@ -107,11 +110,11 @@ class LogitsProcessor(nn.Module):
         embedding_bias: Optional[torch.Tensor],
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
-        print(f"in _get_logits, hidden_states shape: {hidden_states.shape}")
+        logger.debug(f"in _get_logits, hidden_states shape: {hidden_states.shape}")
         logits = lm_head.quant_method.apply(lm_head,
                                             hidden_states,
                                             bias=embedding_bias)
-        print(f"Logits shape after lm_head.quant_method.apply: {logits.shape}")
+        logger.debug(f"logits shape after lm_head.quant_method.apply: {logits.shape}")
 
         # Gather logits for TP
         logits = self._gather_logits(logits)

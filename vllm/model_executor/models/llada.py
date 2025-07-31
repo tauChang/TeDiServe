@@ -12,6 +12,8 @@ import warnings
 
 from .configuration_llada import LLaDAConfig, ModelConfig
 
+from vllm.logger import init_logger
+
 from vllm.attention import Attention, AttentionType
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -36,6 +38,7 @@ from .utils import (AutoWeightsLoader,
                     make_layers,
                     make_empty_intermediate_tensors_factory)
                     
+logger = init_logger(__name__)
 
 class LayerNormBase(nn.Module):
     def __init__(
@@ -148,7 +151,6 @@ class RMSLayerNorm(LayerNormBase):
             if self.bias is not None:
                 return self.weight * x + self.bias
             else:
-                print(f"weight device: {self.weight.device}, x device: {x.device}")
                 return self.weight * x
         else:
             return x
@@ -254,12 +256,12 @@ class LLaDAAttention(nn.Module):
         # is_gguf = quant_config and quant_config.get_name() == "gguf"
         # if is_gguf and config.model_type == "llama":
         #     is_neox_style = False
-
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
             base=self.rope_theta,
+            dtype=torch.float32,
             # rope_scaling=rope_scaling,
             # is_neox_style=is_neox_style,
             # partial_rotary_factor=self.partial_rotary_factor,
@@ -330,19 +332,32 @@ class LLaDATransformerLayer(nn.Module):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        hidden_states = self.attn_norm(hidden_states)
-        hidden_states = self.self_attn(positions=positions, 
-                                       hidden_states=hidden_states)
+        # hidden_states has shape [16, 4096]
+        hidden_states_normed = self.attn_norm(hidden_states)
+        att = self.self_attn(hidden_states_normed, positions)
+        # logger.debug(f"attn output: {att}")
+
+        hidden_states = hidden_states + att
+        # logger.debug(f"after adding attention output: {hidden_states}")
 
         # FC
         residual = hidden_states
         hidden_states = self.ff_norm(hidden_states)
+        # logger.debug(f"after ff_norm: {hidden_states}")
         (hidden_states, _), (hidden_states_up, _) = self.ff_proj(hidden_states), \
             self.up_proj(hidden_states)
+        # logger.debug(f"after ff_proj: {hidden_states}")
+        # logger.debug(f"after up_proj: {hidden_states_up}")
         hidden_states = self.act(hidden_states)
+        # logger.debug(f"after activation: {hidden_states}")
         hidden_states = hidden_states * hidden_states_up
+        # logger.debug(f"after element-wise multiplication: {hidden_states}")
         hidden_states, _ = self.ff_out(hidden_states)
+        # logger.debug(f"after ff_out: {hidden_states}")
+        # logger.debug(f"residual: {residual}")
         hidden_states += residual
+        # logger.debug(f"ff output shape: {hidden_states.shape}, positions shape: {positions.shape}")
+        # logger.debug(f"ff output: {hidden_states}")
         
         return hidden_states
         
@@ -424,7 +439,7 @@ class LLaDATransformer(nn.Module):
                 hidden_states += pos_embeds
         else:
             assert intermediate_tensors is not None
-            hidden_states = intermediate_tensors.hidden_states
+            hidden_states = intermediate_tensors["hidden_states"]
             
         for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states = layer(
@@ -556,6 +571,11 @@ class LLaDAModelLM(nn.Module, SupportsPP):
                                           config.d_model)
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
+
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.hidden_size)
+        )
     
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -610,9 +630,6 @@ class LLaDAModelLM(nn.Module, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str, 
                                                    torch.Tensor]]) -> set[str]:
-        # print(f"all weights name: {[name for name, _ in weights]}")
-        # print(f"all model parameters: {[name for name, _ in self.named_parameters(remove_duplicate=False)]}")
-    
         mapper = WeightsMapper(
             orig_to_new_substr={
                 ".blocks.": ".layers.",

@@ -32,6 +32,7 @@ class NewRequestData:
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
+    output_length: int
 
     @classmethod
     def from_request(
@@ -50,6 +51,7 @@ class NewRequestData:
             block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
+            output_length=request.output_length,
         )
 
     def __repr__(self):
@@ -62,7 +64,8 @@ class NewRequestData:
                 f"sampling_params={self.sampling_params},"
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
-                f"lora_request={self.lora_request}"
+                f"lora_request={self.lora_request},"
+                f"output_length={self.output_length}"
                 ")")
 
     # Version of __repr__ with the prompt data obfuscated
@@ -76,7 +79,8 @@ class NewRequestData:
                 f"sampling_params={self.sampling_params},"
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
-                f"lora_request={self.lora_request}"
+                f"lora_request={self.lora_request},"
+                f"output_length={self.output_length}"
                 ")")
 
 
@@ -90,9 +94,10 @@ class CachedRequestData:
     resumed_from_preemption: list[bool]
     # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
     # When PP is not used, new_token_ids will be empty.
-    new_token_ids: list[list[int]]
+    new_token_ids: list[list[tuple[int, int]]]
     new_block_ids: list[tuple[list[int], ...]]
     num_computed_tokens: list[int]
+    num_denoise_ran: list[int] = None
 
     @property
     def num_reqs(self) -> int:

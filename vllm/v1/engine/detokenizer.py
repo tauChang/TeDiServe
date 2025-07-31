@@ -29,11 +29,14 @@ INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
 class IncrementalDetokenizer:
 
     def __init__(self):
-        self.token_ids: list[int] = []
+        self.token_ids: dict[int, int] = {}
 
     @property
     def output_token_ids(self) -> list[int]:
-        return self.token_ids
+        output_ids = []
+        for i in range(len(self.token_ids)):
+            output_ids.append(self.token_ids[i])
+        return output_ids
 
     def update(self, new_token_ids: list[int],
                stop_terminated: bool) -> Optional[str]:
@@ -47,6 +50,7 @@ class IncrementalDetokenizer:
     def from_new_request(
         cls,
         tokenizer: Optional[AnyTokenizer],
+        mask_token_id: int,
         request: EngineCoreRequest,
     ) -> "IncrementalDetokenizer":
 
@@ -59,7 +63,7 @@ class IncrementalDetokenizer:
         if USE_FAST_DETOKENIZER and isinstance(tokenizer,
                                                PreTrainedTokenizerFast):
             # Fast tokenizer => use tokenizers library DecodeStream.
-            return FastIncrementalDetokenizer(tokenizer, request)
+            return FastIncrementalDetokenizer(tokenizer, mask_token_id, request)
 
         # Fall back to slow python-based incremental detokenization.
         return SlowIncrementalDetokenizer(tokenizer, request)
@@ -67,7 +71,7 @@ class IncrementalDetokenizer:
 
 class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
-    def __init__(self, request: EngineCoreRequest):
+    def __init__(self, request: EngineCoreRequest, mask_token_id: int):
         super().__init__()
 
         # Stop strings
@@ -85,9 +89,14 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         self._last_output_text_offset: int = 0
 
         # Generation data
+        self.prompt_length = len(request.prompt_token_ids)
+        self.output_length = request.sampling_params.max_tokens
+        self.token_ids: dict[int, int] = {i: mask_token_id
+                                          for i in range(self.output_length)}
+        self.num_unmasked_tokens = 0
         self.output_text = ""
 
-    def update(self, new_token_ids: list[int],
+    def update(self, new_token_ids: list[tuple[int, int]],
                stop_terminated: bool) -> Optional[str]:
         """
         Update RequestState for the request_id by:
@@ -100,21 +109,42 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             # Skip detokenization if no new token ids.
             return None
 
-        if stop_terminated and not self.include_stop_str_in_output:
-            # If stop-terminated, exclude last token from detokenization
-            # based on include_stop_str_in_output parameter.
-            skipped_stop_token_id = new_token_ids[-1]
-            new_token_ids = new_token_ids[:-1]
-        else:
-            skipped_stop_token_id = None
+        # if stop_terminated and not self.include_stop_str_in_output:
+        #     # If stop-terminated, exclude last token from detokenization
+        #     # based on include_stop_str_in_output parameter.
+        #     skipped_stop_token_id = new_token_ids[-1]
+        #     new_token_ids = new_token_ids[:-1]
+        # else:
+        #     skipped_stop_token_id = None
 
         # 1) Detokenize the new token ids incrementally.
         # TODO(woosuk): This method becomes very inefficient when the number of
         # new_token_ids is more than 1. We need to optimize this.
         offset_before = len(self.output_text)
-        for new_token_id in new_token_ids:
-            self.token_ids.append(new_token_id)
-            self.output_text += self.decode_next(new_token_id)
+        # for new_token_id in new_token_ids:
+        #     self.token_ids.append(new_token_id)
+        #     self.output_text += self.decode_next(new_token_id)
+        for pos, token_id in new_token_ids:
+            pos -= self.prompt_length
+            self.token_ids[pos] = token_id
+            logger.debug(
+                f"updating token_ids at position {pos} with token_id {token_id}")
+            self.num_unmasked_tokens += 1
+        logger.debug(
+            f"self.token_ids: {self.token_ids}, "
+            f"self.num_unmasked_tokens: {self.num_unmasked_tokens}, ")
+        
+        if self.num_unmasked_tokens == self.output_length:
+            for i in range(self.output_length):
+                next_token = self.decode_next(self.token_ids[i])
+                self.output_text += next_token
+                logger.debug(
+                    f"Decoding next token at position {i}: {next_token}"
+                    f" self.output_text: {self.output_text}")
+
+            return "stop"
+        else:
+            return None
 
         if stop_terminated:
             if skipped_stop_token_id is not None:
@@ -146,6 +176,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
     def get_next_output_text(self, finished: bool, delta: bool) -> str:
         """If delta is True, only new text since the last call to
         this method is returned"""
+        return self.output_text
 
         # We return the full output text if the sequence is finished.
         buffer_length = 0 if finished else self.stop_buffer_length
@@ -163,8 +194,9 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
     def __init__(self, tokenizer: PreTrainedTokenizerFast,
-                 request: EngineCoreRequest):
-        super().__init__(request)
+                mask_token_id: int,
+                request: EngineCoreRequest):
+        super().__init__(request, mask_token_id)
 
         sampling_params = request.sampling_params
         assert sampling_params is not None

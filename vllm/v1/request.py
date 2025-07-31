@@ -43,12 +43,12 @@ class Request:
         self.priority = priority
         self.sampling_params = sampling_params
         # [tau_chang] for now
+        self.sampling_params.min_tokens = sampling_params.max_tokens
         assert self.sampling_params.min_tokens == self.sampling_params.max_tokens
 
         self.pooling_params = pooling_params
         # Because of LoRA, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
-        self.mask_token_id = mask_token_id
 
         self.lora_request = lora_request
         self.structured_output_request = structured_output_request
@@ -81,16 +81,22 @@ class Request:
 
         self.prompt_token_ids = prompt_token_ids
         self.num_prompt_tokens = len(self.prompt_token_ids)
-        self._output_token_ids: list[int] = []
-        # [tau_chang] _all_token_ids contains all token ids including [MASK] tokens.
+
+        self.output_length = self.max_tokens
+
+        self._unmasked_token_ids: list[tuple[int, int]] = []
         self._all_token_ids: list[int] = self.prompt_token_ids.copy()
-        # [tau_chang] append [MASK] tokens to _all_token_ids
-        self._all_token_ids.extend([self.mask_token_id] * self.max_tokens)
+        self._all_token_ids.extend([mask_token_id] * self.output_length)
+
+        self._is_in_execution = False
 
         self.num_output_placeholders = 0  # Used in async scheduling.
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: Optional[str] = cache_salt
+
+        self.num_last_unmasked_tokens = 0
+        self.num_denoise_ran = 0
 
         # Multi-modal related
         self.mm_positions = multi_modal_placeholders or []
@@ -107,8 +113,8 @@ class Request:
         # Read-only views
         # Prevent directly appending to these lists since
         # they should also be updated simultaneously.
-        self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
+        self.unmasked_token_ids = ConstantList(self._unmasked_token_ids)
 
         # State
         # The number of tokens with prefix cache hits.
@@ -119,7 +125,8 @@ class Request:
         self.num_nans_in_logits = 0
 
     @classmethod
-    def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
+    def from_engine_core_request(cls, request: EngineCoreRequest,
+                                 mask_token_id: int) -> "Request":
         if request.mm_inputs is not None:
             assert isinstance(request.mm_inputs, list)
             assert is_list_of(request.mm_inputs, MultiModalKwargs), (
@@ -129,7 +136,7 @@ class Request:
             request_id=request.request_id,
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
-            mask_token_id=request.mask_token_id,
+            mask_token_id=mask_token_id,
             multi_modal_inputs=request.mm_inputs,
             multi_modal_hashes=request.mm_hashes,
             multi_modal_placeholders=request.mm_placeholders,
@@ -145,16 +152,17 @@ class Request:
             priority=request.priority,
         )
 
-    def append_output_token_ids(
+    def append_unmasked_token_ids(
         self,
-        token_ids: Union[int, list[int]],
+        token_ids: list[tuple[int, int]]
     ) -> None:
-        if isinstance(token_ids, int):
-            self._output_token_ids.append(token_ids)
-            self._all_token_ids.append(token_ids)
-        else:
-            self._output_token_ids.extend(token_ids)
-            self._all_token_ids.extend(token_ids)
+        self.num_denoise_ran += 1
+        self.num_last_unmasked_tokens = len(token_ids)
+        self._unmasked_token_ids.extend(token_ids)
+        for pos, token_id in token_ids:
+            pos -= len(self.prompt_token_ids)
+            self._all_token_ids[pos] = token_id
+            
 
     @property
     def is_output_corrupted(self) -> bool:
@@ -167,10 +175,18 @@ class Request:
     @property
     def num_tokens_with_spec(self) -> int:
         return len(self._all_token_ids) + len(self.spec_token_ids)
-
+    
     @property
-    def num_output_tokens(self) -> int:
-        return len(self._output_token_ids)
+    def num_unmasked_tokens(self) -> int:
+        return len(self._unmasked_token_ids)
+    
+    @property
+    def is_in_execution(self) -> bool:
+        return self._is_in_execution
+    
+    def set_in_execution(self, in_execution: bool) -> None:
+        """Set the execution state of the request."""
+        self._is_in_execution = in_execution
 
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)

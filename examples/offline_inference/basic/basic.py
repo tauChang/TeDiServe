@@ -5,10 +5,21 @@ from vllm import LLM, SamplingParams
 
 # Sample prompts.
 prompts = [
+    "Today is good because",
+    "My favorite color is",
     "Hello, my name is",
-    "The president of the United States is",
-    "The capital of France is",
-    "The future of AI is",
+    # "Hello, my name is",
+    # "Hello, my name is",
+    # "Hello, my name is",
+    # "Hello, my name is",
+    # "Hello, my name is",
+    # "I am a student at the University of Wisconsin-Madison. I",
+    # "Lily can run 20000 kilometers per hour. How many kilometers can she run in 8 hours? Explain your answer.",
+    # "Lily can run 12 kilometers per hour for 4 hours. After that, she runs 6 kilometers per hour. How many kilometers can she run in 8 hours? Explain your answer.",
+    # "The weather today is",
+    # "The president of the United States is",
+    # "The capital of Franc e is",
+    # "The future of AI is",
 ]
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95, min_tokens=10, max_tokens=10)
@@ -20,6 +31,8 @@ def main():
     llm = LLM(
         model="GSAI-ML/LLaDA-8B-Base",
         trust_remote_code=True,
+        # tensor_parallel_size=2
+        # pipeline_parallel_size=3
         )
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects

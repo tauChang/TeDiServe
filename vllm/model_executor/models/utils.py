@@ -702,6 +702,8 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
 
 
 def make_empty_intermediate_tensors_factory(keys: list[str], hidden_size: int):
+    logger.debug(f"Creating empty intermediate tensors factory for keys: {keys} "
+          f"and hidden size: {hidden_size}")
 
     def make_empty_intermediate_tensors(
         batch_size: int,

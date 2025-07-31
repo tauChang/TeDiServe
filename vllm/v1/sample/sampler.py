@@ -4,7 +4,10 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from itertools import accumulate
 
+from vllm.logger import init_logger
 from vllm.utils import is_pin_memory_available
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -14,6 +17,7 @@ from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 
 _SAMPLING_EPS = 1e-5
 
+logger = init_logger(__name__)
 
 class Sampler(nn.Module):
 
@@ -24,7 +28,9 @@ class Sampler(nn.Module):
 
     def forward(
         self,
-        logits: torch.Tensor,
+        is_mask: torch.Tensor, # [tau_chang]: shape [sum of request.num_tokens]
+        logits: torch.Tensor, # [tau_chang]: shape [sum of request.num_tokens, 
+                              # vocab_size]
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
         # NOTE(woosuk): Use the original logits (before any penalties or
@@ -33,45 +39,52 @@ class Sampler(nn.Module):
         # is used for sampling (after penalties and temperature scaling).
         # TODO(rob): provide option for logprobs post sampling.
         # See https://vllm-dev.slack.com/archives/C07UUL8E61Z/p1735907856007919 # noqa: E501
-        num_logprobs = sampling_metadata.max_num_logprobs
-        if num_logprobs is not None:
-            raw_logprobs = self.compute_logprobs(logits)
+
+        # [tau_chang] Ignore for now.
+        # num_logprobs = sampling_metadata.max_num_logprobs
+        # if num_logprobs is not None:
+        #     raw_logprobs = self.compute_logprobs(logits)
+        num_logprobs = None
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
-        # Apply allowed token ids.
-        logits = self.apply_allowed_token_ids(logits, sampling_metadata)
-        # Apply bad words exclusion.
-        logits = self.apply_bad_words(logits, sampling_metadata)
 
-        # Apply logits processors which can impact greedy sampling
-        for processor in (sampling_metadata.logitsprocs.non_argmax_invariant):
-            logits = processor.apply(logits)
+        # [tau_chang] Ignore for now
+        # # Apply allowed token ids.
+        # logits = self.apply_allowed_token_ids(logits, sampling_metadata)
+        # # Apply bad words exclusion.
+        # logits = self.apply_bad_words(logits, sampling_metadata)
 
-        # Apply penalties (e.g., min_tokens, freq_penalties).
-        logits = self.apply_penalties(logits, sampling_metadata)
+        # # Apply logits processors which can impact greedy sampling
+        # for processor in (sampling_metadata.logitsprocs.non_argmax_invariant):
+        #     logits = processor.apply(logits)
+
+        # # Apply penalties (e.g., min_tokens, freq_penalties).
+        # logits = self.apply_penalties(logits, sampling_metadata)
         # Sample the next token.
-        sampled = self.sample(logits, sampling_metadata)
-        # Convert sampled token ids to int64 (long) type to ensure compatibility
-        # with subsequent operations that may use these values as indices.
-        # This conversion is necessary because FlashInfer sampling operations
-        # return int32 (while PyTorch argmax and topk return int64).
-        sampled = sampled.long()
 
-        # Gather the logprobs of the topk and sampled token (if requested).
-        # Get logprobs and rank tensors (if requested)
-        logprobs_tensors = None if num_logprobs is None else \
-            self.gather_logprobs(raw_logprobs, num_logprobs, token_ids=sampled)
+        # sampled = self.sample(logits, sampling_metadata) # [TODO (tau_chang)]: output should be List[List[Tuple[int, int]]]
+        unmasked = self.unmask(is_mask, logits, sampling_metadata)
+        logprobs_tensors = None
 
-        # Use int32 to reduce the tensor size.
-        sampled = sampled.to(torch.int32)
+        # [tau_chang] Ignore for now.
+        # # Convert sampled token ids to int64 (long) type to ensure compatibility
+        # # with subsequent operations that may use these values as indices.
+        # # This conversion is necessary because FlashInfer sampling operations
+        # # return int32 (while PyTorch argmax and topk return int64).
+        # sampled = sampled.long()
+
+        # # Gather the logprobs of the topk and sampled token (if requested).
+        # # Get logprobs and rank tensors (if requested)
+        # logprobs_tensors = None if num_logprobs is None else \
+        #     self.gather_logprobs(raw_logprobs, num_logprobs, token_ids=sampled)
+
+        # # Use int32 to reduce the tensor size.
+        # sampled = sampled.to(torch.int32)
 
         # These are GPU tensors.
         sampler_output = SamplerOutput(
-            # The sampled tokens are expanded to 2D tensor with shape
-            # [num_requests, 1], where each row represents one generated
-            # token per request.
-            sampled_token_ids=sampled.unsqueeze(-1),
+            sampled_token_ids=unmasked,
             logprobs_tensors=logprobs_tensors,
         )
         return sampler_output
@@ -86,6 +99,107 @@ class Sampler(nn.Module):
 
     def greedy_sample(self, logits: torch.Tensor) -> torch.Tensor:
         return logits.argmax(dim=-1).view(-1)
+    
+    def get_output_range(self, sampling_metadata: SamplingMetadata) -> \
+        list[tuple[int, int, int]]:
+        prompt_start = 0
+        ranges = []
+        for i in range(len(sampling_metadata.num_tokens)):
+            prompt_length = sampling_metadata.num_prompt_tokens[i]
+            prompt_and_output_length = sampling_metadata.num_tokens[i]
+            ranges.append(
+                (prompt_start + prompt_length,
+                 prompt_start + prompt_and_output_length,
+                 prompt_length)
+            )
+            prompt_start += prompt_and_output_length
+        return ranges
+
+    
+    def add_noise_to_logits(self, 
+        logits: torch.Tensor, 
+        sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        #[TODO (tau_chang)]: fix this
+        return logits
+
+        noise = torch.rand_like(logits, dtype=torch.float32)
+        # gumbel_noise = (-torch.log(noise)) ** temperature
+        
+    def unmask(
+        self,
+        is_mask: torch.Tensor,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> list[list[tuple[int, int]]]:
+        """Unmask the logits based on the is_mask tensor."""
+        # [tau_chang]: For now, we assume that is_mask is same shape as logits.
+        logger.debug(
+            f"Unmasking logits with shape {logits.shape} and is_mask with shape {is_mask.shape}"
+        )
+        assert logits.shape[0] == is_mask.shape[0]
+
+        # [tau_chang]: Run operations on everything. Maybe optimize to
+        # run operations only on output (not on prompt).
+        
+        logits_with_noise = self.add_noise_to_logits(logits, sampling_metadata)
+        x_0 = torch.argmax(logits_with_noise, dim=-1)
+        logger.debug(f"x_0: {x_0}")
+        p = F.softmax(logits_with_noise, dim=-1)
+        confidence = p.gather(-1, x_0.unsqueeze(-1)).squeeze(-1)
+
+        x_0 = x_0.cpu()
+        
+        unmasked_tokens = []
+        for start, end, prompt_length in self.get_output_range(sampling_metadata):
+            logger.debug(
+                f"Processing range {start}:{end}, prompt_length: {prompt_length}")
+            x_0_slice = x_0[start:end]
+            confidence_slice = confidence[start:end]
+            is_mask_slice = is_mask[start:end]
+
+            logger.debug(f"confidence slice: {confidence_slice}")
+            logger.debug(f"is mask slice: {is_mask_slice}")
+            
+            assert is_mask_slice.any(), f"No masked tokens in range {start}:{end}"
+
+
+            masked_confidences = confidence_slice[is_mask_slice]
+            masked_indices = torch.nonzero(is_mask_slice, as_tuple=False).squeeze(1)
+            logger.debug(
+                f"Masked indices: {masked_indices}, "
+                f"Masked confidences: {masked_confidences}")
+
+            selected_mask = masked_confidences > 0.9
+            selected_indices = masked_indices[selected_mask].cpu()
+
+            # [tau_chang]: Note that selected_indices are relative to the 
+            # output range, not including the prompt.
+            if selected_indices.numel() == 0:
+                top_index = masked_indices[masked_confidences.argmax()]
+                selected_indices = torch.tensor([top_index], dtype=torch.int32)
+                logger.debug(
+                    f"No masked tokens with confidence > 0.9, selecting top token: {selected_indices}")
+            else:
+                logger.debug(
+                    f"Token with confidence > 0.9! Selected indices: {selected_indices}")
+                
+            selected_tokens = x_0_slice[selected_indices]
+            logger.debug(
+                f"Selected tokens: {selected_tokens}, "
+                f"Selected indices: {selected_indices}, "
+            )
+            # [tau_chang]: Convert position back to absolute (including prompt).
+            # append a list of tuples (index, token) to unmasked_tokens
+            unmasked_tokens.append([
+                (index.item() + prompt_length, token.item())
+                for index, token in zip(selected_indices, selected_tokens)
+            ])
+
+            logger.debug(
+                f"Unmasked tokens for range {start}:{end}: {unmasked_tokens}"
+            )
+        
+        return unmasked_tokens
 
     def sample(
         self,
@@ -104,7 +218,6 @@ class Sampler(nn.Module):
         else:
             greedy_sampled = self.greedy_sample(logits)
             if sampling_metadata.all_greedy:
-                print(f"Returning greedy sampled tokens: {greedy_sampled}")
                 return greedy_sampled
 
         assert sampling_metadata.temperature is not None
