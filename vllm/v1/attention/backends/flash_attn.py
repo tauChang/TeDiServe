@@ -449,7 +449,8 @@ class FlashAttentionImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            # logger.debug(f"before reshape_and_cache_flash, shape of key: {key.shape}, key_cache: {key_cache.shape}")
+            logger.debug(f"before reshape_and_cache_flash, shape of key: {key.shape}, key_cache: {key_cache.shape}")
+            logger.debug(f"slot_mapping: {attn_metadata.slot_mapping}")
             # logger.debug(f"before reshape, value is: {value}")
 
             # set slot_mapping to [0, 1, 2, ... len(slot_mapping) - 1]
@@ -467,8 +468,8 @@ class FlashAttentionImpl(AttentionImpl):
                 layer._k_scale,
                 layer._v_scale,
             )
+            logger.debug(f"after reshape_and_cache_flash, shape of key: {key.shape}, key_cache: {key_cache.shape}")
             # logger.debug(f"after reshape, value is: {value_cache}")
-            # logger.debug(f"after reshape_and_cache_flash, shape of key: {key.shape}, key_cache: {key_cache.shape}")
 
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(torch.float8_e4m3fn)

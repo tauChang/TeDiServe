@@ -213,48 +213,48 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
-            while True:
-                new_blocks = self.kv_cache_manager.allocate_slots(
-                    request,
-                    # num_new_tokens,
-                    num_tokens_needed,
-                    num_lookahead_tokens=self.num_lookahead_tokens)
-                if new_blocks is None:
-                    # The request cannot be scheduled.
-                    # Preempt the lowest-priority request.
-                    if self.policy == SchedulingPolicy.PRIORITY:
-                        preempted_req = max(
-                            self.running,
-                            key=lambda r: (r.priority, r.arrival_time),
-                        )
-                        self.running.remove(preempted_req)
-                    else:
-                        preempted_req = self.running.pop()
+            # while True:
+            #     new_blocks = self.kv_cache_manager.allocate_slots(
+            #         request,
+            #         0,
+            #         # num_new_tokens,
+            #         num_lookahead_tokens=self.num_lookahead_tokens)
+            #     logger.debug(f"RUNNING: new_blocks: {new_blocks} with num_tokens_needed: {num_tokens_needed}")
+            #     if new_blocks is None:
+            #         # The request cannot be scheduled.
+            #         # Preempt the lowest-priority request.
+            #         if self.policy == SchedulingPolicy.PRIORITY:
+            #             preempted_req = max(
+            #                 self.running,
+            #                 key=lambda r: (r.priority, r.arrival_time),
+            #             )
+            #             self.running.remove(preempted_req)
+            #         else:
+            #             preempted_req = self.running.pop()
 
-                    self.kv_cache_manager.free(preempted_req)
-                    preempted_req.status = RequestStatus.PREEMPTED
-                    preempted_req.num_computed_tokens = 0
-                    if self.log_stats:
-                        preempted_req.record_event(
-                            EngineCoreEventType.PREEMPTED, scheduled_timestamp)
+            #         self.kv_cache_manager.free(preempted_req)
+            #         preempted_req.status = RequestStatus.PREEMPTED
+            #         preempted_req.num_computed_tokens = 0
+            #         if self.log_stats:
+            #             preempted_req.record_event(
+            #                 EngineCoreEventType.PREEMPTED, scheduled_timestamp)
 
-                    self.waiting.prepend_request(preempted_req)
-                    preempted_reqs.append(preempted_req)
-                    if preempted_req == request:
-                        # No more request to preempt.
-                        can_schedule = False
-                        break
-                else:
-                    # The request can be scheduled.
-                    can_schedule = True
-                    break
-            if not can_schedule:
-                break
-            assert new_blocks is not None
+            #         self.waiting.prepend_request(preempted_req)
+            #         preempted_reqs.append(preempted_req)
+            #         if preempted_req == request:
+            #             # No more request to preempt.
+            #             can_schedule = False
+            #             break
+            #     else:
+            #         # The request can be scheduled.
+            #         can_schedule = True
+            #         break
+            # if not can_schedule:
+            #     break
+            # assert new_blocks is not None
 
             # Schedule the request.
-            req_to_new_block_ids[request.request_id] = (
-                new_blocks.get_block_ids())
+            req_to_new_block_ids[request.request_id] = ()
             scheduled_running_reqs.append(request)
             num_scheduled_tokens[request.request_id] = num_tokens_needed
             token_budget -= num_tokens_needed
@@ -280,6 +280,16 @@ class Scheduler(SchedulerInterface):
                     self.waiting.pop_request()
                     skipped_waiting_requests.prepend_request(request)
                     continue
+
+                new_blocks = self.kv_cache_manager.allocate_slots(
+                    request,
+                    num_tokens_needed,
+                )
+                if new_blocks is None:
+                    # The request cannot be scheduled.
+                    break
+                
+                logger.debug(f"WAITING: new_blocks: {new_blocks} with num_tokens_needed: {num_tokens_needed}")
                     
                 # Request was already popped from self.waiting
                 # unless it was re-added above due to new_blocks being None.

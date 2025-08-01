@@ -118,6 +118,8 @@ class AsyncLLM(EngineClient):
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(self.tokenizer,
+                                                mask_token_id= \
+                                                self.model_config.mask_token_id,
                                                 log_stats=self.log_stats)
 
         # EngineCore (starts the engine in background process).

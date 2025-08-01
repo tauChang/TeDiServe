@@ -530,9 +530,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # Update the persistent batch.
             # self.input_batch.num_computed_tokens_cpu[req_index] = (0) 
-            logger.debug(
-                f"appending new block ids {new_block_ids} for req_index {req_index}")
-            self.input_batch.block_table.append_row(new_block_ids, req_index)
+            if len(new_block_ids) > 0:
+                logger.debug(
+                    f"appending new block ids {new_block_ids} for req_index {req_index}")
+                self.input_batch.block_table.append_row(new_block_ids, req_index)
 
             # For the last rank, we don't need to update the token_ids_cpu
             # because the sampled tokens are already cached.
