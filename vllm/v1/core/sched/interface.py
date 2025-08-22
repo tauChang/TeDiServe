@@ -119,6 +119,14 @@ class SchedulerInterface(ABC):
         """Returns True if there are unfinished requests, or finished requests
         not yet returned in SchedulerOutputs."""
         return self.has_unfinished_requests() or self.has_finished_requests()
+    
+    def has_running_requests(self) -> bool:
+        """Returns True if there are running requests in the scheduler."""
+        num_running_reqs, _ = self.get_request_counts()
+        return num_running_reqs > 0
+    
+    def has_not_in_execution_requests(self) -> bool:
+        raise NotImplementedError
 
     @abstractmethod
     def reset_prefix_cache(self) -> bool:

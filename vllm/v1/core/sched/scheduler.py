@@ -360,7 +360,10 @@ class Scheduler(SchedulerInterface):
         )
 
         self._update_after_schedule(scheduler_output)
-        return scheduler_output
+        logger.debug(f"returning scheduler output: {scheduler_output}")
+        # return scheduler_output
+        # [TODO (tau_chang)]: update this
+        return {0: scheduler_output}
 
     def _update_after_schedule(
         self,
@@ -815,6 +818,7 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
         self.kv_cache_manager.free(request)
         self.kv_cache_manager.free_block_hashes(request)
+        logger.debug("Freed blocks for request %s", request.request_id)
         del self.requests[request.request_id]
 
     def get_num_unfinished_requests(self) -> int:
@@ -822,6 +826,13 @@ class Scheduler(SchedulerInterface):
 
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
+    
+    def has_not_in_execution_requests(self) -> bool:
+        """Returns True if there are requests that are not in execution."""
+        for req in self.requests.values():
+            logger.debug(f"request: {req}, is_in_execution: {req.is_in_execution}")
+        logger.debug(f"in has_not_in_execution_requests, result is {any(not req.is_in_execution for req in self.requests.values())}")
+        return any(not req.is_in_execution for req in self.requests.values())
 
     def reset_prefix_cache(self) -> bool:
         return self.kv_cache_manager.reset_prefix_cache()

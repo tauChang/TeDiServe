@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 from concurrent.futures import Future
 from typing import Optional, Union
 
@@ -40,6 +41,26 @@ class FutureWrapper(Future):
         return self.aggregator.aggregate(outputs, output_rank=0)
 
 
+class AsyncFutureWrapper(Future):
+    """A wrapper around Ray output reference to meet the interface
+    of .execute_model(): The top level (core busy loop) expects .result() api 
+    to block and return a single output.
+    
+    If aggregator is provided, the outputs from all workers are aggregated upon 
+    the result() call. If not only the first worker's output is returned.
+    """
+
+    def __init__(self, refs, aggregator: Optional[KVOutputAggregator] = None):
+        super().__init__()
+        self.refs = refs
+        self.aggregator = aggregator
+
+    async def result(self):
+        if self.aggregator is None:
+            return await self.refs[0]
+
+        outputs = await asyncio.gather(*self.refs)
+        return self.aggregator.aggregate(outputs, output_rank=0)
 class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
     """Ray distributed executor using Ray Compiled Graphs."""
 
@@ -96,6 +117,66 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
 
         # Return a future that will aggregate outputs from all workers
         return FutureWrapper(refs, self.kv_output_aggregator)
+
+    async def execute_model_async(
+        self,
+        scheduler_output,
+    ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
+        """Execute the model on the Ray workers.
+
+        Args:
+            scheduler_output: The scheduler output to execute.
+
+        Returns:
+            The model runner output.
+        """
+        logger.debug(f"inside execute_model_async, scheduler_output: {scheduler_output}")
+        # Build the compiled DAG for the first time.
+        if self.forward_dag is None:  # type: ignore
+            self.forward_dag = self._compiled_ray_dag(enable_asyncio=True)
+
+        # refs = await self.forward_dag.execute_async(scheduler_output)  # type: ignore
+        refs = await self.forward_dag.execute_async(scheduler_output)
+        logger.debug(f"execute_model_async, refs after await once: {refs}")
+        refs = await refs[0]
+        logger.debug(f"execute_model_async, refs after await twice: {refs}")
+        # logger.debug(f"execute_model_async, futures: {futures}")
+        # refs = futures
+        # if isinstance(futures, list):
+        #     refs = await asyncio.gather(*futures)
+        # else:
+        #     refs = futures
+
+        # futures = await self.forward_dag.execute_async(scheduler_output)
+        # logger.debug(f"execute_model_async, futures: {futures}")
+        # refs = futures
+        # if isinstance(futures, list):
+        #     refs = await asyncio.gather(*futures)
+        # else:
+        #     refs = futures
+        # logger.debug(f"execute_model_async, refs: {refs}")
+
+        return refs
+
+        if not self.has_connector:
+            # Get output only from a single worker (output_rank)
+            # When PP is not used, we block here until the result is available.
+            if self.max_concurrent_batches == 1:
+                return refs[0].get()
+
+            # When PP is used, we return a FutureWrapper immediately so that
+            # the scheduler can yield to the next batch.
+            return AsyncFutureWrapper(refs)
+
+       # Get output from all workers when connector is present
+        if self.max_concurrent_batches == 1:
+            # Block and get results from all workers
+            outputs = [ref.get() for ref in refs]
+            return self.kv_output_aggregator.aggregate(outputs)
+
+        # Return a future that will aggregate outputs from all workers
+        return AsyncFutureWrapper(refs, self.kv_output_aggregator)
+
 
     def reinitialize_distributed(
             self, reconfig_request: ReconfigureDistributedRequest) -> None:

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import os
 import queue
 import signal
@@ -74,21 +75,32 @@ class EngineCore:
         self.log_stats = log_stats
 
         # Setup Model.
-        self.model_executor = executor_class(vllm_config)
+        # [TODO (tau_chang)] This
+        model_executor_count = 1
+        self.model_executors = [
+            executor_class(vllm_config) for _ in range(model_executor_count)
+        ]
         if executor_fail_callback is not None:
-            self.model_executor.register_failure_callback(
-                executor_fail_callback)
+            for model_executor in self.model_executors:
+                model_executor.register_failure_callback(
+                    executor_fail_callback)
+        # self.model_executor = executor_class(vllm_config)
+        # if executor_fail_callback is not None:
+        #     self.model_executor.register_failure_callback(
+        #         executor_fail_callback)
 
         self.available_gpu_memory_for_kv_cache = -1
 
         # Setup KV Caches and update CacheConfig after profiling.
-        num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
-            self._initialize_kv_caches(vllm_config)
+        for executor_id, model_executor in enumerate(self.model_executors):
+            num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
+                self._initialize_kv_caches(executor_id, vllm_config)
 
-        vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
-        vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
-        self.collective_rpc("initialize_cache",
-                            args=(num_gpu_blocks, num_cpu_blocks))
+            # [TODO (tau_chang)]: Fix
+            vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
+            vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
+            self.collective_rpc(executor_id, "initialize_cache",
+                                args=(num_gpu_blocks, num_cpu_blocks))
 
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
@@ -117,6 +129,8 @@ class EngineCore:
             > 1,
             log_stats=self.log_stats,
         )
+        self.scheduler_outputs: dict[int, SchedulerOutput] = \
+            {i: None for i in range(model_executor_count)}
 
         # Setup MM Input Mapper.
         self.mm_input_cache_server = MirroredProcessingCache(
@@ -126,7 +140,9 @@ class EngineCore:
         # Batch queue for scheduled batches. This enables us to asynchronously
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
-        self.batch_queue_size = self.model_executor.max_concurrent_batches
+        
+        # [TODO (tau_chang)]: for now
+        self.batch_queue_size = self.model_executors[0].max_concurrent_batches
         self.batch_queue: Optional[queue.Queue[tuple[Future[ModelRunnerOutput],
                                                      SchedulerOutput]]] = None
         if self.batch_queue_size > 1:
@@ -135,11 +151,13 @@ class EngineCore:
             self.batch_queue = queue.Queue(self.batch_queue_size)
 
     def _initialize_kv_caches(
-            self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
+            self, executor_id, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
         start = time.time()
+        
+        model_executor = self.model_executors[executor_id]
 
         # Get all kv cache needed by the model
-        kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        kv_cache_specs = model_executor.get_kv_cache_specs()
 
         has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
         if has_kv_cache:
@@ -155,7 +173,7 @@ class EngineCore:
                 # Profiles the peak memory usage of the model to determine how
                 # much memory can be allocated for kv cache.
                 available_gpu_memory = (
-                    self.model_executor.determine_available_memory())
+                    model_executor.determine_available_memory())
                 self.available_gpu_memory_for_kv_cache = \
                     available_gpu_memory[0]
         else:
@@ -187,7 +205,7 @@ class EngineCore:
         scheduler_kv_cache_config = kv_cache_configs[0]
 
         # Initialize kv cache and warmup the execution
-        self.model_executor.initialize_from_config(kv_cache_configs)
+        model_executor.initialize_from_config(kv_cache_configs)
 
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
@@ -196,28 +214,28 @@ class EngineCore:
 
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
-        if pooling_params := request.pooling_params:
-            supported_pooling_tasks = (
-                self.model_executor.supported_pooling_tasks)
-            if pooling_params.task not in supported_pooling_tasks:
-                raise ValueError(f"Unsupported task: {pooling_params.task!r} "
-                                 f"Supported tasks: {supported_pooling_tasks}")
+        # if pooling_params := request.pooling_params:
+        #     supported_pooling_tasks = (
+        #         self.model_executor.supported_pooling_tasks)
+        #     if pooling_params.task not in supported_pooling_tasks:
+        #         raise ValueError(f"Unsupported task: {pooling_params.task!r} "
+        #                          f"Supported tasks: {supported_pooling_tasks}")
 
-        if request.mm_hashes is not None:
-            # Here, if hash exists for a multimodal input, then it will be
-            # fetched from the cache, else it will be added to the cache.
-            # Note that the cache here is mirrored with the client cache, so
-            # anything that has a hash must have a HIT cache entry here
-            # as well.
-            assert request.mm_inputs is not None
-            request.mm_inputs = self.mm_input_cache_server.get_and_update_p1(
-                request.mm_inputs, request.mm_hashes)
+        # if request.mm_hashes is not None:
+        #     # Here, if hash exists for a multimodal input, then it will be
+        #     # fetched from the cache, else it will be added to the cache.
+        #     # Note that the cache here is mirrored with the client cache, so
+        #     # anything that has a hash must have a HIT cache entry here
+        #     # as well.
+        #     assert request.mm_inputs is not None
+        #     request.mm_inputs = self.mm_input_cache_server.get_and_update_p1(
+        #         request.mm_inputs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request, mask_token_id=
                                     self.vllm_config.model_config.mask_token_id)
-        if req.use_structured_output:
-            # Start grammar compilation asynchronously
-            self.structured_output_manager.grammar_init(req)
+        # if req.use_structured_output:
+        #     # Start grammar compilation asynchronously
+        #     self.structured_output_manager.grammar_init(req)
 
         if req.kv_transfer_params is not None and (
                 not self.scheduler.get_kv_connector()):
@@ -235,9 +253,14 @@ class EngineCore:
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
-    def execute_model(self, scheduler_output: SchedulerOutput):
+    async def execute_model(self, executor_id, scheduler_output: SchedulerOutput):
         try:
-            return self.model_executor.execute_model(scheduler_output)
+            logger.debug(f"Executing model for executor {executor_id}")
+            print(f"Executing model for executor {executor_id} ", flush=True)
+            model_output = await self.model_executors[executor_id].\
+                execute_model_async(scheduler_output)  # type: ignore
+            logger.debug(f"Model output for executor {executor_id}: {model_output}")
+            self.executor_output_queue.put_nowait((executor_id, model_output))
         except Exception as err:
             # We do not want to catch BaseException here since we're only
             # interested in dumping info when the exception is due to an
@@ -247,6 +270,19 @@ class EngineCore:
             dump_engine_exception(self.vllm_config, scheduler_output,
                                   self.scheduler.make_stats())
             raise err
+
+    # def execute_model(self, scheduler_output: SchedulerOutput):
+    #     try:
+    #         return self.model_executor.execute_model(scheduler_output)
+    #     except Exception as err:
+    #         # We do not want to catch BaseException here since we're only
+    #         # interested in dumping info when the exception is due to an
+    #         # error from execute_model itself.
+
+    #         # NOTE: This method is exception-free
+    #         dump_engine_exception(self.vllm_config, scheduler_output,
+    #                               self.scheduler.make_stats())
+    #         raise err
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
@@ -324,13 +360,18 @@ class EngineCore:
 
     def shutdown(self):
         self.structured_output_manager.clear_backend()
-        if self.model_executor:
-            self.model_executor.shutdown()
+        for model_executor in self.model_executors:
+            model_executor.shutdown()
+        # if self.model_executor:
+        #     self.model_executor.shutdown()
         if self.scheduler:
             self.scheduler.shutdown()
 
     def profile(self, is_start: bool = True):
-        self.model_executor.profile(is_start)
+        for model_executor in self.model_executors:
+            if model_executor.profile:
+                model_executor.profile(is_start)
+        # self.model_executor.profile(is_start)
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
@@ -345,53 +386,62 @@ class EngineCore:
         self.scheduler.reset_prefix_cache()
 
     def sleep(self, level: int = 1):
-        self.model_executor.sleep(level)
+        for model_executor in self.model_executors:
+            model_executor.sleep(level)
+        # self.model_executor.sleep(level)
 
     def wake_up(self, tags: Optional[list[str]] = None):
-        self.model_executor.wake_up(tags)
+        for model_executor in self.model_executors:
+            model_executor.wake_up(tags)
+        # self.model_executor.wake_up(tags)
 
     def is_sleeping(self) -> bool:
-        return self.model_executor.is_sleeping
+        for model_executor in self.model_executors:
+            if not model_executor.is_sleeping():
+                return False
+        return True
+        # return self.model_executor.is_sleeping
 
-    def execute_dummy_batch(self):
-        self.model_executor.collective_rpc("execute_dummy_batch")
+    # def execute_dummy_batch(self):
+    #     self.model_executor.collective_rpc("execute_dummy_batch")
 
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.model_executor.add_lora(lora_request)
+    # def add_lora(self, lora_request: LoRARequest) -> bool:
+    #     return self.model_executor.add_lora(lora_request)
 
-    def remove_lora(self, lora_id: int) -> bool:
-        return self.model_executor.remove_lora(lora_id)
+    # def remove_lora(self, lora_id: int) -> bool:
+    #     return self.model_executor.remove_lora(lora_id)
 
-    def list_loras(self) -> set[int]:
-        return self.model_executor.list_loras()
+    # def list_loras(self) -> set[int]:
+    #     return self.model_executor.list_loras()
 
-    def pin_lora(self, lora_id: int) -> bool:
-        return self.model_executor.pin_lora(lora_id)
+    # def pin_lora(self, lora_id: int) -> bool:
+    #     return self.model_executor.pin_lora(lora_id)
 
-    def save_sharded_state(
-        self,
-        path: str,
-        pattern: Optional[str] = None,
-        max_size: Optional[int] = None,
-    ) -> None:
-        self.model_executor.save_sharded_state(path=path,
-                                               pattern=pattern,
-                                               max_size=max_size)
+    # def save_sharded_state(
+    #     self,
+    #     path: str,
+    #     pattern: Optional[str] = None,
+    #     max_size: Optional[int] = None,
+    # ) -> None:
+    #     self.model_executor.save_sharded_state(path=path,
+    #                                            pattern=pattern,
+    #                                            max_size=max_size)
 
     def collective_rpc(self,
+                       executor_id: int,
                        method: Union[str, Callable[..., _R]],
                        timeout: Optional[float] = None,
                        args: tuple = (),
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
-        return self.model_executor.collective_rpc(method, timeout, args,
-                                                  kwargs)
+        return self.model_executors[executor_id].collective_rpc(method, timeout, 
+                                                                args, kwargs)
 
-    def save_tensorized_model(
-        self,
-        tensorizer_config,
-    ) -> None:
-        self.model_executor.save_tensorized_model(
-            tensorizer_config=tensorizer_config, )
+    # def save_tensorized_model(
+    #     self,
+    #     tensorizer_config,
+    # ) -> None:
+    #     self.model_executor.save_tensorized_model(
+    #         tensorizer_config=tensorizer_config, )
 
 
 class EngineCoreProc(EngineCore):
@@ -409,9 +459,16 @@ class EngineCoreProc(EngineCore):
         client_handshake_address: Optional[str] = None,
         engine_index: int = 0,
     ):
+        from vllm.v1.executor.ray_distributed_executor import (  # noqa
+                RayDistributedExecutor)
+        assert executor_class == RayDistributedExecutor
+
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
                                               bytes]]()
+        # self.executor_output_queue = queue.Queue[tuple[int, ModelRunnerOutput]]()
+        self.executor_output_queue = asyncio.Queue[tuple[int, ModelRunnerOutput]]()
+
         executor_fail_callback = lambda: self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b''))
 
@@ -457,6 +514,8 @@ class EngineCoreProc(EngineCore):
                   self.engine_index),
             daemon=True)
         self.output_thread.start()
+
+        self.background_tasks = {} # executor_id -> asyncio.Task
 
     @contextmanager
     def _perform_handshakes(
@@ -611,7 +670,7 @@ class EngineCoreProc(EngineCore):
             else:
                 engine_core = EngineCoreProc(*args, **kwargs)
 
-            engine_core.run_busy_loop()
+            asyncio.run(engine_core.run_busy_loop())
 
         except SystemExit:
             logger.debug("EngineCore exiting.")
@@ -630,45 +689,126 @@ class EngineCoreProc(EngineCore):
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
 
-    def run_busy_loop(self):
+    async def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
+        needs_engine_step = False # added_or_aborted | received_non_empty_output
+        while True:
+            needs_engine_step |= self._process_input_queue()
+            # must have request at this point
+            if needs_engine_step:
+                await self._process_engine_step()
+            needs_engine_step = await self._process_executor_output_queue()
 
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
+            await self._process_executor_output_queue()
+
             # 2) Step the engine core and return the outputs.
-            self._process_engine_step()
+            # If a new request has arrived, then there must be some requests
+            # not in execution. So it is stepped.
+            # If no new requests has arrived but there were existing requests,
+            # some model executor must have returned outputs and updated the
+            # scheduler. 
+            # If all the requests who had their outputs returned have finished
+            # and are removed (no idle requests), there is no need to step.
+            # On the other hand, if some of these requests are not yet completed,
+            # they are idle, so we need to step.
+            if self.scheduler.has_not_in_execution_requests():
+                logger.debug("Stepping engine core bcause of not in execution requests.")
+                await self._process_engine_step()
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
 
         waited = False
+        added_or_aborted = False
+        logger.debug(f"engines_running: {self.engines_running}, "
+                     f"has_requests: {self.scheduler.has_requests()}, ")
         while not self.engines_running and not self.scheduler.has_requests():
             if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
                 logger.debug("EngineCore waiting for work.")
                 waited = True
             req = self.input_queue.get()
-            self._handle_client_request(*req)
-
+            logger.debug(f"Handling request: {req}")
+            added_or_aborted |= self._handle_client_request(*req)
         if waited:
             logger.debug("EngineCore loop active.")
 
         # Handle any more client requests.
+        logger.debug("Draining input queue...")
         while not self.input_queue.empty():
             req = self.input_queue.get_nowait()
-            self._handle_client_request(*req)
+            logger.debug(f"Handling request when draining: {req}")
+            added_or_aborted |= self._handle_client_request(*req)
+        
+        return added_or_aborted
+        
+    async def _process_engine_step(self) -> bool:
+        # dict: executor_id -> SchedulerOutput
+        scheduler_outputs = self.scheduler.schedule()
+        logger.debug(f"Scheduler outputs: {scheduler_outputs}")
+        for executor_id, scheduler_output in scheduler_outputs.items():
+            logger.debug(f"Processing scheduler output for executor {executor_id}")
+            self.scheduler_outputs[executor_id] = scheduler_output
+            # self.execute_model()
+            task = asyncio.create_task(
+                self.execute_model(executor_id, scheduler_output))
+            self.background_tasks[executor_id] = task
+        
+        await asyncio.sleep(0)
+            
+    
+    async def _process_executor_output_queue(self):
+        """ Scheduler must have requests when this is called."""
+        # if this is True, extra step() is needed
+        received_non_empty_output = False 
+        logger.debug(f"len background_tasks: {len(self.background_tasks)}")
+        if self.background_tasks:
+            # Block wait for the first executor output to be available.
+            logger.debug("Block waiting for executor output...")
+            executor_id, model_output = await self.executor_output_queue.get()
+            logger.debug(f"Got model output for executor {executor_id}: {model_output}")
+            outputs = self.scheduler.update_from_output(
+                self.scheduler_outputs[executor_id], model_output
+            )
+            logger.debug(f"Scheduler outputs after update: {outputs}")
+            received_non_empty_output |= len(outputs) > 0
+            for output in (outputs.items() if outputs else ()):
+                self.output_queue.put_nowait(output)
 
-    def _process_engine_step(self) -> bool:
-        """Called only when there are unfinished local requests."""
+            self.scheduler_outputs[executor_id] = None
+            del self.background_tasks[executor_id]
+        else:
+            logger.debug("No running requests.")
+        
+        while not self.executor_output_queue.empty():
+            logger.debug("Draining executor output queue...")
+            executor_id, model_output = self.executor_output_queue.get_nowait()
+            outputs = self.scheduler.update_from_output(
+                self.scheduler_outputs[executor_id], model_output
+            )
+            logger.debug(f"Got model output for executor {executor_id}: {model_output}")
+            received_non_empty_output |= len(outputs) > 0
+            for output in (outputs.items() if outputs else ()):
+                self.output_queue.put_nowait(output)
 
-        # Step the engine core.
-        outputs, model_executed = self.step_fn()
-        # Put EngineCoreOutputs into the output queue.
-        for output in (outputs.items() if outputs else ()):
-            self.output_queue.put_nowait(output)
+            self.scheduler_outputs[executor_id] = None
+            del self.background_tasks[executor_id]
+        
+        return received_non_empty_output
+    
+    # def _process_engine_step(self) -> bool:
+    #     """Called only when there are unfinished local requests."""
 
-        return model_executed
+    #     # Step the engine core.
+    #     outputs, model_executed = self.step_fn()
+    #     # Put EngineCoreOutputs into the output queue.
+    #     for output in (outputs.items() if outputs else ()):
+    #         self.output_queue.put_nowait(output)
+
+    #     return model_executed
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:
@@ -676,8 +816,10 @@ class EngineCoreProc(EngineCore):
 
         if request_type == EngineCoreRequestType.ADD:
             self.add_request(request)
+            return True
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
+            return True
         elif request_type == EngineCoreRequestType.UTILITY:
             client_idx, call_id, method_name, args = request
             output = UtilityOutput(call_id)
@@ -691,11 +833,13 @@ class EngineCoreProc(EngineCore):
                                           f" failed: {str(e)}")
             self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=output)))
+            return False
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
         else:
             logger.error("Unrecognized input request type encountered: %s",
                          request_type)
+            return False
 
     @staticmethod
     def _convert_msgspec_args(method, args):
