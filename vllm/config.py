@@ -2191,6 +2191,44 @@ class ParallelConfig:
 
         return self
 
+@config
+@dataclass
+class ClusterConfig:
+    """Configuration for the cluster."""
+
+    num_gpus_per_model_executor: Union[str] = "1"
+    """Number of GPUs to use per model executor. Parsed to int or dict, and 
+    eventually parsed as dict of {model_executor_index: num_gpus}."""
+    
+    placement_group: Optional["PlacementGroup"] = None
+    """ray distributed model workers placement group."""
+
+    model_executor_to_bundles: Optional[dict[int, list[int]]] = None 
+    """Mapping from model executor index to the list of bundles it is
+    assigned to. """
+
+    def __post_init__(self) -> None:
+        if "," in self.num_gpus_per_model_executor:
+            num_gpu_list = [v for v in self.num_gpus_per_model_executor.\
+                                split(",") if v.strip()]
+            self.num_gpus_per_model_executor = {
+                i: int(v) for i, v in enumerate(num_gpu_list)
+            }
+        else:
+            self.num_gpus_per_model_executor = int(
+                self.num_gpus_per_model_executor)
+    
+    def update_num_gpus_per_model_executor(self, num_gpus_in_cluster: int):
+        assert isinstance(self.num_gpus_per_model_executor, int)
+        
+        num_executors = num_gpus_in_cluster // self.num_gpus_per_model_executor
+        logger.debug(f"num_executors={num_executors}")
+        self.num_gpus_per_model_executor = {
+            i: self.num_gpus_per_model_executor 
+            for i in range(num_executors)
+        }
+        
+
 
 PreemptionMode = Literal["swap", "recompute"]
 SchedulerPolicy = Literal["fcfs", "priority"]
@@ -4369,6 +4407,8 @@ class VllmConfig:
     """Cache configuration."""
     parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
     """Parallel configuration."""
+    cluster_config: ClusterConfig = field(default_factory=ClusterConfig)
+    """Cluster configuration."""
     scheduler_config: SchedulerConfig = field(default_factory=SchedulerConfig)
     """Scheduler configuration."""
     device_config: DeviceConfig = field(default_factory=DeviceConfig)

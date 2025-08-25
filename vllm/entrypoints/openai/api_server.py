@@ -153,7 +153,9 @@ async def build_async_engine_client(
 
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
+    logger.info("args: {args}")
     engine_args = AsyncEngineArgs.from_cli_args(args)
+    logger.info(f"engine_args: {engine_args}")
 
     async with build_async_engine_client_from_engine_args(
             engine_args, args.disable_frontend_multiprocessing,
@@ -178,6 +180,7 @@ async def build_async_engine_client_from_engine_args(
     # Create the EngineConfig (determines if we can use V1).
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    logger.info("Using vLLM config: %s", vllm_config)
 
     # V1 AsyncLLM.
     if envs.VLLM_USE_V1:

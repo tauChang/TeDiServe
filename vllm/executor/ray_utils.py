@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 import msgspec
 
 import vllm.platforms
-from vllm.config import ParallelConfig
+from vllm.config import ClusterConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -162,7 +162,7 @@ def assert_ray_available():
 
 
 def _verify_bundles(placement_group: "PlacementGroup",
-                    parallel_config: ParallelConfig, device_str: str):
+                    cluster_config: ClusterConfig, device_str: str):
     """Verify a given placement group has bundles located in the right place.
 
     There are 2 rules.
@@ -193,18 +193,20 @@ def _verify_bundles(placement_group: "PlacementGroup",
             "GPUs in a node `{driver_node_id}` before starting an vLLM engine."
         )
 
-    for node_id, bundles in node_id_to_bundle.items():
-        if len(bundles) < parallel_config.tensor_parallel_size:
-            logger.warning(
-                "tensor_parallel_size=%d "
-                "is bigger than a reserved number of %ss (%d "
-                "%ss) in a node %s. Tensor parallel workers can be "
-                "spread out to 2+ nodes which can degrade the performance "
-                "unless you have fast interconnect across nodes, like "
-                "Infiniband. To resolve this issue, make sure you have more "
-                "than %d GPUs available at each node.",
-                parallel_config.tensor_parallel_size, device_str, len(bundles),
-                device_str, node_id, parallel_config.tensor_parallel_size)
+    # [TODO (tau_chang)]: verify each model executor can be fit on a single node.
+    # and cluster-wise demand is satisfied
+    # for node_id, bundles in node_id_to_bundle.items():
+    #     if len(bundles) < parallel_config.tensor_parallel_size:
+    #         logger.warning(
+    #             "tensor_parallel_size=%d "
+    #             "is bigger than a reserved number of %ss (%d "
+    #             "%ss) in a node %s. Tensor parallel workers can be "
+    #             "spread out to 2+ nodes which can degrade the performance "
+    #             "unless you have fast interconnect across nodes, like "
+    #             "Infiniband. To resolve this issue, make sure you have more "
+    #             "than %d GPUs available at each node.",
+    #             parallel_config.tensor_parallel_size, device_str, len(bundles),
+    #             device_str, node_id, parallel_config.tensor_parallel_size)
 
 
 def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
@@ -266,7 +268,7 @@ def _wait_until_pg_removed(current_placement_group: "PlacementGroup"):
 
 
 def initialize_ray_cluster(
-    parallel_config: ParallelConfig,
+    cluster_config: ClusterConfig,
     ray_address: Optional[str] = None,
 ):
     """Initialize the distributed cluster with Ray.
@@ -276,7 +278,7 @@ def initialize_ray_cluster(
     for each distributed worker.
 
     Args:
-        parallel_config: The configurations for parallel execution.
+        cluster_config: The configurations for the cluster.
         ray_address: The address of the Ray cluster. If None, uses
             the default Ray cluster address.
     """
@@ -285,15 +287,15 @@ def initialize_ray_cluster(
 
     if ray.is_initialized():
         logger.info("Ray is already initialized. Skipping Ray initialization.")
-    elif current_platform.is_rocm() or current_platform.is_xpu():
-        # Try to connect existing ray instance and create a new one if not found
-        try:
-            ray.init("auto")
-        except ConnectionError:
-            logger.warning(
-                "No existing RAY instance detected. "
-                "A new instance will be launched with current node resources.")
-            ray.init(address=ray_address, num_gpus=parallel_config.world_size)
+    # elif current_platform.is_rocm() or current_platform.is_xpu():
+    #     # Try to connect existing ray instance and create a new one if not found
+    #     try:
+    #         ray.init("auto")
+    #     except ConnectionError:
+    #         logger.warning(
+    #             "No existing RAY instance detected. "
+    #             "A new instance will be launched with current node resources.")
+    #         ray.init(address=ray_address, num_gpus=parallel_config.world_size)
     else:
         ray.init(address=ray_address)
 
@@ -303,9 +305,16 @@ def initialize_ray_cluster(
             f"current platform {current_platform.device_name} does not "
             "support ray.")
 
+    if isinstance(cluster_config.num_gpus_per_model_executor,
+                    dict):
+        device_required = sum(
+            cluster_config.num_gpus_per_model_executor.values())
+    else:
+        device_required = None
+
     # Create or get the placement group for worker processes
-    if parallel_config.placement_group:
-        current_placement_group = parallel_config.placement_group
+    if cluster_config.placement_group:
+        current_placement_group = cluster_config.placement_group
     else:
         current_placement_group = ray.util.get_current_placement_group()
 
@@ -324,28 +333,38 @@ def initialize_ray_cluster(
                     f"{device_str}.")
             if bundle_devices:
                 device_bundles += 1
-        if parallel_config.world_size > device_bundles:
+                
+        if device_required is not None and device_required > device_bundles:
             raise ValueError(
                 f"The number of required {device_str}s exceeds the total "
                 f"number of available {device_str}s in the placement group. "
-                f"Required number of devices: {parallel_config.world_size}. "
+                f"Required number of devices: {cluster_config.world_size}. "
                 f"Total number of devices: {device_bundles}.")
     else:
         logger.info("No current placement group found. "
                     "Creating a new placement group.")
+        logger.info("Current cluster resources: %s", ray.cluster_resources())
         num_devices_in_cluster = ray.cluster_resources().get(device_str, 0)
+        logger.info(f"num_devices_in_cluster={num_devices_in_cluster}, ")
+        num_devices_in_cluster = int(num_devices_in_cluster)
         # Log a warning message and delay resource allocation failure response.
         # Avoid immediate rejection to allow user-initiated placement group
         # created and wait cluster to be ready
-        if parallel_config.world_size > num_devices_in_cluster:
-            logger.warning(
-                "The number of required %ss exceeds the total "
-                "number of available %ss in the placement group.", device_str,
-                device_str)
+        if device_required is not None and \
+           device_required > num_devices_in_cluster:
+            raise ValueError(
+                f"The number of required {device_str}s exceeds the total "
+                f"number of available {device_str}s in the placement group. "
+                f"Required number of devices: {cluster_config.world_size}. "
+                f"Total number of devices: {device_bundles}.")
+            # logger.warning(
+            #     "The number of required %ss exceeds the total "
+            #     "number of available %ss in the placement group.", device_str,
+            #     device_str)
         # Create a new placement group
         placement_group_specs: List[Dict[str, float]] = ([{
             device_str: 1.0
-        } for _ in range(parallel_config.world_size)])
+        } for _ in range(num_devices_in_cluster)])
 
         # vLLM engine is also a worker to execute model with an accelerator,
         # so it requires to have the device in a current node. Check if
@@ -369,9 +388,9 @@ def initialize_ray_cluster(
         _wait_until_pg_ready(current_placement_group)
 
     assert current_placement_group is not None
-    _verify_bundles(current_placement_group, parallel_config, device_str)
-    # Set the placement group in the parallel config
-    parallel_config.placement_group = current_placement_group
+    _verify_bundles(current_placement_group, cluster_config, device_str)
+    # Set the placement group in the cluster config
+    cluster_config.placement_group = current_placement_group
 
 
 def get_num_tpu_nodes() -> int:
@@ -397,3 +416,12 @@ def get_num_nodes_in_placement_group() -> int:
         num_nodes = len(nodes_in_pg)
 
     return num_nodes
+
+def get_num_devices_in_cluster(device_str: str) -> int:
+    """Get the number of devices in the cluster."""
+    assert ray_is_available(), "Ray is not available."
+    cluster_resources = ray.cluster_resources()
+    num_devices = cluster_resources.get(device_str, 0)
+    if num_devices == 0:
+        raise ValueError(f"No {device_str} found in the cluster.")
+    return int(num_devices)

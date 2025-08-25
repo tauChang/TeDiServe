@@ -21,9 +21,11 @@ import zmq
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.executor.multiproc_worker_utils import _add_prefix
+from vllm.executor.ray_utils import initialize_ray_cluster, get_num_devices_in_cluster
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import make_zmq_socket, resolve_obj_by_qualname
@@ -43,6 +45,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.resource_manager.resource_manager import ResourceManager
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.version import __version__ as VLLM_VERSION
@@ -74,12 +77,43 @@ class EngineCore:
 
         self.log_stats = log_stats
 
+        # Initialize Ray
+        initialize_ray_cluster(vllm_config.cluster_config)
+        
+        if isinstance(vllm_config.cluster_config.num_gpus_per_model_executor, 
+                      int):
+            # create num_gpus_in_cluster // num_gpus_per_model_executor model
+            # executors, each with num_gpus_per_model_executor GPUs.
+            num_gpus_in_cluster = get_num_devices_in_cluster(
+                current_platform.ray_device_key)
+            vllm_config.cluster_config.update_num_gpus_per_model_executor(
+                num_gpus_in_cluster)
+
+        logger.debug("Number of GPUs per model executor: %s",
+                     vllm_config.cluster_config.num_gpus_per_model_executor)
+        
+        self.resource_manager = ResourceManager(vllm_config)
+        self.resource_manager.reconfig()
+            
+        # self.model_executors = [
+        #     executor_class(vllm_config, id=i) for i in range(
+        #         len(vllm_config.cluster_config.num_gpus_per_model_executor))
+        # ]
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor() as pool:
+            futures = [
+                pool.submit(executor_class, vllm_config, i)
+                for i in range(len(vllm_config.cluster_config.num_gpus_per_model_executor))
+            ]
+            self.model_executors = [f.result() for f in futures]
+            
         # Setup Model.
         # [TODO (tau_chang)] This
-        model_executor_count = 1
-        self.model_executors = [
-            executor_class(vllm_config) for _ in range(model_executor_count)
-        ]
+        # model_executor_count = 1
+        # self.model_executors = [
+        #     executor_class(vllm_config) for _ in range(model_executor_count)
+        # ]
         if executor_fail_callback is not None:
             for model_executor in self.model_executors:
                 model_executor.register_failure_callback(
@@ -130,7 +164,7 @@ class EngineCore:
             log_stats=self.log_stats,
         )
         self.scheduler_outputs: dict[int, SchedulerOutput] = \
-            {i: None for i in range(model_executor_count)}
+            {i: None for i in range(len(self.model_executors))}
 
         # Setup MM Input Mapper.
         self.mm_input_cache_server = MirroredProcessingCache(

@@ -40,13 +40,16 @@ class ExecutorBase(ABC):
     def __init__(
         self,
         vllm_config: VllmConfig,
+        id: int = 0
     ) -> None:
+        self.id = id
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
         self.load_config = vllm_config.load_config
         self.parallel_config = vllm_config.parallel_config
+        self.cluster_config = vllm_config.cluster_config
         self.scheduler_config = vllm_config.scheduler_config
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config

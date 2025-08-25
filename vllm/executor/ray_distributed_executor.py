@@ -61,6 +61,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
     uses_ray: bool = True
 
     def _init_executor(self) -> None:
+        logger.debug(f"init executor {self.id}")
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
         if envs.VLLM_USE_V1:
             # V1 uses SPMD worker and compiled DAG
@@ -92,8 +93,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 "VLLM_USE_RAY_COMPILED_DAG=1")
 
         assert self.uses_ray
-        initialize_ray_cluster(self.parallel_config)
-        placement_group = self.parallel_config.placement_group
+        # initialize_ray_cluster(self.parallel_config)
+        placement_group = self.cluster_config.placement_group
+        logger.info(f"Using placement group: {placement_group.bundle_specs}")
 
         # Disable Ray usage stats collection.
         ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
@@ -146,7 +148,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
-        num_gpus = envs.VLLM_RAY_PER_WORKER_GPUS
+        # num_gpus = envs.VLLM_RAY_PER_WORKER_GPUS
+        num_gpus = self.vllm_config.cluster_config.\
+            num_gpus_per_model_executor[self.id]
 
         # The driver dummy worker does not actually use any resources.
         # It holds the resource for the driver worker.
@@ -166,25 +170,29 @@ class RayDistributedExecutor(DistributedExecutorBase):
         logger.info("use_ray_spmd_worker: %s", self.use_ray_spmd_worker)
 
         # Create the workers.
-        bundle_indices: List[int]
-        if envs.VLLM_RAY_BUNDLE_INDICES:
-            # Use the bundle indices specified by the user.
-            bundle_indices = list(
-                map(int, envs.VLLM_RAY_BUNDLE_INDICES.split(",")))
-            assert len(bundle_indices) == self.parallel_config.world_size, \
-            ("VLLM_RAY_BUNDLE_INDICES must have the same size"
-            f" as the world size, but got {bundle_indices=} "
-            f"and {self.parallel_config.world_size=}")
-            assert len(set(bundle_indices)) == len(bundle_indices), \
-            ("VLLM_RAY_BUNDLE_INDICES cannot have duplicate values,"
-            f" but got {bundle_indices=}")
-        else:
-            # use the first N bundles that have GPU resources.
-            bundle_indices = []
-            for bundle_id, bundle in enumerate(placement_group.bundle_specs):
-                if bundle.get(current_platform.ray_device_key, 0):
-                    bundle_indices.append(bundle_id)
-            bundle_indices = bundle_indices[:self.parallel_config.world_size]
+        # bundle_indices: List[int]
+        # if envs.VLLM_RAY_BUNDLE_INDICES:
+        #     # Use the bundle indices specified by the user.
+        #     bundle_indices = list(
+        #         map(int, envs.VLLM_RAY_BUNDLE_INDICES.split(",")))
+        #     assert len(bundle_indices) == self.parallel_config.world_size, \
+        #     ("VLLM_RAY_BUNDLE_INDICES must have the same size"
+        #     f" as the world size, but got {bundle_indices=} "
+        #     f"and {self.parallel_config.world_size=}")
+        #     assert len(set(bundle_indices)) == len(bundle_indices), \
+        #     ("VLLM_RAY_BUNDLE_INDICES cannot have duplicate values,"
+        #     f" but got {bundle_indices=}")
+        # else:
+        #     # use the first N bundles that have GPU resources.
+        #     bundle_indices = []
+        #     for bundle_id, bundle in enumerate(placement_group.bundle_specs):
+        #         if bundle.get(current_platform.ray_device_key, 0):
+        #             bundle_indices.append(bundle_id)
+
+        #     bundle_indices = bundle_indices[:self.parallel_config.world_size]
+
+        bundle_indices = self.cluster_config.model_executor_to_bundles[self.id]
+        logger.info(f"Executor {self.id} will use bundles: {bundle_indices}")
 
         worker_metadata: List[RayWorkerMetaData] = []
         driver_ip = get_ip()
@@ -194,6 +202,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 placement_group_capture_child_tasks=True,
                 placement_group_bundle_index=bundle_id,
             )
+            logger.debug(
+                "Creating Executor %d Ray worker %d on bundle %d with scheduling strategy: %s"
+                ", ray_remote_kwargs: %s", self.id, rank, bundle_id,
+                scheduling_strategy, ray_remote_kwargs)
 
             if current_platform.ray_device_key == "GPU":
                 # NV+AMD GPUs, and Intel XPUs

@@ -21,7 +21,9 @@ from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypeIs
 
 import vllm.envs as envs
-from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
+from vllm.config import (BlockSize, CacheConfig, CacheDType, 
+                         ClusterConfig,
+                         CompilationConfig,
                          ConfigFormat, ConfigType, DecodingConfig,
                          DetailedTraceModules, Device, DeviceConfig,
                          DistributedExecutorBackend, GuidedDecodingBackend,
@@ -440,6 +442,7 @@ class EngineArgs:
     async_scheduling: bool = SchedulerConfig.async_scheduling
 
     mask_token_id: int = ModelConfig.mask_token_id
+    num_gpus_per_model_executor: Union[str]= ClusterConfig.num_gpus_per_model_executor
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -660,6 +663,17 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-multimodal-encoder-data-parallel",
             **parallel_kwargs["enable_multimodal_encoder_data_parallel"])
+
+        # Cluster arguments
+        cluster_kwargs = get_kwargs(ClusterConfig)
+        cluster_group = parser.add_argument_group(
+            title="ClusterConfig",
+            description=ClusterConfig.__doc__,
+        )
+        cluster_group.add_argument(
+            "--num-gpus-per-model-executor",
+            **cluster_kwargs["num_gpus_per_model_executor"])
+        
 
         # KV cache arguments
         cache_kwargs = get_kwargs(CacheConfig)
@@ -1178,6 +1192,10 @@ class EngineArgs:
             enable_multimodal_encoder_data_parallel,
         )
 
+        cluster_config = ClusterConfig(
+            num_gpus_per_model_executor=self.num_gpus_per_model_executor,
+        )
+
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
@@ -1281,6 +1299,7 @@ class EngineArgs:
             model_config=model_config,
             cache_config=cache_config,
             parallel_config=parallel_config,
+            cluster_config=cluster_config,
             scheduler_config=scheduler_config,
             device_config=device_config,
             lora_config=lora_config,
