@@ -742,9 +742,12 @@ def wait_for_engine_startup(
         elif status == "READY" and engine.state == CoreEngineState.CONNECTED:
             # Setup KV cache config with initialization state from
             # engine core process. Sum values from all engines in DP case.
-            num_gpu_blocks = cache_config.num_gpu_blocks or 0
-            num_gpu_blocks += msg["num_gpu_blocks"]
-            cache_config.num_gpu_blocks = num_gpu_blocks
+
+            # [tau_chang] Note: commenting these out for now since
+            # we want per-executor num_gpu_blocks.
+            # num_gpu_blocks = cache_config.num_gpu_blocks or 0
+            # num_gpu_blocks += msg["num_gpu_blocks"]
+            # cache_config.num_gpu_blocks = num_gpu_blocks
 
             # In external DP LB mode, the coordinator address that the
             # front-end procs connect to is obtained from rank 0 via

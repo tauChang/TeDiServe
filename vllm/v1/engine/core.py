@@ -126,15 +126,20 @@ class EngineCore:
         self.available_gpu_memory_for_kv_cache = -1
 
         # Setup KV Caches and update CacheConfig after profiling.
+        kv_cache_configs = {}
         for executor_id, model_executor in enumerate(self.model_executors):
             num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
                 self._initialize_kv_caches(executor_id, vllm_config)
 
             # [TODO (tau_chang)]: Fix
-            vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
-            vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
+            vllm_config.cache_config.num_gpu_blocks[executor_id] = num_gpu_blocks
+            vllm_config.cache_config.num_cpu_blocks[executor_id] = num_cpu_blocks
+            kv_cache_configs[executor_id] = kv_cache_config
             self.collective_rpc(executor_id, "initialize_cache",
                                 args=(num_gpu_blocks, num_cpu_blocks))
+        
+        logger.debug("Cache config after initialization: %s", 
+                     vllm_config.cache_config)
 
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
@@ -157,7 +162,9 @@ class EngineCore:
 
         self.scheduler: SchedulerInterface = Scheduler(
             vllm_config=vllm_config,
-            kv_cache_config=kv_cache_config,
+            # kv_cache_config=kv_cache_config,
+            kv_cache_configs=kv_cache_configs,
+            # kv_cache_config=kv_cache_configs[0],
             structured_output_manager=self.structured_output_manager,
             include_finished_set=vllm_config.parallel_config.data_parallel_size
             > 1,
@@ -623,7 +630,7 @@ class EngineCoreProc(EngineCore):
             yield addresses
 
             # Send ready message.
-            num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
+            # num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
             # We pass back the coordinator stats update address here for the
             # external LB case for our colocated front-end to use (coordinator
             # only runs with rank 0).
@@ -632,7 +639,7 @@ class EngineCoreProc(EngineCore):
                 msgspec.msgpack.encode({
                     "status": "READY",
                     "local": local_client,
-                    "num_gpu_blocks": num_gpu_blocks,
+                    # "num_gpu_blocks": num_gpu_blocks,
                     "dp_stats_address": dp_stats_address,
                 }))
 
@@ -805,8 +812,11 @@ class EngineCoreProc(EngineCore):
             executor_id, model_output = await self.executor_output_queue.get()
             logger.debug(f"Got model output for executor {executor_id}: {model_output}")
             outputs = self.scheduler.update_from_output(
-                self.scheduler_outputs[executor_id], model_output
+                executor_id, self.scheduler_outputs[executor_id], model_output
             )
+            # outputs = self.scheduler.update_from_output(
+            #     self.scheduler_outputs[executor_id], model_output
+            # )
             logger.debug(f"Scheduler outputs after update: {outputs}")
             received_non_empty_output |= len(outputs) > 0
             for output in (outputs.items() if outputs else ()):
@@ -821,7 +831,7 @@ class EngineCoreProc(EngineCore):
             logger.debug("Draining executor output queue...")
             executor_id, model_output = self.executor_output_queue.get_nowait()
             outputs = self.scheduler.update_from_output(
-                self.scheduler_outputs[executor_id], model_output
+                executor_id, self.scheduler_outputs[executor_id], model_output
             )
             logger.debug(f"Got model output for executor {executor_id}: {model_output}")
             received_non_empty_output |= len(outputs) > 0

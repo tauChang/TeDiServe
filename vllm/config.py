@@ -1669,9 +1669,13 @@ class CacheConfig:
     models to ensure exact alignment with attention page size."""
 
     # Will be set after profiling.
-    num_gpu_blocks: Optional[int] = field(default=None, init=False)
+    # num_gpu_blocks: Optional[int] = field(default=None, init=False)
+    num_gpu_blocks: dict[int, int] = field(default_factory=dict, init=False)
+    # executor id -> num blocks
     """The number of blocks to allocate for GPU memory."""
-    num_cpu_blocks: Optional[int] = field(default=None, init=False)
+    # num_cpu_blocks: Optional[int] = field(default=None, init=False)
+    num_cpu_blocks: dict[int, int] = field(default_factory=dict, init=False)
+    # executor id -> num blocks
     """The number of blocks to allocate for CPU memory."""
 
     def compute_hash(self) -> str:
