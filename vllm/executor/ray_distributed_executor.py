@@ -149,8 +149,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
         # num_gpus = envs.VLLM_RAY_PER_WORKER_GPUS
-        num_gpus = self.vllm_config.cluster_config.\
-            num_gpus_per_model_executor[self.id]
+        # num_gpus = self.vllm_config.cluster_config.\
+        #     num_gpus_per_model_executor[self.id]
 
         # The driver dummy worker does not actually use any resources.
         # It holds the resource for the driver worker.
@@ -195,7 +195,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         logger.info(f"Executor {self.id} will use bundles: {bundle_indices}")
 
         worker_metadata: List[RayWorkerMetaData] = []
-        driver_ip = get_ip()
+        # driver_ip = get_ip()
         for rank, bundle_id in enumerate(bundle_indices):
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=placement_group,
@@ -203,7 +203,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 placement_group_bundle_index=bundle_id,
             )
             logger.debug(
-                "Creating Executor %d Ray worker %d on bundle %d with scheduling strategy: %s"
+                "Creating Executor %d Ray worker %d on bundle %d "
+                "with scheduling strategy: %s"
                 ", ray_remote_kwargs: %s", self.id, rank, bundle_id,
                 scheduling_strategy, ray_remote_kwargs)
 
@@ -211,7 +212,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 # NV+AMD GPUs, and Intel XPUs
                 worker = ray.remote(
                     num_cpus=0,
-                    num_gpus=num_gpus,
+                    num_gpus=1,
                     scheduling_strategy=scheduling_strategy,
                     **ray_remote_kwargs,
                 )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
@@ -220,7 +221,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 worker = ray.remote(
                     num_cpus=0,
                     num_gpus=0,
-                    resources={current_platform.ray_device_key: num_gpus},
+                    resources={current_platform.ray_device_key: 1},
                     scheduling_strategy=scheduling_strategy,
                     **ray_remote_kwargs,
                 )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
@@ -233,63 +234,68 @@ class RayDistributedExecutor(DistributedExecutorBase):
             for each in worker_metadata
         ])
 
+        # assert they are all the same
+        assert len(set(worker_ips)) == 1
+        driver_ip = worker_ips[0]
+
         for each, ip in zip(worker_metadata, worker_ips):
             each.ip = ip
 
-        if not self.use_ray_spmd_worker:
-            for i, each in enumerate(worker_metadata):
-                # find and remove the dummy worker from the list
-                worker = each.worker
-                worker_ip = each.ip
-                if self.driver_dummy_worker is None and worker_ip == driver_ip:
-                    # If the worker is on the same node as the driver, we use it
-                    # as the resource holder for the driver process.
-                    self.driver_dummy_worker = worker
-                    self.driver_worker = RayWorkerWrapper(
-                        vllm_config=self.vllm_config, rpc_rank=0)
-                    worker_metadata.pop(i)
-                    break
+        # if not self.use_ray_spmd_worker:
+        #     for i, each in enumerate(worker_metadata):
+        #         # find and remove the dummy worker from the list
+        #         worker = each.worker
+        #         worker_ip = each.ip
+        #         if self.driver_dummy_worker is None and worker_ip == driver_ip:
+        #             # If the worker is on the same node as the driver, we use it
+        #             # as the resource holder for the driver process.
+        #             self.driver_dummy_worker = worker
+        #             self.driver_worker = RayWorkerWrapper(
+        #                 vllm_config=self.vllm_config, rpc_rank=0)
+        #             worker_metadata.pop(i)
+        #             break
 
-        logger.debug("workers: %s", worker_metadata)
-        logger.debug("driver_dummy_worker: %s", self.driver_dummy_worker)
-        if not self.use_ray_spmd_worker and self.driver_dummy_worker is None:
-            raise ValueError(
-                "Ray does not allocate any GPUs on the driver node."
-                f"Driver IP: {driver_ip}, worker IPs: {worker_ips}."
-                "Consider adjusting the Ray placement group or running "
-                "the driver on a GPU node.")
+        # logger.debug("workers: %s", worker_metadata)
+        # logger.debug("driver_dummy_worker: %s", self.driver_dummy_worker)
+        # if not self.use_ray_spmd_worker and self.driver_dummy_worker is None:
+        #     raise ValueError(
+        #         "Ray does not allocate any GPUs on the driver node."
+        #         f"Driver IP: {driver_ip}, worker IPs: {worker_ips}."
+        #         "Consider adjusting the Ray placement group or running "
+        #         "the driver on a GPU node.")
 
-        ip_counts: Dict[str, int] = {}
-        for ip in worker_ips:
-            ip_counts[ip] = ip_counts.get(ip, 0) + 1
+        # ip_counts: Dict[str, int] = {}
+        # for ip in worker_ips:
+        #     ip_counts[ip] = ip_counts.get(ip, 0) + 1
 
-        def sort_by_driver_then_worker_ip(item: RayWorkerMetaData):
-            """
-            Sort the workers based on 3 properties:
-            1. If the worker is on the same node as the driver (vllm engine),
-                it should be placed first.
-            2. Then, if the worker is on a node with fewer workers, it should
-                be placed first.
-            3. Finally, if the work is on a node with smaller IP address, it
-                should be placed first.
-            """
-            ip = item.ip
-            return (0 if ip == driver_ip else 1, ip_counts[ip], ip)
+        # def sort_by_driver_then_worker_ip(item: RayWorkerMetaData):
+        #     """
+        #     Sort the workers based on 3 properties:
+        #     1. If the worker is on the same node as the driver (vllm engine),
+        #         it should be placed first.
+        #     2. Then, if the worker is on a node with fewer workers, it should
+        #         be placed first.
+        #     3. Finally, if the work is on a node with smaller IP address, it
+        #         should be placed first.
+        #     """
+        #     ip = item.ip
+        #     return (0 if ip == driver_ip else 1, ip_counts[ip], ip)
 
-        # After sorting, the workers on the same node will be
-        # close to each other, and the workers on the driver
-        # node will be placed first.
-        sorted_worker_metadata = sorted(worker_metadata,
-                                        key=sort_by_driver_then_worker_ip)
-        start_rank = 0 if self.use_ray_spmd_worker else 1
-        for i, item in enumerate(sorted_worker_metadata):
-            item.adjusted_rank = i + start_rank
-        self.workers = [item.worker for item in sorted_worker_metadata]
-        rerank_mapping = {
-            item.created_rank: item.adjusted_rank
-            for item in sorted_worker_metadata
-        }
-        self._run_workers("adjust_rank", rerank_mapping)
+        # # After sorting, the workers on the same node will be
+        # # close to each other, and the workers on the driver
+        # # node will be placed first.
+        # sorted_worker_metadata = sorted(worker_metadata,
+        #                                 key=sort_by_driver_then_worker_ip)
+        # start_rank = 0 if self.use_ray_spmd_worker else 1
+        # for i, item in enumerate(sorted_worker_metadata):
+        #     item.adjusted_rank = i + start_rank
+        # self.workers = [item.worker for item in sorted_worker_metadata]
+        self.workers = [item.worker for item in worker_metadata]
+        # rerank_mapping = {
+        #     item.created_rank: item.adjusted_rank
+        #     for item in sorted_worker_metadata
+        # }
+        # self._run_workers("adjust_rank", rerank_mapping)
 
         # Get the set of GPU IDs used on each node.
         worker_node_and_gpu_ids = []
@@ -316,18 +322,18 @@ class RayDistributedExecutor(DistributedExecutorBase):
         for node_id, gpu_ids in node_gpus.items():
             node_gpus[node_id] = sorted(gpu_ids)
 
-        all_ips = set(worker_ips + [driver_ip])
-        n_ips = len(all_ips)
-        n_nodes = len(node_workers)
+        # all_ips = set(worker_ips + [driver_ip])
+        # n_ips = len(all_ips)
+        # n_nodes = len(node_workers)
 
-        if n_nodes != n_ips:
-            raise RuntimeError(
-                f"Every node should have a unique IP address. Got {n_nodes}"
-                f" nodes with node ids {list(node_workers.keys())} and "
-                f"{n_ips} unique IP addresses {all_ips}. Please check your"
-                " network configuration. If you set `VLLM_HOST_IP`"
-                " environment variable, make sure it is unique for"
-                " each node.")
+        # if n_nodes != n_ips:
+        #     raise RuntimeError(
+        #         f"Every node should have a unique IP address. Got {n_nodes}"
+        #         f" nodes with node ids {list(node_workers.keys())} and "
+        #         f"{n_ips} unique IP addresses {all_ips}. Please check your"
+        #         " network configuration. If you set `VLLM_HOST_IP`"
+        #         " environment variable, make sure it is unique for"
+        #         " each node.")
 
         # Set environment variables for the driver and workers.
         all_args_to_update_environment_variables = [{
@@ -354,30 +360,39 @@ class RayDistributedExecutor(DistributedExecutorBase):
         self._run_workers("update_environment_variables",
                           self._get_env_vars_to_be_updated())
 
-        if len(node_gpus) == 1:
-            # in single node case, we don't need to get the IP address.
-            # the loopback address is sufficient
-            # NOTE: a node may have several IP addresses, one for each
-            # network interface. `get_ip()` might return any of them,
-            # while they might not work for communication inside the node
-            # if the network setup is complicated. Using the loopback address
-            # solves this issue, as it always works for communication inside
-            # the node.
-            driver_ip = "127.0.0.1"
+        # if len(node_gpus) == 1:
+        #     # in single node case, we don't need to get the IP address.
+        #     # the loopback address is sufficient
+        #     # NOTE: a node may have several IP addresses, one for each
+        #     # network interface. `get_ip()` might return any of them,
+        #     # while they might not work for communication inside the node
+        #     # if the network setup is complicated. Using the loopback address
+        #     # solves this issue, as it always works for communication inside
+        #     # the node.
+        #     driver_ip = "127.0.0.1"
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())
+            
+        pp_size = 1
+        tp_size = len(self.workers)
+        import copy
+        vllm_config_copy = copy.deepcopy(self.vllm_config)
+        vllm_config_copy.parallel_config.pipeline_parallel_size = pp_size
+        vllm_config_copy.parallel_config.tensor_parallel_size = tp_size
+        vllm_config_copy.parallel_config.world_size = pp_size * tp_size
 
         # Initialize the actual workers inside worker wrapper.
         all_kwargs = []
         for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids):
             local_rank = node_workers[node_id].index(rank)
             kwargs = dict(
-                vllm_config=self.vllm_config,
+                vllm_config=vllm_config_copy,
                 local_rank=local_rank,
                 rank=rank,
                 distributed_init_method=distributed_init_method,
                 is_driver_worker=(not self.parallel_config)
-                or (rank % self.parallel_config.tensor_parallel_size == 0),
+                or (rank % tp_size == 0)
+                # or (rank % self.parallel_config.tensor_parallel_size == 0),
             )
             all_kwargs.append(kwargs)
         self._run_workers("init_worker", all_kwargs)
@@ -387,36 +402,36 @@ class RayDistributedExecutor(DistributedExecutorBase):
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
 
+        pp_size = self.parallel_config.pipeline_parallel_size
+        tp_size = len(self.workers)
         if self.use_ray_spmd_worker:
-            for pp_rank in range(self.parallel_config.pipeline_parallel_size):
+            for pp_rank in range(pp_size):
                 self.pp_tp_workers.append([])
-                for tp_rank in range(
-                        self.parallel_config.tensor_parallel_size):
+                for tp_rank in range(tp_size):
                     # PP=2, TP=4
                     # pp_tp_workers = [[0, 1, 2, 3], [4, 5, 6, 7]]
-                    rank = (pp_rank * self.parallel_config.tensor_parallel_size
-                            ) + tp_rank
+                    rank = (pp_rank * tp_size) + tp_rank
                     assert len(self.pp_tp_workers[pp_rank]) == tp_rank
                     assert pp_rank < len(self.pp_tp_workers)
                     self.pp_tp_workers[pp_rank].append(self.workers[rank])
 
-        # This is the list of workers that are rank 0 of each TP group EXCEPT
-        # global rank 0. These are the workers that will broadcast to the
-        # rest of the workers.
-        self.tp_driver_workers: List[RayWorkerWrapper] = []
-        # This is the list of workers that are not drivers and not the first
-        # worker in a TP group. These are the workers that will be
-        # broadcasted to.
-        self.non_driver_workers: List[RayWorkerWrapper] = []
+        # # This is the list of workers that are rank 0 of each TP group EXCEPT
+        # # global rank 0. These are the workers that will broadcast to the
+        # # rest of the workers.
+        # self.tp_driver_workers: List[RayWorkerWrapper] = []
+        # # This is the list of workers that are not drivers and not the first
+        # # worker in a TP group. These are the workers that will be
+        # # broadcasted to.
+        # self.non_driver_workers: List[RayWorkerWrapper] = []
 
-        # Enforce rank order for correct rank to return final output.
-        for index, worker in enumerate(self.workers):
-            # The driver worker is rank 0 and not in self.workers.
-            rank = index + 1
-            if rank % self.parallel_config.tensor_parallel_size == 0:
-                self.tp_driver_workers.append(worker)
-            else:
-                self.non_driver_workers.append(worker)
+        # # Enforce rank order for correct rank to return final output.
+        # for index, worker in enumerate(self.workers):
+        #     # The driver worker is rank 0 and not in self.workers.
+        #     rank = index + 1
+        #     if rank % self.parallel_config.tensor_parallel_size == 0:
+        #         self.tp_driver_workers.append(worker)
+        #     else:
+        #         self.non_driver_workers.append(worker)
 
     def _driver_execute_model(
         self, execute_model_req: Optional[ExecuteModelRequest]

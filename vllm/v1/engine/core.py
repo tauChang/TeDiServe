@@ -77,8 +77,6 @@ class EngineCore:
 
         self.log_stats = log_stats
 
-        # Initialize Ray
-        initialize_ray_cluster(vllm_config.cluster_config)
         
         if isinstance(vllm_config.cluster_config.num_gpus_per_model_executor, 
                       int):
@@ -93,6 +91,10 @@ class EngineCore:
                      vllm_config.cluster_config.num_gpus_per_model_executor)
         
         self.resource_manager = ResourceManager(vllm_config)
+
+        # Initialize Ray and resource manager
+        initialize_ray_cluster(vllm_config.cluster_config)
+        self.resource_manager.initialize_placement_group()
         self.resource_manager.reconfig()
             
         # self.model_executors = [
