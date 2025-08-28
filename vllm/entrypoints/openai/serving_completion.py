@@ -551,6 +551,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     finish_reason=output.finish_reason,
                     stop_reason=output.stop_reason,
                     prompt_logprobs=final_res.prompt_logprobs,
+                    num_denoise_ran=final_res.num_denoise_ran
                 )
                 choices.append(choice_data)
 

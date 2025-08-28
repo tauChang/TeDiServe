@@ -1422,6 +1422,7 @@ class CompletionResponseChoice(OpenAIBaseModel):
             "including encountering the EOS token"),
     )
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
+    num_denoise_ran: Optional[int] = -1
 
 
 class CompletionResponse(OpenAIBaseModel):

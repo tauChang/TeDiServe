@@ -117,6 +117,7 @@ class EngineCoreOutput(
 
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
+    num_denoise_ran: int = 0
 
     @property
     def finished(self) -> bool:

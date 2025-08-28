@@ -817,6 +817,7 @@ class ClusterScheduler(SchedulerInterface):
                         events=request.take_events(),
                         kv_transfer_params=kv_transfer_params,
                         num_cached_tokens=request.num_cached_tokens,
+                        num_denoise_ran=request.num_denoise_ran,
                     ))
 
             else:
