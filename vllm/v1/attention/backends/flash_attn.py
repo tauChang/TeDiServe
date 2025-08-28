@@ -398,6 +398,41 @@ class FlashAttentionImpl(AttentionImpl):
         attn_metadata: FlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        use_cache: bool = False
+    ) -> torch.Tensor:
+        if use_cache:
+            return self.forward_use_cache(
+                layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output,
+                output_scale,
+            )
+        else:
+            return self.forward_no_cache(
+                layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output,
+                output_scale,
+            )
+
+    def forward_use_cache(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+        output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -550,6 +585,144 @@ class FlashAttentionImpl(AttentionImpl):
             v_descale=layer._v_scale,
         )
         return output
+
+    def forward_no_cache(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+        output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Forward pass with FlashAttention.
+
+        Args:
+            query: shape = [num_tokens, num_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size]
+            kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
+            attn_metadata: Metadata for attention.
+        Returns:
+            shape = [num_tokens, num_heads * head_size]
+        NOTE: FP8 quantization, flash-attn expect the size of
+              {q,k,v}_descale to be (num_sequences, num_kv_heads).
+              We use torch's .expand() to avoid duplicating values
+        """
+        assert output is not None, "Output tensor must be provided."
+
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for FlashAttentionImpl")
+
+        if attn_metadata is None:
+            # Profiling run.
+            return output
+
+        # IMPORTANT!
+        # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
+        # eager-mode PyTorch. Thus, we need to be careful about any CPU overhead
+        # in this method. For example, `view` and `slice` (or `[:n]`) operations
+        # are surprisingly slow even in the case they do not invoke any GPU ops.
+        # Minimize the PyTorch ops in this method as much as possible.
+        # Whenever making a change in this method, please benchmark the
+        # performance to make sure it does not introduce any overhead.
+
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        # logger.debug(f"in flash attention impl, num_actual_tokens: {num_actual_tokens}")
+        # logger.debug(f"attention metadata: {attn_metadata}")
+        # key_cache, value_cache = kv_cache.unbind(0)
+        # logger.debug(f"query shape: {query.shape}, key shape: {key.shape}, "
+        #       f"value shape: {value.shape}, key_cache shape: {key_cache.shape}, "
+        #       f"value_cache shape: {value_cache.shape}")
+        
+        # if self.kv_sharing_target_layer_name is None:
+        #     # Reshape the input keys and values and store them in the cache.
+        #     # Skip this if sharing KV cache with an earlier attention layer.
+        #     # NOTE(woosuk): Here, key and value are padded while slot_mapping is
+        #     # not padded. However, we don't need to do key[:num_actual_tokens]
+        #     # and value[:num_actual_tokens] because the reshape_and_cache_flash
+        #     # op uses the slot_mapping's shape to determine the number of
+        #     # actual tokens.
+        #     logger.debug(f"before reshape_and_cache_flash, shape of key: {key.shape}, key_cache: {key_cache.shape}")
+        #     logger.debug(f"slot_mapping: {attn_metadata.slot_mapping}")
+        #     # logger.debug(f"before reshape, value is: {value}")
+
+        #     # set slot_mapping to [0, 1, 2, ... len(slot_mapping) - 1]
+        #     # attn_metadata.slot_mapping = torch.arange(
+        #     #     attn_metadata.slot_mapping.shape[0],
+        #     #     dtype=attn_metadata.slot_mapping.dtype,
+        #     #     device=attn_metadata.slot_mapping.device)
+        #     reshape_and_cache_flash(
+        #         key,
+        #         value,
+        #         key_cache,
+        #         value_cache,
+        #         attn_metadata.slot_mapping,
+        #         self.kv_cache_dtype,
+        #         layer._k_scale,
+        #         layer._v_scale,
+        #     )
+        #     logger.debug(f"after reshape_and_cache_flash, shape of key: {key.shape}, key_cache: {key_cache.shape}")
+        #     # logger.debug(f"after reshape, value is: {value_cache}")
+
+        if self.kv_cache_dtype.startswith("fp8"):
+            # key_cache = key_cache.view(torch.float8_e4m3fn)
+            # value_cache = value_cache.view(torch.float8_e4m3fn)
+            num_tokens, num_heads, head_size = query.shape
+            query, _ = ops.scaled_fp8_quant(
+                query.reshape(
+                    (num_tokens, num_heads * head_size)).contiguous(),
+                layer._q_scale)
+            query = query.reshape((num_tokens, num_heads, head_size))
+
+        if not attn_metadata.use_cascade:
+            cu_seqlens_q = attn_metadata.query_start_loc
+            cu_seqlens_k = cu_seqlens_q
+            # seqused_k = attn_metadata.seq_lens
+            max_seqlen_q = attn_metadata.max_query_len
+            max_seqlen_k = attn_metadata.max_seq_len
+            # block_table = attn_metadata.block_table
+            scheduler_metadata = attn_metadata.scheduler_metadata
+
+            descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
+            # logger.debug(f"q: {query[:num_actual_tokens]}")
+            # logger.debug(f"key_cache: {key_cache}")
+            # logger.debug(f"value_cache: {value_cache}")
+            # logger.debug(f"cu_seqlens_q: {cu_seqlens_q}")
+            # logger.debug(f"max_seqlen_q: {max_seqlen_q}")
+            # logger.debug(f"seqused_k: {seqused_k}")
+            # logger.debug(f"max_seqlen_k: {max_seqlen_k}")
+            # logger.debug(f"softmax_scale: {self.scale}")
+            # logger.debug(f"block_table: {block_table}")
+
+            flash_attn_varlen_func(
+                q=query[:num_actual_tokens],
+                k=key[:num_actual_tokens],
+                v=value[:num_actual_tokens],
+                out=output[:num_actual_tokens],
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                cu_seqlens_k=cu_seqlens_k,
+                # seqused_k=seqused_k,
+                max_seqlen_k=max_seqlen_k,
+                softmax_scale=self.scale,
+                causal=False,
+                alibi_slopes=self.alibi_slopes,
+                window_size=self.sliding_window,
+                # block_table=block_table,
+                softcap=self.logits_soft_cap,
+                scheduler_metadata=scheduler_metadata,
+                fa_version=self.vllm_flash_attn_version,
+                q_descale=layer._q_scale.expand(descale_shape),
+                k_descale=layer._k_scale.expand(descale_shape),
+                v_descale=layer._v_scale.expand(descale_shape),
+                num_splits=attn_metadata.max_num_splits,
+            )
+            return output
 
 
 def use_cascade_attention(
