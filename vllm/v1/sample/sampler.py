@@ -32,6 +32,7 @@ class Sampler(nn.Module):
         logits: torch.Tensor, # [tau_chang]: shape [sum of request.num_tokens, 
                               # vocab_size]
         sampling_metadata: SamplingMetadata,
+        confidence_thresholds: list[float]
     ) -> SamplerOutput:
         # NOTE(woosuk): Use the original logits (before any penalties or
         # temperature scaling) for the top-k logprobs.
@@ -64,7 +65,7 @@ class Sampler(nn.Module):
         # Sample the next token.
 
         # sampled = self.sample(logits, sampling_metadata) # [TODO (tau_chang)]: output should be List[List[Tuple[int, int]]]
-        unmasked = self.unmask(is_mask, logits, sampling_metadata)
+        unmasked = self.unmask(is_mask, logits, sampling_metadata, confidence_thresholds)
         logprobs_tensors = None
 
         # [tau_chang] Ignore for now.
@@ -130,6 +131,7 @@ class Sampler(nn.Module):
         is_mask: torch.Tensor,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        confidence_thresholds: list[float]
     ) -> list[list[tuple[int, int]]]:
         """Unmask the logits based on the is_mask tensor."""
         # [tau_chang]: For now, we assume that is_mask is same shape as logits.
@@ -143,33 +145,35 @@ class Sampler(nn.Module):
         
         logits_with_noise = self.add_noise_to_logits(logits, sampling_metadata)
         x_0 = torch.argmax(logits_with_noise, dim=-1)
-        logger.debug(f"x_0: {x_0}")
+        # logger.debug(f"x_0: {x_0}")
         p = F.softmax(logits_with_noise, dim=-1)
         confidence = p.gather(-1, x_0.unsqueeze(-1)).squeeze(-1)
 
         x_0 = x_0.cpu()
         
         unmasked_tokens = []
-        for start, end, prompt_length in self.get_output_range(sampling_metadata):
+        for i, (start, end, prompt_length) in \
+            enumerate(self.get_output_range(sampling_metadata)):
             logger.debug(
                 f"Processing range {start}:{end}, prompt_length: {prompt_length}")
             x_0_slice = x_0[start:end]
             confidence_slice = confidence[start:end]
             is_mask_slice = is_mask[start:end]
 
-            logger.debug(f"confidence slice: {confidence_slice}")
-            logger.debug(f"is mask slice: {is_mask_slice}")
+            # logger.debug(f"confidence slice: {confidence_slice}")
+            # logger.debug(f"is mask slice: {is_mask_slice}")
             
             assert is_mask_slice.any(), f"No masked tokens in range {start}:{end}"
 
 
             masked_confidences = confidence_slice[is_mask_slice]
             masked_indices = torch.nonzero(is_mask_slice, as_tuple=False).squeeze(1)
-            logger.debug(
-                f"Masked indices: {masked_indices}, "
-                f"Masked confidences: {masked_confidences}")
+            # logger.debug(
+            #     f"Masked indices: {masked_indices}, "
+            #     f"Masked confidences: {masked_confidences}")
 
-            selected_mask = masked_confidences > 0.9
+            selected_mask = \
+                masked_confidences > confidence_thresholds[i]
             selected_indices = masked_indices[selected_mask].cpu()
 
             # [tau_chang]: Note that selected_indices are relative to the 
@@ -178,10 +182,10 @@ class Sampler(nn.Module):
                 top_index = masked_indices[masked_confidences.argmax()]
                 selected_indices = torch.tensor([top_index], dtype=torch.int32)
                 logger.debug(
-                    f"No masked tokens with confidence > 0.9, selecting top token: {selected_indices}")
+                    f"No masked tokens with confidence > {confidence_thresholds[i]}, selecting top token: {selected_indices}")
             else:
                 logger.debug(
-                    f"Token with confidence > 0.9! Selected indices: {selected_indices}")
+                    f"Token with confidence > {confidence_thresholds[i]}! Selected indices: {selected_indices}")
                 
             selected_tokens = x_0_slice[selected_indices]
             logger.debug(

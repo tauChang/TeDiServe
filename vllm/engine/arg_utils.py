@@ -443,6 +443,7 @@ class EngineArgs:
 
     mask_token_id: int = ModelConfig.mask_token_id
     num_gpus_per_model_executor: Union[str]= ClusterConfig.num_gpus_per_model_executor
+    default_confidence_threshold: float = SchedulerConfig.default_confidence_threshold
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -857,6 +858,8 @@ class EngineArgs:
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
         scheduler_group.add_argument("--async-scheduling",
                                      **scheduler_kwargs["async_scheduling"])
+        scheduler_group.add_argument("--default-confidence-threshold",
+                                     **scheduler_kwargs["default_confidence_threshold"])
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1250,6 +1253,7 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.
             disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            default_confidence_threshold=self.default_confidence_threshold,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:

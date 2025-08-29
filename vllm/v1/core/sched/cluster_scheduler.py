@@ -200,6 +200,9 @@ class ClusterScheduler(SchedulerInterface):
         # )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
+        self.default_confidence_threshold = \
+            self.scheduler_config.default_confidence_threshold
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -449,7 +452,7 @@ class ClusterScheduler(SchedulerInterface):
             new_reqs_data = [
                 NewRequestData.from_request(req, 
                             req_to_new_block_ids[executor_id][req.request_id])
-                for req in scheduled_new_reqs.get(executor_id, [])
+                for req in scheduled_new_reqs[executor_id]
             ]
             cached_reqs_data = self._make_cached_request_data(
                 scheduled_running_reqs[executor_id],
@@ -458,6 +461,17 @@ class ClusterScheduler(SchedulerInterface):
                 scheduled_spec_decode_tokens.get(executor_id, {}),
                 req_to_new_block_ids[executor_id],
             )
+            # TODO: decide confidence thresholds
+            confidence_thresholds = {}
+            for req_id in num_scheduled_tokens[executor_id].keys():
+                req_confidence_threshold = self.requests[req_id].sampling_params.confidence_threshold
+                if req_confidence_threshold is not None:
+                    confidence_thresholds[req_id] = req_confidence_threshold
+                    logger.debug(f"using user-defined confidence threshold {confidence_thresholds[req_id]} for req {req_id}")
+                else:
+                    confidence_thresholds[req_id] = self.default_confidence_threshold
+                    logger.debug(f"using default confidence threshold {confidence_thresholds[req_id]} for req {req_id}")
+
             scheduler_output = SchedulerOutput(
                 scheduled_new_reqs=new_reqs_data,
                 scheduled_cached_reqs=cached_reqs_data,
@@ -475,6 +489,7 @@ class ClusterScheduler(SchedulerInterface):
                 free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
                 structured_output_request_ids=structured_output_request_ids.get(executor_id, {}),
                 grammar_bitmask=None,
+                confidence_thresholds=confidence_thresholds
             )
             scheduler_outputs[executor_id] = scheduler_output
 

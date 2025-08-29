@@ -693,10 +693,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             blk_table = self.input_batch.block_table[kv_cache_group_id]
             blk_table_tensor = blk_table.get_device_tensor()[:num_reqs]
             slot_mapping = blk_table.slot_mapping[:total_num_scheduled_tokens]
-            logger.debug(
-                f"in _prepare_inputs, "
-                f"blk_tabler: {blk_table}, "
-                f"slot_mapping: {slot_mapping}")
+            # logger.debug(
+            #     f"in _prepare_inputs, "
+            #     f"blk_tabler: {blk_table}, "
+            #     f"slot_mapping: {slot_mapping}")
 
             # Fill unused with -1. Needed for reshape_and_cache in full cuda
             # graph mode.
@@ -780,8 +780,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Hot-Swap lora model
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
+        
+        confidence_thresholds = [
+            scheduler_output.confidence_thresholds[i] for i in req_ids]
 
         return (attn_metadata, attention_cuda_graphs, logits_indices,
+                confidence_thresholds,
                 spec_decode_metadata, num_scheduled_tokens,
                 spec_decode_common_attn_metadata)
 
@@ -1309,10 +1313,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
+        execution_start_time = time.time()
         logger.debug(f"start of execute_model, scheduler_output: "
                     f"{scheduler_output}, intermediate_tensors: "
                     f"{intermediate_tensors}")
+        
+        update_states_start_time = time.time()
         self._update_states(scheduler_output)
+        logger.debug(f"_update_states took "
+                    f"{time.time() - update_states_start_time} seconds")
         if not scheduler_output.total_num_scheduled_tokens:
             if not has_kv_transfer_group():
                 # Return empty ModelRunnerOutput if there's no work to do.
@@ -1321,10 +1330,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return self.kv_connector_no_forward(scheduler_output)
 
         # Prepare the decoder inputs.
+        prepare_inputs_start_time = time.time()
         (attn_metadata, attention_cuda_graphs, logits_indices,
+         confidence_thresholds,
          spec_decode_metadata, num_scheduled_tokens_np,
          spec_decode_common_attn_metadata) = (
              self._prepare_inputs(scheduler_output))
+        logger.debug(f"_prepare_inputs took "
+                    f"{time.time() - prepare_inputs_start_time} seconds")
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -1403,15 +1416,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ):
             self.maybe_setup_kv_connector(scheduler_output)
 
-            logger.debug(f"Running model with input_ids: {input_ids}, "
-                        f"positions: {positions}, "
-                        f"intermediate_tensors: {intermediate_tensors}, ")
+            # logger.debug(f"Running model with input_ids: {input_ids}, "
+            #             f"positions: {positions}, "
+            #             f"intermediate_tensors: {intermediate_tensors}, ")
+            self._sync_device()
+            model_start_time = time.time()
             model_output = self.model(
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
+            self._sync_device()
+            logger.debug(f"Model forward took {time.time() - model_start_time} "
+                        f"seconds")
 
             self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = (
@@ -1451,7 +1469,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # sample_hidden_states = hidden_states[logits_indices]
             # logits = self.model.compute_logits(sample_hidden_states, None)
+            self._sync_device()
+            logits_start_time = time.time()
             logits = self.model.compute_logits(hidden_states, None)
+            self._sync_device()
+            logger.debug(f"Computing logits took "
+                        f"{time.time() - logits_start_time} seconds")
         if broadcast_pp_output:
             model_output_broadcast_data = {
                 "logits": logits.contiguous(),
@@ -1466,12 +1489,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.apply_grammar_bitmask(scheduler_output, logits)
 
         # Sample the next token and get logprobs if needed.
+        self._sync_device()
+        start_time = time.time()
         sampling_metadata = self.input_batch.sampling_metadata
         if spec_decode_metadata is None:
             sampler_output = self.sampler(
                 is_mask=input_ids == self.model_config.mask_token_id,
                 logits=logits,
                 sampling_metadata=sampling_metadata,
+                confidence_thresholds=confidence_thresholds,
             )
             logger.debug(f"Sampler output: {sampler_output}")
         else:
@@ -1499,6 +1525,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampling_metadata,
             )
             sampler_output.sampled_token_ids = output_token_ids
+        self._sync_device()
+        logger.debug(f"Sampling took {time.time() - start_time} seconds")
 
         num_nans_in_logits = {}
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
@@ -1506,6 +1534,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
+        loop_start_time = time.time()
         discard_sampled_tokens_req_indices = []
         for i, req_id in enumerate(self.input_batch.req_ids):
             req_state = self.requests[req_id]
@@ -1521,7 +1550,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # Record the index of the request that should not be sampled,
                 # so that we could clear the sampled tokens before returning.
                 discard_sampled_tokens_req_indices.append(i)
+        logger.debug(f"Loop over requests took "
+                    f"{time.time() - loop_start_time} seconds")
 
+        logprob_start_time = time.time()
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
         logprobs_tensors = sampler_output.logprobs_tensors
@@ -1533,6 +1565,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states[:num_scheduled_tokens],
             scheduler_output,
         )
+        logger.debug(f"Logprobs took {time.time() - logprob_start_time} seconds")
 
         # Get the valid generated tokens.
         # sampled_token_ids = sampler_output.sampled_token_ids
@@ -1554,6 +1587,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
 
+        valid_token_start_time = time.time()
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
         # NOTE(woosuk): As an exception, when using PP, the scheduler sends
@@ -1585,6 +1619,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # req_id = self.input_batch.req_ids[req_idx]
             # req_state = self.requests[req_id]
             # req_state.output_token_ids.extend(sampled_ids)
+        logger.debug(f"Valid token IDs took "
+                    f"{time.time() - valid_token_start_time} seconds")
 
         if not self.speculative_config:
             # Speculative decoding is not enabled.
@@ -1604,6 +1640,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.eplb_step()
 
+        self._sync_device()
+        logger.debug(f"execute_model took {time.time() - execution_start_time} ")
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -2200,13 +2238,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_tokens=[seq_len],
             num_denoise_ran=[0],
         )
+        confidence_thresholds = [0.9]
         try:
             # [tau_chang] is_mask is all True
             is_mask = torch.ones(
                 (seq_len), dtype=torch.bool, device=self.device)
             sampler_output = self.sampler(is_mask=is_mask,
                                           logits=logits,
-                                          sampling_metadata=dummy_metadata)
+                                          sampling_metadata=dummy_metadata,
+                                          confidence_thresholds=confidence_thresholds)
         except RuntimeError as e:
             if 'out of memory' in str(e):
                 raise RuntimeError(

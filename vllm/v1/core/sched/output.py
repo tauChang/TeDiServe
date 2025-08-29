@@ -158,5 +158,10 @@ class SchedulerOutput:
     # the bitmask for the whole batch
     grammar_bitmask: Optional[npt.NDArray[np.int32]]
 
+    # confidence thresholds for each request
+    # request_id -> confidence threshold
+    confidence_thresholds: dict[str, float]
+
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
+

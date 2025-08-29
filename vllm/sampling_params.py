@@ -222,6 +222,9 @@ class SamplingParams(
     allowed_token_ids: Optional[list[int]] = None
     extra_args: Optional[dict[str, Any]] = None
 
+    # Confidence threshold
+    confidence_threshold: Optional[float] = None
+
     # Fields used for bad words
     bad_words: Optional[list[str]] = None
     _bad_words_token_ids: Optional[list[list[int]]] = None
@@ -257,6 +260,7 @@ class SamplingParams(
         guided_decoding: Optional[GuidedDecodingParams] = None,
         logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
         allowed_token_ids: Optional[list[int]] = None,
+        confidence_threshold: Optional[float] = None,
         extra_args: Optional[dict[str, Any]] = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
@@ -299,6 +303,7 @@ class SamplingParams(
             guided_decoding=guided_decoding,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
+            confidence_threshold=confidence_threshold,
             extra_args=extra_args,
         )
 
@@ -438,6 +443,11 @@ class SamplingParams(
         if self.best_of != self._real_n and self.output_kind == (
                 RequestOutputKind.DELTA):
             raise ValueError("best_of must equal n to use output_kind=DELTA")
+        
+        if (self.confidence_threshold is not None and
+            (self.confidence_threshold < 0.0 or self.confidence_threshold > 1.0)):
+            raise ValueError("confidence_threshold must be in [0.0, 1.0], got "
+                             f"{self.confidence_threshold}.")
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:

@@ -2377,6 +2377,9 @@ class SchedulerConfig:
     structured outputs, speculative decoding, and pipeline parallelism.
     """
 
+    default_confidence_threshold: float = 0.9
+    """Default confidence threshold for dllm unmasking."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
