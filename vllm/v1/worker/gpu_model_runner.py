@@ -365,16 +365,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         new/resumed/paused/finished request in the batch.
         """
         # Remove finished requests from the cached states.
-        for req_id in scheduler_output.finished_req_ids:
+        for req_id in scheduler_output.free_req_ids:
             self.requests.pop(req_id, None)
             self.encoder_cache.pop(req_id, None)
         # Remove the finished requests from the persistent batch.
-        # NOTE(woosuk): There could be an edge case where finished_req_ids and
+        # NOTE(woosuk): There could be an edge case where free_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
         # then resubmitted with the same ID. In this case, we treat them as two
         # distinct requests - clearing the cached states for the first request
         # and handling the second as a new request.
-        for req_id in scheduler_output.finished_req_ids:
+        for req_id in scheduler_output.free_req_ids:
             self.input_batch.remove_request(req_id)
 
         # Free the cached encoder outputs.
@@ -434,10 +434,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 num_denoise_ran=0,
                 output_token_ids=[self.model_config.mask_token_id] * new_req_data.output_length,
-                unmasked_token_ids=[],
+                unmasked_token_ids=new_req_data.unmasked_token_ids,
                 lora_request=new_req_data.lora_request,
                 output_length=new_req_data.output_length,
             )
+            for pos, token_id in new_req_data.unmasked_token_ids:
+                self.requests[req_id].update_output_token_id(pos, token_id)
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
@@ -1782,7 +1784,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_finished(
-                scheduler_output.finished_req_ids)
+                scheduler_output.free_req_ids)
         return None, None
 
     def kv_connector_no_forward(

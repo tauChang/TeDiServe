@@ -24,6 +24,7 @@ class NewRequestData:
 
     req_id: str
     prompt_token_ids: list[int]
+    unmasked_token_ids: list[int]
     mm_inputs: list[MultiModalKwargs]
     mm_hashes: list[str]
     mm_positions: list[PlaceholderRange]
@@ -43,6 +44,7 @@ class NewRequestData:
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
+            unmasked_token_ids=request._unmasked_token_ids,
             mm_inputs=request.mm_inputs,
             mm_hashes=request.mm_hashes,
             mm_positions=request.mm_positions,
@@ -58,6 +60,7 @@ class NewRequestData:
         return (f"NewRequestData("
                 f"req_id={self.req_id},"
                 f"prompt_token_ids={self.prompt_token_ids},"
+                f"unmasked_token_ids={self.unmasked_token_ids},"
                 f"mm_inputs={self.mm_inputs},"
                 f"mm_hashes={self.mm_hashes},"
                 f"mm_positions={self.mm_positions},"
@@ -73,6 +76,7 @@ class NewRequestData:
         return (f"NewRequestData("
                 f"req_id={self.req_id},"
                 f"prompt_token_ids_len={len(self.prompt_token_ids)},"
+                f"unmasked_token_ids_len={len(self.unmasked_token_ids)},"
                 f"mm_inputs={self.mm_inputs},"
                 f"mm_hashes={self.mm_hashes},"
                 f"mm_positions={self.mm_positions},"
@@ -148,6 +152,8 @@ class SchedulerOutput:
     # steps. This is used to notify the workers about the finished requests
     # so that they can free the cached states for those requests.
     finished_req_ids: set[str]
+    # Free the cached states for these requests. Not necessarily finished.
+    free_req_ids: set[str]
     # list of (req_id, encoder_input_index) tuples.
     # Used to free the encoder cache.
     free_encoder_input_ids: list[tuple[str, int]]
