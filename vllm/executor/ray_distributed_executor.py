@@ -124,9 +124,15 @@ class RayDistributedExecutor(DistributedExecutorBase):
             self.forward_dag.teardown()
             import ray
             for worker in self.workers:
+                logger.debug(f"Killing worker {worker} in forward dag")
                 ray.kill(worker)
             self.forward_dag = None
-
+        else:
+            import ray
+            for worker in self.workers:
+                logger.debug(f"Killing worker {worker}")
+                ray.kill(worker)
+    
     def _configure_ray_workers_use_nsight(self,
                                           ray_remote_kwargs) -> Dict[str, Any]:
         # If nsight profiling is enabled, we need to set the profiling
@@ -191,12 +197,11 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
         #     bundle_indices = bundle_indices[:self.parallel_config.world_size]
 
-        bundle_indices = self.cluster_config.model_executor_to_bundles[self.id]
-        logger.info(f"Executor {self.id} will use bundles: {bundle_indices}")
+        logger.info(f"Executor {self.id} will use bundles: {self.bundle_ids}")
 
         worker_metadata: List[RayWorkerMetaData] = []
         # driver_ip = get_ip()
-        for rank, bundle_id in enumerate(bundle_indices):
+        for rank, bundle_id in enumerate(self.bundle_ids):
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=placement_group,
                 placement_group_capture_child_tasks=True,
@@ -636,8 +641,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
             _overlap_gpu_communication=envs.
             VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM)
 
-    def __del__(self):
-        self.shutdown()
+    # def __del__(self):
+    #     self.shutdown()
 
     async def execute_model_async(
             self,

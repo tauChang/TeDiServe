@@ -2207,10 +2207,6 @@ class ClusterConfig:
     placement_group: Optional["PlacementGroup"] = None
     """ray distributed model workers placement group."""
 
-    model_executor_to_bundles: Optional[dict[int, list[int]]] = None 
-    """Mapping from model executor index to the list of bundles it is
-    assigned to. """
-
     def __post_init__(self) -> None:
         if "," in self.num_gpus_per_model_executor:
             num_gpu_list = [v for v in self.num_gpus_per_model_executor.\

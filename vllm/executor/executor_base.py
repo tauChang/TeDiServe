@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from functools import cached_property
 from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
                     Union)
+import enum
 
 import torch.nn as nn
 from typing_extensions import TypeVar
@@ -26,6 +27,13 @@ logger = init_logger(__name__)
 
 _R = TypeVar("_R", default=Any)
 
+class ExecutorStatus(enum.IntEnum):
+    """Status of an executor."""
+    IDLE = enum.auto()
+    SCHEDULED = enum.auto()
+    EXECUTING = enum.auto()
+    OUTPUT_READY = enum.auto()
+
 
 class ExecutorBase(ABC):
     """Base class for all executors.
@@ -40,9 +48,11 @@ class ExecutorBase(ABC):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        id: int = 0
+        id: int,
+        bundle_ids: List[int],
     ) -> None:
         self.id = id
+        self.bundle_ids = bundle_ids
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -58,6 +68,9 @@ class ExecutorBase(ABC):
         self._init_executor()
         self.is_sleeping = False
         self.sleeping_tags: set[str] = set()
+        self.status = ExecutorStatus.IDLE
+
+        self.idle_event = asyncio.Event()
 
     @abstractmethod
     def _init_executor(self) -> None:
@@ -284,6 +297,20 @@ class ExecutorBase(ABC):
         """Checks if the executor is healthy. If not, it should raise an
         exception."""
         self.check_health()
+    
+    def set_idle(self):
+        self.status = ExecutorStatus.IDLE
+        self.idle_event.set()
+        
+    def set_scheduled(self):
+        self.status = ExecutorStatus.SCHEDULED
+        self.idle_event.clear()
+    
+    def set_executing(self):
+        self.status = ExecutorStatus.EXECUTING
+        
+    def set_output_ready(self):
+        self.status = ExecutorStatus.OUTPUT_READY
 
 
 class DistributedExecutorBase(ExecutorBase):

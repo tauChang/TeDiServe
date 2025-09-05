@@ -28,6 +28,8 @@ from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
 from vllm.v1.core.sched.utils import check_stop
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
+from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.executors_manager import ExecutorsManager
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
@@ -38,24 +40,109 @@ from vllm.v1.structured_output import StructuredOutputManager
 logger = init_logger(__name__)
 
 class ExecutorState:
-    def __init__(self, executor_id: int, num_gpus: int) -> None:
+    def __init__(self, executor, token_budget: int) -> None:
+        self.executor = executor
+        self.num_gpus = len(executor.bundle_ids)
+        self.req_ids: set[str] = set()
+        self.pending_req_ids: set[str] = set()
+        self.req_to_tokens_needed: dict[str, int] = {}
+        self._token_budget = token_budget
+    
+    def __repr__(self) -> str:
+        return (f"ExecutorState(num_gpus={self.num_gpus}, "
+                f"req_ids={self.req_ids}, "
+                f"pending_req_ids={self.pending_req_ids}, "
+                f"req_to_tokens_needed={self.req_to_tokens_needed}, "
+                f"token_budget={self._token_budget})")
+    
+    def add_request(self, req_id: str, tokens_needed: int) -> None:
+        logger.debug(f"Executor {self.executor.id} adding request {req_id}.")
+        self.req_ids.add(req_id)
+        if req_id in self.pending_req_ids:
+            self.pending_req_ids.discard(req_id)
+        self.req_to_tokens_needed[req_id] = tokens_needed
+        logger.debug(f"after adding, executor state: {self}")
+
+    def assert_request_added(self, req_id: str) -> None:
+        assert req_id in self.req_ids
+        assert req_id not in self.pending_req_ids
+        assert req_id in self.req_to_tokens_needed
+    
+    def remove_request(self, req_id: str) -> None:
+        logger.debug(f"Executor {self.executor.id} removing request {req_id}.")
+        self.req_ids.discard(req_id)
+        self.req_to_tokens_needed.pop(req_id, None)
+        logger.debug(f"after removing, executor state: {self}")
+        
+    def add_pending_request(self, req_id: str, tokens_needed) -> None:
+        logger.debug(f"Executor {self.executor.id} adding pending request {req_id}.")
+        self.pending_req_ids.add(req_id)
+        self.req_to_tokens_needed[req_id] = tokens_needed
+        logger.debug(f"after adding pending, executor state: {self}")
+        
+    def get_token_budget(self) -> int:
+        tokens_in_use = sum(
+            self.req_to_tokens_needed[req_id] for req_id in self.req_ids)
+        return self._token_budget - tokens_in_use
+    
+    def get_projected_token_budget(self) -> int:
+        return self.get_token_budget() - sum(
+            self.req_to_tokens_needed[req_id] for req_id in self.pending_req_ids)
+
+class RequestState:
+    def __init__(self, request: Request) -> None:
+        self.request = request
+        self.executor_id = None
+        self.executors_to_free: set[int] = set()
+        self.pending_executor_id = None
+    
+    def __str__(self) -> str:
+        return (f"RequestState(request_id={self.request.request_id}, "
+                f"executor_id={self.executor_id}, "
+                f"executors_to_free={self.executors_to_free}, "
+                f"pending_executor_id={self.pending_executor_id})")
+    
+    def set_executor(self, executor_id: int) -> None:
+        logger.debug(f"Request {self.request.request_id} setting executor to {executor_id}")
         self.executor_id = executor_id
-        self.num_gpus = num_gpus
-        self._is_in_execution = False
-
-    def is_in_execution(self) -> bool:
-        return self._is_in_execution
-
-    def set_in_execution(self, in_execution: bool) -> None:
-        self._is_in_execution = in_execution
-
+        self.executors_to_free.add(executor_id)
+        self.pending_executor_id = None
+        logger.debug(f"after setting, request state: {self}")
+    
+    def remove_executor(self) -> None:
+        logger.debug(f"Request {self.request.request_id} clearing executor {self.executor_id}")
+        self.executors_to_free.discard(self.executor_id)
+        self.executor_id = None
+        self.pending_executor_id = None
+        logger.debug(f"after clearing, request state: {self}")
+    
+    def assert_executor_set(self, executor_id: int) -> None:
+        assert self.executor_id == executor_id
+        assert executor_id in self.executors_to_free
+        assert self.pending_executor_id is None
+    
+    def set_pending_executor(self, executor_id: int) -> None:
+        logger.debug(f"Request {self.request.request_id} setting pending executor to {executor_id}")
+        self.pending_executor_id = executor_id
+        logger.debug(f"after setting pending, request state: {self}")
+    
+    def remove_pending_executor(self) -> None:
+        logger.debug(f"Request {self.request.request_id} clearing pending executor {self.pending_executor_id}")
+        self.pending_executor_id = None
+        logger.debug(f"after clearing pending, request state: {self}")
+    
+    def remove_executor_to_free(self, executor_id: int) -> None:
+        logger.debug(f"Request {self.request.request_id} removing executor to free {executor_id}")
+        self.executors_to_free.discard(executor_id)
+        logger.debug(f"after removing, request state: {self}")
 
 class ClusterScheduler(SchedulerInterface):
 
     def __init__(
         self,
         vllm_config: VllmConfig,
-        kv_cache_configs: dict[int, KVCacheConfig],
+        executors_manager: ExecutorsManager,
+        # kv_cache_configs: dict[int, KVCacheConfig],
         structured_output_manager: StructuredOutputManager,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
@@ -65,7 +152,7 @@ class ClusterScheduler(SchedulerInterface):
         self.scheduler_config = vllm_config.scheduler_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
-        self.kv_cache_configs = kv_cache_configs
+        # self.kv_cache_configs = kv_cache_configs
         self.kv_events_config = vllm_config.kv_events_config
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
@@ -82,10 +169,8 @@ class ClusterScheduler(SchedulerInterface):
             ] = defaultdict(lambda: defaultdict(set)) \
                 if include_finished_set else None
         
-        self.executors: dict[int, ExecutorState] = {}
-        for executor_id, num_gpus in \
-            vllm_config.cluster_config.num_gpus_per_model_executor.items():
-            self.add_executor(executor_id, num_gpus)
+        self.executors_manager = executors_manager
+        self.executor_states: dict[int, ExecutorState] = {}
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs # assume this is per executor
@@ -112,16 +197,23 @@ class ClusterScheduler(SchedulerInterface):
             self.parallel_config.data_parallel_rank,
         )
 
-        num_gpu_blocks = self.cache_config.num_gpu_blocks
-        for executor_id, num_blocks in num_gpu_blocks.items():
-            assert num_blocks is not None and num_blocks > 0
+        # num_gpu_blocks = self.cache_config.num_gpu_blocks
+        # for executor_id, num_blocks in num_gpu_blocks.items():
+        #     assert num_blocks is not None and num_blocks > 0
         # assert num_gpu_blocks is not None and num_gpu_blocks > 0
 
         self.block_size = self.cache_config.block_size
 
+        # # req_id -> Request
+        # self.requests: dict[str, Request] = {}
+        # # self.request_to_executor: dict[str, int] = {}
+
         # req_id -> Request
         self.requests: dict[str, Request] = {}
-        self.request_to_executor: dict[str, int] = {}
+        # help keep track of additional scheduler states for requests
+        self.request_states: dict[str, RequestState] = {}
+        # self.request_to_executor: dict[str, int] = {}
+
 
         # Scheduling policy
         if self.scheduler_config.policy == "priority":
@@ -141,6 +233,7 @@ class ClusterScheduler(SchedulerInterface):
         # This is flushed at the end of each scheduling step.
         # self.finished_req_ids: set[str] = set()
         self.finished_req_ids: dict[int, set[str]] = defaultdict(set)
+        self.free_req_ids: dict[int, set[str]] = defaultdict(set)
 
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
@@ -179,16 +272,16 @@ class ClusterScheduler(SchedulerInterface):
         # Create the KV cache manager.
         # [tau_chang] oone kv_cache_manager per executor for now
         self.kv_cache_managers: dict[int, KVCacheManager] = {}
-        for executor_id, kv_cache_config in self.kv_cache_configs.items():
-            self.kv_cache_managers[executor_id] = KVCacheManager(
-                kv_cache_config=kv_cache_config,
-                max_model_len=self.max_model_len,
-                enable_caching=self.cache_config.enable_prefix_caching,
-                caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
-                use_eagle=self.use_eagle,
-                log_stats=self.log_stats,
-                enable_kv_cache_events=self.enable_kv_cache_events,
-            )
+        # for executor_id, kv_cache_config in self.kv_cache_configs.items():
+        #     self.kv_cache_managers[executor_id] = KVCacheManager(
+        #         kv_cache_config=kv_cache_config,
+        #         max_model_len=self.max_model_len,
+        #         enable_caching=self.cache_config.enable_prefix_caching,
+        #         caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
+        #         use_eagle=self.use_eagle,
+        #         log_stats=self.log_stats,
+        #         enable_kv_cache_events=self.enable_kv_cache_events,
+        #     )
         # self.kv_cache_manager = KVCacheManager(
         #     kv_cache_config=kv_cache_config,
         #     max_model_len=self.max_model_len,
@@ -203,7 +296,40 @@ class ClusterScheduler(SchedulerInterface):
         self.default_confidence_threshold = \
             self.scheduler_config.default_confidence_threshold
 
-    def schedule(self) -> SchedulerOutput:
+    async def schedule(self) -> SchedulerOutput:
+        # utils
+        def add_new_request(request: Request, executor_id: int) -> None:
+            scheduled_new_reqs[executor_id].append(request)
+            req_to_new_block_ids[executor_id][request.request_id] = \
+                self.kv_cache_managers[executor_id].get_block_ids(
+                    request.request_id)
+            num_scheduled_tokens[executor_id][request.request_id] = request.num_tokens
+
+            self.executor_states[executor_id].add_request(
+                request.request_id, request.num_tokens
+            )
+            self.request_states[request.request_id].set_executor(executor_id)
+
+            request.status = RequestStatus.RUNNING
+            
+        def add_running_request(request: Request, executor_id: int) -> None:
+            scheduled_running_reqs[executor_id].append(request)
+            req_to_new_block_ids[executor_id][request.request_id] = ()
+            num_scheduled_tokens[executor_id][request.request_id] = request.num_tokens
+
+            self.executor_states[executor_id].assert_request_added(request.request_id)
+            self.request_states[request.request_id].assert_executor_set(executor_id)
+
+            request.status = RequestStatus.RUNNING
+        
+        def mark_request_as_pending(request: Request, executor_id: int) -> None:
+            self.executor_states[executor_id].add_pending_request(
+                request.request_id, request.num_tokens)
+            self.request_states[request.request_id].set_pending_executor(
+                executor_id)
+            
+            request.status = RequestStatus.WAITING
+
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -214,8 +340,40 @@ class ClusterScheduler(SchedulerInterface):
         # num_tokens_with_spec. This is general enough to cover
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
-        idle_executors = [executor_id for executor_id, executor in \
-            self.executors.items() if not executor.is_in_execution()]
+
+        # update executor states
+        self.update_executors()
+        logger.debug(f"start of schedule, executors manager: {self.executors_manager}")
+        # obtain lock
+        idle_executors = []
+        # for executor_id in self.executors_manager.executor_locks:
+        #     if not self.executors_manager.executor_locks[executor_id].locked():
+        #         logger.debug(f"executor {executor_id} is idle, acquiring lock")
+        #         # guaranteed to acquire lock without waiting
+        #         await self.executors_manager.executor_locks[executor_id].acquire()
+        #         logger.debug(f"executor {executor_id} lock acquired")
+        #         idle_executors.append(executor_id)
+        # for executor_id in self.executors_manager.can_schedule:
+        #     if self.executors_manager.can_schedule[executor_id].is_set():
+        #         logger.debug(f"executor {executor_id} is idle can_schedule is set")
+        #         logger.debug(f"clearing can_kill for executor {executor_id}")
+        #         self.executors_manager.can_kill[executor_id].clear()
+        #         idle_executors.append(executor_id)
+        #     else:
+        #         logger.debug(f"executor {executor_id} is busy can_schedule is not set")
+        for executor_id in self.executors_manager.executors:
+            if self.executors_manager.can_schedule[executor_id]:
+                logger.debug(f"executor {executor_id} is idle can_schedule is set")
+                logger.debug(f"excutor: {self.executor_states[executor_id]}")
+                logger.debug(f"setting can_kill to False for {executor_id}")
+                self.executors_manager.can_kill[executor_id] = False
+                idle_executors.append(executor_id)
+            else:
+                logger.debug(f"executor {executor_id} is busy can_schedule is False. Skip.")
+
+        # idle_executors are guranteed not killed from now on
+        logger.debug(f"idle executors: {idle_executors}")
+        # assert len(idle_executors) > 0
         executor_load = {executor_id: 0 for executor_id in idle_executors}
 
         # scheduled_new_reqs: list[Request] = []
@@ -253,9 +411,9 @@ class ClusterScheduler(SchedulerInterface):
         token_budget = {executor_id: self.max_num_scheduled_tokens \
             for executor_id in idle_executors}
         scheduled_encoder_inputs: dict[int, dict[str, list[int]]] = {}
-        encoder_budget: dict[int, int] = {}
-        encoder_budget = {executor_id: self.max_num_encoder_input_tokens \
-            for executor_id in idle_executors}
+        # encoder_budget: dict[int, int] = {}
+        # encoder_budget = {executor_id: self.max_num_encoder_input_tokens \
+        #     for executor_id in idle_executors}
         scheduled_spec_decode_tokens: dict[int, dict[str, list[int]]] = {}
         
 
@@ -268,27 +426,57 @@ class ClusterScheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running):
             request = self.running[req_index]
+            cur_executor_id = self.request_states[request.request_id].executor_id
+            logger.debug(f"considering running request {request.request_id}")
+
             if request.is_in_execution:
+                logger.debug(f"Request {request.request_id} is in execution. Skip.")
+                req_index += 1
+                continue
+
+            if cur_executor_id is None:
+                logger.debug(f"Request {request.request_id}'s executor is killed. Move to waiting.")
+                self.waiting.prepend_request(request)
+                self.running.pop(req_index)
+                continue
+
+            if cur_executor_id not in idle_executors:
+                assert cur_executor_id in self.executors_manager.executors
+                logger.debug(f"Request {request.request_id}'s executor {cur_executor_id} is busy but alive. Skip.")
                 req_index += 1
                 continue
         
-            # request is not in execution. Assert its executor is also not
-            executor_id = self.request_to_executor[request.request_id]
-            assert executor_id in idle_executors, (
-                f"Request {request.request_id} is not in execution, but its "
-                f"executor {executor_id} is in execution")
+            logger.debug(f"its executor {cur_executor_id} is idle")
+                
+            # # request is not in execution. Assert its executor is also not
+            # executor_id = self.request_to_executor[request.request_id]
+            # if executor_id not in idle_executors:
+            #     # this executor is being killed. Move to waiting
+            #     self.waiting.prepend_request(request)
+            #     self.running.pop(req_index)
+            #     continue
+            # assert executor_id in idle_executors, (
+            #     f"Request {request.request_id} is not in execution, but its "
+            #     f"executor {executor_id} is in execution")
 
             num_tokens_needed = request.num_tokens
             
-            logger.debug(f"in scheduler, request: {request}")
-            logger.debug(f"num_unmasked_tokens: {request.num_unmasked_tokens}")
+            # logger.debug(f"in scheduler, request: {request}")
+            # logger.debug(f"num_unmasked_tokens: {request.num_unmasked_tokens}")
 
-            if num_tokens_needed > token_budget[executor_id]:
-                # The request cannot be scheduled.
-                # TODO: record this request and consider it again later.
-                # For now just skip it.
-                req_index += 1
-                continue
+            # if num_tokens_needed > self.executor_states[cur_executor_id].get_projected_token_budget():
+            #     logger.debug(f"Not enough token budget to schedule RUNNING request {request.request_id}. Needed {num_tokens_needed}, available {self.executor_states[cur_executor_id].get_projected_token_budget()}. Skip.")
+            #     logger.debug(f"executor state: {self.executor_states[cur_executor_id]}")
+            #     # The request cannot be scheduled.
+            #     # TODO: record this request and consider it again later.
+            #     # For now just skip it.
+            #     req_index += 1
+            #     continue
+            
+            # if len(self.executor_states[cur_executor_id].req_ids) >= self.max_num_running_reqs:
+            #     logger.debug(f"Executor {cur_executor_id} has reached max num running requests. Skip request {request.request_id}.")
+            #     req_index += 1
+            #     continue
         
             # while True:
             #     new_blocks = self.kv_cache_manager.allocate_slots(
@@ -331,15 +519,19 @@ class ClusterScheduler(SchedulerInterface):
             # assert new_blocks is not None
 
             # Schedule the request.
-            logger.info(f"Scheduling RUNNING request {request.request_id} ")
-            scheduled_running_reqs[executor_id].append(request)
-            # [tau_chang] no new blocks for now bc dllm
-            req_to_new_block_ids[executor_id][request.request_id] = ()
+            # logger.info(f"Scheduling RUNNING request {request.request_id} ")
+            # scheduled_running_reqs[executor_id].append(request)
+            # # [tau_chang] no new blocks for now bc dllm
+            # req_to_new_block_ids[executor_id][request.request_id] = ()
 
-            num_scheduled_tokens[executor_id][request.request_id] = num_tokens_needed
-            executor_load[executor_id] += num_tokens_needed
-            token_budget[executor_id] -= num_tokens_needed
-            self.request_to_executor[request.request_id] = executor_id
+            # num_scheduled_tokens[executor_id][request.request_id] = num_tokens_needed
+            # executor_load[executor_id] += num_tokens_needed
+            # token_budget[executor_id] -= num_tokens_needed
+            # self.request_to_executor[request.request_id] = executor_id
+            # req_index += 1
+            
+            logger.debug(f"Confirmed: Running request {request.request_id} to executor {cur_executor_id}.")
+            add_running_request(request, cur_executor_id)
             req_index += 1
 
         # Use a temporary RequestQueue to collect requests that need to be
@@ -349,70 +541,115 @@ class ClusterScheduler(SchedulerInterface):
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
             while self.waiting:
-                request = self.waiting.peek_request()
+                # request = self.waiting.peek_request()
+                request = self.waiting.pop_request()
+                logger.debug(f"considering WAITING request {request.request_id}")
 
-                # TODO: optimize this
-                # loop through executors in increasing order of load
-                idle_executors.sort(key=lambda eid: executor_load[eid])
-
-                for executor_id in idle_executors:
-                    if executor_id in scheduled_running_reqs and \
-                        len(scheduled_running_reqs[executor_id]) == \
-                            self.max_num_running_reqs:
-                        continue
-
-                    num_external_computed_tokens = 0
-
-                    num_tokens_needed = request.num_tokens
-                    if num_tokens_needed > token_budget[executor_id]:
-                        # The request cannot be scheduled.
-                        continue
-                        # self.waiting.pop_request()
-                        # skipped_waiting_requests.prepend_request(request)
-                        # continue
-
-                    new_blocks = self.kv_cache_managers[executor_id].allocate_slots(
-                        request,
-                        num_tokens_needed,
-                    )
-                    if new_blocks is None:
-                        # The request cannot be scheduled.
-                        continue
-                
-                    logger.debug(f"WAITING: new_blocks: {new_blocks} with num_tokens_needed: {num_tokens_needed}")
-                        
-                    # Request was already popped from self.waiting
-                    # unless it was re-added above due to new_blocks being None.
-                    request = self.waiting.pop_request()
-                    req_index += 1 # not used ?
-                    self.running.append(request)
-                    if self.log_stats:
-                        request.record_event(EngineCoreEventType.SCHEDULED,
-                                            scheduled_timestamp)
-                    if request.status == RequestStatus.WAITING:
-                        scheduled_new_reqs[executor_id].append(request)
-                    elif request.status == RequestStatus.PREEMPTED:
-                        scheduled_resumed_reqs[executor_id].append(request)
+                # first check if it has pending executor
+                pending_executor_id = self.request_states[request.request_id].pending_executor_id
+                if pending_executor_id is not None:
+                    logger.debug(f"Request {request.request_id} has pending executor {pending_executor_id}")
+                    if pending_executor_id not in idle_executors:
+                        assert pending_executor_id in self.executors_manager.executors
+                        logger.debug(f"Request {request.request_id}'s pending executor {pending_executor_id} is busy but alive. Skip.")
+                        skipped_waiting_requests.prepend_request(request)
                     else:
-                        raise RuntimeError(
-                            f"Invalid request status: {request.status}")
-
-                    req_to_new_block_ids[executor_id][request.request_id] = \
-                            self.kv_cache_managers[executor_id].get_block_ids(
-                                request.request_id)
-                    num_scheduled_tokens[executor_id][request.request_id] = num_tokens_needed
-                    executor_load[executor_id] += num_tokens_needed
-                    token_budget[executor_id] -= num_tokens_needed
-                    self.request_to_executor[request.request_id] = executor_id
-                    request.status = RequestStatus.RUNNING
-
-                    # no need to look for other executors
-                    break
+                        logger.debug(f"Scheduling WAITING request {request.request_id} to its pending executor {pending_executor_id}")
+                        add_new_request(request, pending_executor_id)
+                        self.running.append(request)
                 else:
-                    # The request cannot be scheduled.
-                    request = self.waiting.pop_request()
-                    skipped_waiting_requests.prepend_request(request)
-                    continue
+                    logger.debug(f"Request {request.request_id} has no pending executor. Try to find an executor.")
+
+                    # TODO: optimize this
+                    # loop through executors in increasing order of load
+                    # idle_executors.sort(key=lambda eid: self.executor_states[eid].get_projected_token_budget(), reverse=True)
+                    all_executors = sorted(
+                        self.executor_states.keys(),
+                        key=lambda eid: self.executor_states[eid].get_projected_token_budget(), 
+                        reverse=True)
+                    
+                    for executor_id in all_executors:
+                        # if executor_id in scheduled_running_reqs and \
+                        #     len(scheduled_running_reqs[executor_id]) == \
+                        #         self.max_num_running_reqs:
+                        #     continue
+
+                        if request.num_tokens > self.executor_states[executor_id].get_projected_token_budget():
+                            logger.debug(f"Not enough token budget to schedule WAITING request {request.request_id} to executor {executor_id}. Needed {request.num_tokens}, available {self.executor_states[executor_id].get_projected_token_budget()}. Skip.")
+                            skipped_waiting_requests.prepend_request(request)
+                            break
+
+                        if len(self.executor_states[executor_id].req_ids) >= self.max_num_running_reqs:
+                            logger.debug(f"Executor {executor_id} has reached max num running requests. Try another executor.")
+                            continue
+
+                        if executor_id in idle_executors:
+                            logger.debug(f"Confirmed: Scheduling WAITING request {request.request_id} to executor {executor_id}.")
+                            add_new_request(request, executor_id)
+                            self.running.append(request)
+                            break
+                        else:
+                            logger.debug(f"Confirmed: Scheduling WAITING request {request.request_id} to executor {executor_id} as pending.")
+                            mark_request_as_pending(request, executor_id)
+                            skipped_waiting_requests.prepend_request(request)
+                            break
+                    else:
+                        logger.debug(f"Request {request.request_id} cannot be scheduled to any executor now. Skip.")
+                        skipped_waiting_requests.prepend_request(request)
+                        
+
+                    #     num_external_computed_tokens = 0
+
+                    #     num_tokens_needed = request.num_tokens
+                    #     if num_tokens_needed > token_budget[executor_id]:
+                    #         # The request cannot be scheduled.
+                    #         continue
+                    #         # self.waiting.pop_request()
+                    #         # skipped_waiting_requests.prepend_request(request)
+                    #         # continue
+
+                    #     new_blocks = self.kv_cache_managers[executor_id].allocate_slots(
+                    #         request,
+                    #         num_tokens_needed,
+                    #     )
+                    #     if new_blocks is None:
+                    #         # The request cannot be scheduled.
+                    #         continue
+                    
+                    #     logger.debug(f"WAITING: new_blocks: {new_blocks} with num_tokens_needed: {num_tokens_needed}")
+                            
+                    #     # Request was already popped from self.waiting
+                    #     # unless it was re-added above due to new_blocks being None.
+                    #     request = self.waiting.pop_request()
+                    #     req_index += 1 # not used ?
+                    #     self.running.append(request)
+                    #     if self.log_stats:
+                    #         request.record_event(EngineCoreEventType.SCHEDULED,
+                    #                             scheduled_timestamp)
+                    #     if request.status == RequestStatus.WAITING:
+                    #         scheduled_new_reqs[executor_id].append(request)
+                    #     elif request.status == RequestStatus.PREEMPTED:
+                    #         scheduled_resumed_reqs[executor_id].append(request)
+                    #     else:
+                    #         raise RuntimeError(
+                    #             f"Invalid request status: {request.status}")
+
+                    #     req_to_new_block_ids[executor_id][request.request_id] = \
+                    #             self.kv_cache_managers[executor_id].get_block_ids(
+                    #                 request.request_id)
+                    #     num_scheduled_tokens[executor_id][request.request_id] = num_tokens_needed
+                    #     executor_load[executor_id] += num_tokens_needed
+                    #     token_budget[executor_id] -= num_tokens_needed
+                    #     self.request_to_executor[request.request_id] = executor_id
+                    #     request.status = RequestStatus.RUNNING
+
+                    #     # no need to look for other executors
+                    #     break
+                    # else:
+                    #     # The request cannot be scheduled.
+                    #     request = self.waiting.pop_request()
+                    #     skipped_waiting_requests.prepend_request(request)
+                    #     continue
 
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
@@ -421,7 +658,7 @@ class ClusterScheduler(SchedulerInterface):
         # Check constraints per executor
         for executor_id in idle_executors:
             # check token budget
-            assert token_budget[executor_id] >= 0
+            assert self.executor_states[executor_id].get_token_budget() >= 0
             if executor_id in scheduled_running_reqs:
                 assert len(scheduled_running_reqs[executor_id]) <= \
                     self.max_num_running_reqs
@@ -445,9 +682,25 @@ class ClusterScheduler(SchedulerInterface):
 
         for executor_id in idle_executors:
             if executor_id not in num_scheduled_tokens and \
-                not self.finished_req_ids[executor_id]:
+                not self.free_req_ids[executor_id]:
+                logger.debug(f"Executor {executor_id} has no requests scheduled to run, and no finished requests. skip")
                 # not scheduled to run at all, and no finished reqs. skip
+                async with self.executors_manager.cond[executor_id]:
+                    self.executors_manager.can_kill[executor_id] = True
+                    self.executors_manager.cond[executor_id].notify()
                 continue
+
+            # if executor_id not in num_scheduled_tokens and \
+            #     not self.finished_req_ids[executor_id]:
+            #     # not scheduled to run at all, and no finished reqs. skip
+            #     # self.executors_manager.executor_locks[executor_id].release()
+            #     logger.debug(f"setting can_kill for executor {executor_id}")
+            #     async with self.executors_manager.cond[executor_id]:
+            #         self.executors_manager.can_kill[executor_id] = True
+            #         self.executors_manager.cond[executor_id].notify()
+            #     continue
+
+            self.executors_manager.can_schedule[executor_id] = False
             
             new_reqs_data = [
                 NewRequestData.from_request(req, 
@@ -486,7 +739,7 @@ class ClusterScheduler(SchedulerInterface):
                 # It contains the request IDs that are finished in between
                 # the previous and the current steps.
                 finished_req_ids=self.finished_req_ids[executor_id],
-                free_req_ids={},
+                free_req_ids=self.free_req_ids[executor_id],
                 free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
                 structured_output_request_ids=structured_output_request_ids.get(executor_id, {}),
                 grammar_bitmask=None,
@@ -530,6 +783,7 @@ class ClusterScheduler(SchedulerInterface):
         # return scheduler_output
         # [TODO (tau_chang)]: update this
         # return {0: scheduler_output}
+
         return scheduler_outputs
 
     def _update_after_schedule(
@@ -547,8 +801,6 @@ class ClusterScheduler(SchedulerInterface):
         # 3. If some tokens (e.g. spec tokens) are rejected later, the number of
         #    computed tokens will be adjusted in update_from_output.
 
-        self.executors[executor_id].set_in_execution(True)
-        
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
@@ -567,6 +819,7 @@ class ClusterScheduler(SchedulerInterface):
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
         # it will also affect the scheduler output.
         self.finished_req_ids[executor_id] = set()
+        self.free_req_ids[executor_id] = set()
 
     def _make_cached_request_data(
         self,
@@ -705,7 +958,7 @@ class ClusterScheduler(SchedulerInterface):
             encoder_inputs_to_schedule.append(i)
         return encoder_inputs_to_schedule, num_new_tokens, encoder_budget
 
-    def update_from_output(
+    async def update_from_output(
         self,
         executor_id: int,
         scheduler_output: SchedulerOutput,
@@ -722,7 +975,15 @@ class ClusterScheduler(SchedulerInterface):
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
         
-        self.executors[executor_id].set_in_execution(False)
+        # notify kill, if any
+        # self.executors_manager.executor_locks[executor_id].release()
+        logger.debug(f"in update_from_output for executor {executor_id}")
+        logger.debug(f"setting can_kill for executor {executor_id}")
+        self.executors_manager.can_schedule[executor_id] = True
+        async with self.executors_manager.cond[executor_id]:
+            self.executors_manager.can_kill[executor_id] = True
+            self.executors_manager.cond[executor_id].notify()
+        # self.executors_manager.can_kill[executor_id].set()
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
@@ -780,7 +1041,7 @@ class ClusterScheduler(SchedulerInterface):
                                      pooler_output)
 
             if stopped:
-                kv_transfer_params = self._free_request(request)
+                kv_transfer_params = self._free_request(request, True)
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
                 else:
@@ -925,8 +1186,10 @@ class ClusterScheduler(SchedulerInterface):
         return len(self.running), len(self.waiting)
 
     def add_request(self, request: Request) -> None:
+        logger.debug(f"Scheduler adding request {request.request_id}")
         self.waiting.add_request(request)
         self.requests[request.request_id] = request
+        self.request_states[request.request_id] = RequestState(request)
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
 
@@ -972,42 +1235,157 @@ class ClusterScheduler(SchedulerInterface):
         # Second pass: set status and free requests
         for request in valid_requests:
             request.status = finished_status
-            self._free_request(request)
-
-    def _free_request(self, request: Request) -> Optional[dict[str, Any]]:
-        assert request.is_finished()
-        executor_id = self.request_to_executor[request.request_id]
-
-        delay_free_blocks, kv_xfer_params = self._connector_finished(request)
-        self.encoder_cache_manager.free(request)
-        request_id = request.request_id
-        self.finished_req_ids[executor_id].add(request_id)
-        if self.finished_req_ids_dict is not None:
-            self.finished_req_ids_dict[executor_id][request.client_index].\
-                add(request_id)
-
-        if not delay_free_blocks:
-            self._free_blocks(request)
+            self._free_request(request, True)
         
-        self.request_to_executor.pop(request_id, None)
+    def _free_request_on_executor(self, request: Request, executor_id: int, 
+                      finished: bool, prune: bool = True) -> Optional[dict[str, Any]]:
+        logger.debug(f"in _free_request_on_executor, request: {request}, executor_id: {executor_id}, finished: {finished}")
+        request_id = request.request_id
+        assert executor_id in self.request_states[request_id].executors_to_free
 
-        return kv_xfer_params
+        # # [tau_chang] Not used start
+        # delay_free_blocks, kv_xfer_params = self._connector_finished(request)
+        # self.encoder_cache_manager.free(request)
+        # # [tau_chang] Not used end
 
-    def _free_blocks(self, request: Request):
-        assert request.is_finished()
-        executor_id = self.request_to_executor.get(request.request_id)
+        self.free_req_ids[executor_id].add(request_id)
+        if finished:
+            self.finished_req_ids[executor_id].add(request_id)
+
+            if self.finished_req_ids_dict is not None:
+                self.finished_req_ids_dict[executor_id][request.client_index].\
+                    add(request_id)
+
+        # if not delay_free_blocks:
+        #     self._free_blocks(request, executor_id)
+        self._free_blocks(request, executor_id)
+
+        # update states
+        if executor_id == self.request_states[request_id].executor_id:
+            self.request_states[request_id].remove_executor()
+        else:
+            self.request_states[request_id].remove_executor_to_free(executor_id)
+
+        self.executor_states[executor_id].remove_request(request_id)
+        if prune and not self.request_states[request_id].executors_to_free:
+            del self.request_states[request_id]
+            del self.requests[request_id]
+        
+        return None
+        
+
+    def _free_request(self, request: Request, 
+                      finished: bool) -> Optional[dict[str, Any]]:
+        logger.debug(f"in _free_request, request: {request}, finished: {finished}")
+        for executor_id in list(self.request_states[request.request_id].executors_to_free):
+            self._free_request_on_executor(request, executor_id, finished)
+        
+        return None
+
+
+    def _free_blocks(self, request: Request, executor_id: int):
+        # assert request.is_finished()
+        # executor_id = self.request_to_executor.get(request.request_id)
         self.kv_cache_managers[executor_id].free(request)
         self.kv_cache_managers[executor_id].free_block_hashes(request)
         logger.debug(f"Freed blocks for request {request.request_id} on executor {executor_id}")
-        del self.requests[request.request_id]
+        # del self.requests[request.request_id]
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)
 
     def has_finished_requests(self) -> bool:
-        logger.debug(f"in has_finished_requests, finished_req_ids: {self.finished_req_ids}")
-        return any(len(finished) > 0 for finished in self.finished_req_ids.values())
+        # logger.debug(f"in has_finished_requests, finished_req_ids: {self.finished_req_ids}")
+        # return any(len(finished) > 0 for finished in self.finished_req_ids.values())
+        logger.debug(f"in has_finished_requests, free_req_ids: {self.free_req_ids}")
+        return any(len(free) > 0 for free in self.free_req_ids.values())
         # return len(self.finished_req_ids) > 0
+
+    # def add_request(self, request: Request) -> None:
+    #     self.waiting.add_request(request)
+    #     self.requests[request.request_id] = request
+    #     self.request_states[request.request_id] = RequestState(request)
+    #     if self.log_stats:
+    #         request.record_event(EngineCoreEventType.QUEUED)
+
+    # def finish_requests(
+    #     self,
+    #     request_ids: Union[str, Iterable[str]],
+    #     finished_status: RequestStatus,
+    # ) -> None:
+    #     """Handles the finish signal from outside the scheduler.
+
+    #     For example, the API server can abort a request when the client
+    #     disconnects.
+    #     """
+    #     assert RequestStatus.is_finished(finished_status)
+    #     if isinstance(request_ids, str):
+    #         request_ids = (request_ids, )
+    #     else:
+    #         request_ids = set(request_ids)
+
+    #     running_requests_to_remove = []
+    #     waiting_requests_to_remove = []
+    #     valid_requests = []
+
+    #     # First pass: collect requests to remove from queues
+    #     for req_id in request_ids:
+    #         request = self.requests.get(req_id)
+    #         if request is None:
+    #             # Invalid request ID.
+    #             continue
+
+    #         valid_requests.append(request)
+    #         if request.status == RequestStatus.RUNNING:
+    #             running_requests_to_remove.append(request)
+    #         else:
+    #             waiting_requests_to_remove.append(request)
+
+    #     # Remove all requests from queues at once for better efficiency
+    #     for request in running_requests_to_remove:
+    #         self.running.remove(request)
+    #     if waiting_requests_to_remove:
+    #         self.waiting.remove_requests(waiting_requests_to_remove)
+
+    #     # Second pass: set status and free requests
+    #     for request in valid_requests:
+    #         request.status = finished_status
+    #         self._free_request(request)
+
+    # def _free_request(self, request: Request) -> Optional[dict[str, Any]]:
+    #     assert request.is_finished()
+    #     executor_id = self.request_to_executor[request.request_id]
+
+    #     delay_free_blocks, kv_xfer_params = self._connector_finished(request)
+    #     self.encoder_cache_manager.free(request)
+    #     request_id = request.request_id
+    #     self.finished_req_ids[executor_id].add(request_id)
+    #     if self.finished_req_ids_dict is not None:
+    #         self.finished_req_ids_dict[executor_id][request.client_index].\
+    #             add(request_id)
+
+    #     if not delay_free_blocks:
+    #         self._free_blocks(request)
+        
+    #     self.request_to_executor.pop(request_id, None)
+
+    #     return kv_xfer_params
+
+    # def _free_blocks(self, request: Request):
+    #     assert request.is_finished()
+    #     executor_id = self.request_to_executor.get(request.request_id)
+    #     self.kv_cache_managers[executor_id].free(request)
+    #     self.kv_cache_managers[executor_id].free_block_hashes(request)
+    #     logger.debug(f"Freed blocks for request {request.request_id} on executor {executor_id}")
+    #     del self.requests[request.request_id]
+
+    # def get_num_unfinished_requests(self) -> int:
+    #     return len(self.waiting) + len(self.running)
+
+    # def has_finished_requests(self) -> bool:
+    #     logger.debug(f"in has_finished_requests, finished_req_ids: {self.finished_req_ids}")
+    #     return any(len(finished) > 0 for finished in self.finished_req_ids.values())
+    #     # return len(self.finished_req_ids) > 0
     
     def has_not_in_execution_requests(self) -> bool:
         """Returns True if there are requests that are not in execution."""
@@ -1130,7 +1508,41 @@ class ClusterScheduler(SchedulerInterface):
             logger.debug("Finished sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])
 
-    def add_executor(self, executor_id: int, num_gpus: int) -> None:
-        if executor_id in self.executors:
-            raise ValueError(f"Executor ID {executor_id} already exists.")
-        self.executors[executor_id] = ExecutorState(executor_id, num_gpus)
+    def add_executor(self, executor_id: int) -> None:
+        assert executor_id not in self.executor_states
+
+        executor = self.executors_manager.executors[executor_id]
+
+        self.executor_states[executor.id] = ExecutorState(executor, self.max_num_scheduled_tokens)
+        self.kv_cache_managers[executor.id] = KVCacheManager(
+            kv_cache_config=self.executors_manager.\
+                get_scheduler_kv_cache_config(executor.id),
+            max_model_len=self.max_model_len,
+            enable_caching=self.cache_config.enable_prefix_caching,
+            caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
+            use_eagle=self.use_eagle,
+            log_stats=self.log_stats,
+            enable_kv_cache_events=self.enable_kv_cache_events,
+        )
+        logger.debug(f"Added executor {executor.id} to scheduler.")
+            
+    def remove_executor(self, executor_id: int) -> None:
+        assert executor_id in self.executor_states
+        for req_id in self.executor_states[executor_id].req_ids:
+            # clear their executors
+            self.request_states[req_id].remove_executor()
+        for req_id in self.executor_states[executor_id].pending_req_ids:
+            self.request_states[req_id].remove_pending_executor()
+
+        del self.executor_states[executor_id]
+        logger.debug(f"Removed executor {executor_id} from scheduler.")
+
+    
+    def update_executors(self) -> None:
+        for executor_id in self.executors_manager.executors:
+            if executor_id not in self.executor_states:
+                self.add_executor(executor_id)
+        
+        for executor_id in list(self.executor_states.keys()):
+            if executor_id not in self.executors_manager.executors:
+                self.remove_executor(executor_id)

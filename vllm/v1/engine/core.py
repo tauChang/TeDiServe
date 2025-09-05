@@ -41,6 +41,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.executors_manager import ExecutorsManager
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
@@ -92,57 +93,34 @@ class EngineCore:
         logger.debug("Number of GPUs per model executor: %s",
                      vllm_config.cluster_config.num_gpus_per_model_executor)
         
-        self.resource_manager = ResourceManager(vllm_config)
+        self.executor_class = executor_class
+        self.executors_manager = ExecutorsManager(
+            executor_class, vllm_config, executor_fail_callback)
+        self.resource_manager = ResourceManager(
+            vllm_config, self.executors_manager)
 
         # Initialize Ray and resource manager
         self.resource_manager.initialize_placement_group()
-        self.resource_manager.reconfig()
+        reconfig_cmd = self.resource_manager.reconfig()
+        asyncio.run(reconfig_cmd.execute(self.executors_manager))
             
-        # self.model_executors = [
-        #     executor_class(vllm_config, id=i) for i in range(
-        #         len(vllm_config.cluster_config.num_gpus_per_model_executor))
-        # ]
-        from concurrent.futures import ThreadPoolExecutor
-
-        with ThreadPoolExecutor() as pool:
-            futures = [
-                pool.submit(executor_class, vllm_config, i)
-                for i in range(len(vllm_config.cluster_config.num_gpus_per_model_executor))
-            ]
-            self.model_executors = [f.result() for f in futures]
-            
-        # Setup Model.
-        # [TODO (tau_chang)] This
-        # model_executor_count = 1
-        # self.model_executors = [
-        #     executor_class(vllm_config) for _ in range(model_executor_count)
-        # ]
-        if executor_fail_callback is not None:
-            for model_executor in self.model_executors:
-                model_executor.register_failure_callback(
-                    executor_fail_callback)
-        # self.model_executor = executor_class(vllm_config)
-        # if executor_fail_callback is not None:
-        #     self.model_executor.register_failure_callback(
-        #         executor_fail_callback)
-
         self.available_gpu_memory_for_kv_cache = -1
 
         # Setup KV Caches and update CacheConfig after profiling.
-        kv_cache_configs = {}
-        for executor_id, model_executor in enumerate(self.model_executors):
-            num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
-                self._initialize_kv_caches(executor_id, vllm_config)
+        # kv_cache_configs = {}
+        # for executor_id, model_executor in self.executors_manager.executors.items():
+        #     num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
+        #         self._initialize_kv_caches(executor_id, vllm_config)
 
-            # [TODO (tau_chang)]: Fix
-            vllm_config.cache_config.num_gpu_blocks[executor_id] = num_gpu_blocks
-            vllm_config.cache_config.num_cpu_blocks[executor_id] = num_cpu_blocks
-            kv_cache_configs[executor_id] = kv_cache_config
-            self.collective_rpc(executor_id, "initialize_cache",
-                                args=(num_gpu_blocks, num_cpu_blocks))
-        
-        logger.debug("Cache config after initialization: %s", 
-                     vllm_config.cache_config)
+        #     # [TODO (tau_chang)]: Fix
+        #     vllm_config.cache_config.num_gpu_blocks[executor_id] = num_gpu_blocks
+        #     vllm_config.cache_config.num_cpu_blocks[executor_id] = num_cpu_blocks
+        #     kv_cache_configs[executor_id] = kv_cache_config
+        #     self.collective_rpc(executor_id, "initialize_cache",
+        #                         args=(num_gpu_blocks, num_cpu_blocks))
+
+        # logger.debug("Cache config after initialization: %s", 
+        #              vllm_config.cache_config)
 
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
@@ -165,8 +143,9 @@ class EngineCore:
 
         self.scheduler: SchedulerInterface = Scheduler(
             vllm_config=vllm_config,
+            executors_manager=self.executors_manager,
             # kv_cache_config=kv_cache_config,
-            kv_cache_configs=kv_cache_configs,
+            # kv_cache_configs=kv_cache_configs,
             # kv_cache_config=kv_cache_configs[0],
             structured_output_manager=self.structured_output_manager,
             include_finished_set=vllm_config.parallel_config.data_parallel_size
@@ -174,7 +153,7 @@ class EngineCore:
             log_stats=self.log_stats,
         )
         self.scheduler_outputs: dict[int, SchedulerOutput] = \
-            {i: None for i in range(len(self.model_executors))}
+            {i: None for i in self.executors_manager.executors.keys()}
 
         # Setup MM Input Mapper.
         self.mm_input_cache_server = MirroredProcessingCache(
@@ -186,7 +165,7 @@ class EngineCore:
         # to eliminate pipeline bubbles.
         
         # [TODO (tau_chang)]: for now
-        self.batch_queue_size = self.model_executors[0].max_concurrent_batches
+        self.batch_queue_size = self.executors_manager.executors[0].max_concurrent_batches
         self.batch_queue: Optional[queue.Queue[tuple[Future[ModelRunnerOutput],
                                                      SchedulerOutput]]] = None
         if self.batch_queue_size > 1:
@@ -198,7 +177,7 @@ class EngineCore:
             self, executor_id, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
         start = time.time()
         
-        model_executor = self.model_executors[executor_id]
+        model_executor = self.executors_manager.executors[executor_id]
 
         # Get all kv cache needed by the model
         kv_cache_specs = model_executor.get_kv_cache_specs()
@@ -301,8 +280,9 @@ class EngineCore:
         try:
             logger.debug(f"Executing model for executor {executor_id}")
             print(f"Executing model for executor {executor_id} ", flush=True)
-            model_output = await self.model_executors[executor_id].\
+            model_output = await self.executors_manager.executors[executor_id].\
                 execute_model_async(scheduler_output)  # type: ignore
+
             logger.debug(f"Model output for executor {executor_id}: {model_output}")
             self.executor_output_queue.put_nowait((executor_id, model_output))
         except Exception as err:
@@ -404,18 +384,12 @@ class EngineCore:
 
     def shutdown(self):
         self.structured_output_manager.clear_backend()
-        for model_executor in self.model_executors:
-            model_executor.shutdown()
-        # if self.model_executor:
-        #     self.model_executor.shutdown()
+        self.executors_manager.shutdown()
         if self.scheduler:
             self.scheduler.shutdown()
 
     def profile(self, is_start: bool = True):
-        for model_executor in self.model_executors:
-            if model_executor.profile:
-                model_executor.profile(is_start)
-        # self.model_executor.profile(is_start)
+        self.executors_manager.profile(is_start)
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
@@ -430,21 +404,13 @@ class EngineCore:
         self.scheduler.reset_prefix_cache()
 
     def sleep(self, level: int = 1):
-        for model_executor in self.model_executors:
-            model_executor.sleep(level)
-        # self.model_executor.sleep(level)
+        self.executors_manager.sleep(level)
 
     def wake_up(self, tags: Optional[list[str]] = None):
-        for model_executor in self.model_executors:
-            model_executor.wake_up(tags)
-        # self.model_executor.wake_up(tags)
+        self.executors_manager.wake_up(tags)
 
     def is_sleeping(self) -> bool:
-        for model_executor in self.model_executors:
-            if not model_executor.is_sleeping():
-                return False
-        return True
-        # return self.model_executor.is_sleeping
+        return self.executors_manager.is_sleeping()
 
     # def execute_dummy_batch(self):
     #     self.model_executor.collective_rpc("execute_dummy_batch")
@@ -477,8 +443,8 @@ class EngineCore:
                        timeout: Optional[float] = None,
                        args: tuple = (),
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
-        return self.model_executors[executor_id].collective_rpc(method, timeout, 
-                                                                args, kwargs)
+        return self.executors_manager.\
+            collective_rpc(executor_id, method, timeout, args, kwargs)
 
     # def save_tensorized_model(
     #     self,
@@ -507,7 +473,8 @@ class EngineCoreProc(EngineCore):
                 RayDistributedExecutor)
         assert executor_class == RayDistributedExecutor
 
-        self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
+        # self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
+        self.input_queue = asyncio.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
                                               bytes]]()
         # self.executor_output_queue = queue.Queue[tuple[int, ModelRunnerOutput]]()
@@ -543,15 +510,18 @@ class EngineCoreProc(EngineCore):
         self.step_fn = (self.step if self.batch_queue is None else
                         self.step_with_batch_queue)
 
+        self.addresses = addresses
+        self.identity = identity
         # Background Threads and Queues for IO. These enable us to
         # overlap ZMQ socket IO with GPU since they release the GIL,
         # and to overlap some serialization/deserialization with the
         # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-        threading.Thread(target=self.process_input_sockets,
-                         args=(addresses.inputs, addresses.coordinator_input,
-                               identity),
-                         daemon=True).start()
+        # threading.Thread(target=self.process_input_sockets,
+        #                  args=(addresses.inputs, addresses.coordinator_input,
+        #                        identity),
+        #                  daemon=True).start()
+        asyncio
         self.output_thread = threading.Thread(
             target=self.process_output_sockets,
             args=(addresses.outputs, addresses.coordinator_output,
@@ -714,7 +684,7 @@ class EngineCoreProc(EngineCore):
             else:
                 engine_core = EngineCoreProc(*args, **kwargs)
 
-            asyncio.run(engine_core.run_busy_loop())
+            asyncio.run(engine_core.run_all_loops())
 
         except SystemExit:
             logger.debug("EngineCore exiting.")
@@ -733,11 +703,34 @@ class EngineCoreProc(EngineCore):
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
 
+    async def run_all_loops(self):
+        await asyncio.gather(
+            self.run_busy_loop(),
+            self.process_input_sockets_async(
+                self.addresses.inputs,
+                self.addresses.coordinator_input,
+                self.identity
+            ),
+            self.run_reconfigure_loop(),
+        )
+
+    async def run_reconfigure_loop(self):
+        logger.debug("Starting EngineCore reconfiguration loop.")
+        while True:
+            logger.debug(f"Reconfiguration loop sleeping for 1 minutes.")
+            await asyncio.sleep(0.5 * 60)
+            logger.debug(f"Reconfiguration loop woke up.")
+            reconfig_cmd = self.resource_manager.reconfig()
+            await reconfig_cmd.execute(self.executors_manager)
+            logger.debug(f"after reconfig, executors_manager: "
+                         f"{self.executors_manager}")
+
     async def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
         needs_engine_step = False # added_or_aborted | received_non_empty_output
+        logger.debug("Starting EngineCore busy loop.")
         while True:
-            needs_engine_step |= self._process_input_queue()
+            needs_engine_step |= await self._process_input_queue()
             # must have request at this point
             if needs_engine_step:
                 await self._process_engine_step()
@@ -763,7 +756,7 @@ class EngineCoreProc(EngineCore):
                 logger.debug("Stepping engine core bcause of not in execution requests.")
                 await self._process_engine_step()
 
-    def _process_input_queue(self):
+    async def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
 
         waited = False
@@ -774,7 +767,8 @@ class EngineCoreProc(EngineCore):
             if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
                 logger.debug("EngineCore waiting for work.")
                 waited = True
-            req = self.input_queue.get()
+            # req = self.input_queue.get()
+            req = await self.input_queue.get()
             logger.debug(f"Handling request: {req}")
             added_or_aborted |= self._handle_client_request(*req)
         if waited:
@@ -791,7 +785,8 @@ class EngineCoreProc(EngineCore):
         
     async def _process_engine_step(self) -> bool:
         # dict: executor_id -> SchedulerOutput
-        scheduler_outputs = self.scheduler.schedule()
+        scheduler_outputs = await self.scheduler.schedule()
+
         logger.debug(f"Scheduler outputs: {scheduler_outputs}")
         for executor_id, scheduler_output in scheduler_outputs.items():
             logger.debug(f"Processing scheduler output for executor {executor_id}")
@@ -814,9 +809,10 @@ class EngineCoreProc(EngineCore):
             logger.debug("Block waiting for executor output...")
             executor_id, model_output = await self.executor_output_queue.get()
             logger.debug(f"Got model output for executor {executor_id}: {model_output}")
-            outputs = self.scheduler.update_from_output(
+            outputs = await self.scheduler.update_from_output(
                 executor_id, self.scheduler_outputs[executor_id], model_output
             )
+            await asyncio.sleep(0)
             # outputs = self.scheduler.update_from_output(
             #     self.scheduler_outputs[executor_id], model_output
             # )
@@ -833,7 +829,7 @@ class EngineCoreProc(EngineCore):
         while not self.executor_output_queue.empty():
             logger.debug("Draining executor output queue...")
             executor_id, model_output = self.executor_output_queue.get_nowait()
-            outputs = self.scheduler.update_from_output(
+            outputs = await self.scheduler.update_from_output(
                 executor_id, self.scheduler_outputs[executor_id], model_output
             )
             logger.debug(f"Got model output for executor {executor_id}: {model_output}")
@@ -971,7 +967,77 @@ class EngineCoreProc(EngineCore):
                     request = decoder.decode(data_frames)
 
                     # Push to input queue for core busy loop.
+                    logger.debug(f"in process_input_sockets, got request: "
+                                 f"{request_type}, {request}")
                     self.input_queue.put_nowait((request_type, request))
+    
+    async def process_input_sockets_async(
+        self, 
+        input_addresses: list[str],
+        coord_input_address: Optional[str],
+        identity: bytes
+    ):
+        """Async input socket IO using zmq.asyncio."""
+        # from contextlib import AsyncExitStack
+
+        # Msgpack serialization decoding.
+        add_request_decoder = MsgpackDecoder(EngineCoreRequest)
+        generic_decoder = MsgpackDecoder()
+
+        ctx = zmq.asyncio.Context()
+        # async with AsyncExitStack() as stack:
+        with ExitStack() as stack:
+            input_sockets = [
+                # await stack.enter_async_context(
+                stack.enter_context(
+                    make_zmq_socket(ctx,
+                                    input_address,
+                                    zmq.DEALER,
+                                    identity=identity,
+                                    bind=False))
+                for input_address in input_addresses
+            ]
+
+            if coord_input_address is None:
+                coord_socket = None
+            else:
+                # coord_socket = await stack.enter_async_context(
+                coord_socket = stack.enter_context(
+                    make_zmq_socket(ctx,
+                                    coord_input_address,
+                                    zmq.XSUB,
+                                    identity=identity,
+                                    bind=False))
+                # Send subscription message to coordinator.
+                await coord_socket.send(b'\x01')
+
+            # Send initial message to each input socket
+            for input_socket in input_sockets:
+                await input_socket.send(b'')
+
+            sockets = input_sockets + ([coord_socket] if coord_socket else [])
+
+            while True:
+                # Wait until any socket is ready
+                ready_socks = await asyncio.gather(
+                    *[sock.recv_multipart(copy=False) for sock in sockets]
+                )
+
+                for idx, frames in enumerate(ready_socks):
+                    type_frame, *data_frames = frames
+                    request_type = EngineCoreRequestType(bytes(type_frame.buffer))
+                    
+                    decoder = add_request_decoder if (
+                        request_type == EngineCoreRequestType.ADD
+                    ) else generic_decoder
+                    
+                    request = decoder.decode(data_frames)
+
+                    # Push to input queue for core busy loop
+                    logger.debug(f"in process_input_sockets, got request: "
+                                f"{request_type}, {request}")
+                    await self.input_queue.put((request_type, request))
+                    
 
     def process_output_sockets(self, output_paths: list[str],
                                coord_output_path: Optional[str],

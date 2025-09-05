@@ -127,20 +127,20 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         for pos, token_id in new_token_ids:
             pos -= self.prompt_length
             self.token_ids[pos] = token_id
-            logger.debug(
-                f"updating token_ids at position {pos} with token_id {token_id}")
+            # logger.debug(
+            #     f"updating token_ids at position {pos} with token_id {token_id}")
             self.num_unmasked_tokens += 1
-        logger.debug(
-            f"self.token_ids: {self.token_ids}, "
-            f"self.num_unmasked_tokens: {self.num_unmasked_tokens}, ")
+        # logger.debug(
+        #     f"self.token_ids: {self.token_ids}, "
+        #     f"self.num_unmasked_tokens: {self.num_unmasked_tokens}, ")
         
         if self.num_unmasked_tokens == self.output_length:
             for i in range(self.output_length):
                 next_token = self.decode_next(self.token_ids[i])
                 self.output_text += next_token
-                logger.debug(
-                    f"Decoding next token at position {i}: {next_token}"
-                    f" self.output_text: {self.output_text}")
+                # logger.debug(
+                #     f"Decoding next token at position {i}: {next_token}"
+                #     f" self.output_text: {self.output_text}")
 
             return "stop"
         else:

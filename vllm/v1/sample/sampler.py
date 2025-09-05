@@ -160,8 +160,8 @@ class Sampler(nn.Module):
             confidence_slice = confidence[start:end]
             is_mask_slice = is_mask[start:end]
 
-            # logger.debug(f"confidence slice: {confidence_slice}")
-            # logger.debug(f"is mask slice: {is_mask_slice}")
+            logger.debug(f"confidence slice: {confidence_slice}")
+            logger.debug(f"is mask slice: {is_mask_slice}")
             
             assert is_mask_slice.any(), f"No masked tokens in range {start}:{end}"
 
