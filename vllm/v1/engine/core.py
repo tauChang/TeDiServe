@@ -278,11 +278,15 @@ class EngineCore:
 
     async def execute_model(self, executor_id, scheduler_output: SchedulerOutput):
         try:
+            logger.debug(f"Executor {executor_id} status transition: SCHEDULED -> EXECUTING")
+            self.executors_manager.executors[executor_id].set_executing()
             logger.debug(f"Executing model for executor {executor_id}")
             print(f"Executing model for executor {executor_id} ", flush=True)
             model_output = await self.executors_manager.executors[executor_id].\
                 execute_model_async(scheduler_output)  # type: ignore
 
+            logger.debug(f"Executor {executor_id} status transition: EXECUTING -> OUTPUT_READY")
+            self.executors_manager.executors[executor_id].set_output_ready()
             logger.debug(f"Model output for executor {executor_id}: {model_output}")
             self.executor_output_queue.put_nowait((executor_id, model_output))
         except Exception as err:

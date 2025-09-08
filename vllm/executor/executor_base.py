@@ -30,9 +30,11 @@ _R = TypeVar("_R", default=Any)
 class ExecutorStatus(enum.IntEnum):
     """Status of an executor."""
     IDLE = enum.auto()
+    CONSIDERED_FOR_SCHEDULING = enum.auto()
     SCHEDULED = enum.auto()
     EXECUTING = enum.auto()
     OUTPUT_READY = enum.auto()
+    KILLING = enum.auto()
 
 
 class ExecutorBase(ABC):
@@ -69,8 +71,6 @@ class ExecutorBase(ABC):
         self.is_sleeping = False
         self.sleeping_tags: set[str] = set()
         self.status = ExecutorStatus.IDLE
-
-        self.idle_event = asyncio.Event()
 
     @abstractmethod
     def _init_executor(self) -> None:
@@ -300,17 +300,39 @@ class ExecutorBase(ABC):
     
     def set_idle(self):
         self.status = ExecutorStatus.IDLE
-        self.idle_event.set()
+    
+    def set_considered_for_scheduling(self):
+        self.status = ExecutorStatus.CONSIDERED_FOR_SCHEDULING
         
     def set_scheduled(self):
         self.status = ExecutorStatus.SCHEDULED
-        self.idle_event.clear()
     
     def set_executing(self):
         self.status = ExecutorStatus.EXECUTING
         
     def set_output_ready(self):
         self.status = ExecutorStatus.OUTPUT_READY
+    
+    def set_killing(self):
+        self.status = ExecutorStatus.KILLING
+    
+    def is_idle(self) -> bool:
+        return self.status == ExecutorStatus.IDLE
+    
+    def is_considered_for_scheduling(self) -> bool:
+        return self.status == ExecutorStatus.CONSIDERED_FOR_SCHEDULING
+    
+    def is_scheduled(self) -> bool:
+        return self.status == ExecutorStatus.SCHEDULED
+    
+    def is_executing(self) -> bool:
+        return self.status == ExecutorStatus.EXECUTING
+    
+    def is_output_ready(self) -> bool:
+        return self.status == ExecutorStatus.OUTPUT_READY
+    
+    def is_killing(self) -> bool:
+        return self.status == ExecutorStatus.KILLING
 
 
 class DistributedExecutorBase(ExecutorBase):

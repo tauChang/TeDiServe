@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
+from vllm.executor.executor_base import ExecutorStatus
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
@@ -346,30 +347,14 @@ class ClusterScheduler(SchedulerInterface):
         logger.debug(f"start of schedule, executors manager: {self.executors_manager}")
         # obtain lock
         idle_executors = []
-        # for executor_id in self.executors_manager.executor_locks:
-        #     if not self.executors_manager.executor_locks[executor_id].locked():
-        #         logger.debug(f"executor {executor_id} is idle, acquiring lock")
-        #         # guaranteed to acquire lock without waiting
-        #         await self.executors_manager.executor_locks[executor_id].acquire()
-        #         logger.debug(f"executor {executor_id} lock acquired")
-        #         idle_executors.append(executor_id)
-        # for executor_id in self.executors_manager.can_schedule:
-        #     if self.executors_manager.can_schedule[executor_id].is_set():
-        #         logger.debug(f"executor {executor_id} is idle can_schedule is set")
-        #         logger.debug(f"clearing can_kill for executor {executor_id}")
-        #         self.executors_manager.can_kill[executor_id].clear()
-        #         idle_executors.append(executor_id)
-        #     else:
-        #         logger.debug(f"executor {executor_id} is busy can_schedule is not set")
+
         for executor_id in self.executors_manager.executors:
-            if self.executors_manager.can_schedule[executor_id]:
-                logger.debug(f"executor {executor_id} is idle can_schedule is set")
-                logger.debug(f"excutor: {self.executor_states[executor_id]}")
-                logger.debug(f"setting can_kill to False for {executor_id}")
-                self.executors_manager.can_kill[executor_id] = False
+            if self.executors_manager.executors[executor_id].is_idle():
+                logger.debug(f"executor {executor_id} is idle. Status transition: IDLE -> CONSIDERED_FOR_SCHEDULING")
+                self.executors_manager.executors[executor_id].set_considered_for_scheduling()
                 idle_executors.append(executor_id)
             else:
-                logger.debug(f"executor {executor_id} is busy can_schedule is False. Skip.")
+                logger.debug(f"executor {executor_id} is not idle. Skip.")
 
         # idle_executors are guranteed not killed from now on
         logger.debug(f"idle executors: {idle_executors}")
@@ -435,7 +420,7 @@ class ClusterScheduler(SchedulerInterface):
                 continue
 
             if cur_executor_id is None:
-                logger.debug(f"Request {request.request_id}'s executor is killed. Move to waiting.")
+                logger.debug(f"Request {request.request_id}'s executor is killed or being killed. Move to waiting.")
                 self.waiting.prepend_request(request)
                 self.running.pop(req_index)
                 continue
@@ -686,21 +671,13 @@ class ClusterScheduler(SchedulerInterface):
                 logger.debug(f"Executor {executor_id} has no requests scheduled to run, and no finished requests. skip")
                 # not scheduled to run at all, and no finished reqs. skip
                 async with self.executors_manager.cond[executor_id]:
-                    self.executors_manager.can_kill[executor_id] = True
+                    logger.debug(f"Executor {executor_id} status transition: CONSIDERED_FOR_SCHEDULING -> IDLE")
+                    self.executors_manager.executors[executor_id].set_idle()
                     self.executors_manager.cond[executor_id].notify()
                 continue
 
-            # if executor_id not in num_scheduled_tokens and \
-            #     not self.finished_req_ids[executor_id]:
-            #     # not scheduled to run at all, and no finished reqs. skip
-            #     # self.executors_manager.executor_locks[executor_id].release()
-            #     logger.debug(f"setting can_kill for executor {executor_id}")
-            #     async with self.executors_manager.cond[executor_id]:
-            #         self.executors_manager.can_kill[executor_id] = True
-            #         self.executors_manager.cond[executor_id].notify()
-            #     continue
-
-            self.executors_manager.can_schedule[executor_id] = False
+            logger.debug(f"Executor {executor_id} status transition: CONSIDERED_FOR_SCHEDULING -> SCHEDULED")
+            self.executors_manager.executors[executor_id].set_scheduled()
             
             new_reqs_data = [
                 NewRequestData.from_request(req, 
@@ -975,15 +952,10 @@ class ClusterScheduler(SchedulerInterface):
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
         
-        # notify kill, if any
-        # self.executors_manager.executor_locks[executor_id].release()
-        logger.debug(f"in update_from_output for executor {executor_id}")
-        logger.debug(f"setting can_kill for executor {executor_id}")
-        self.executors_manager.can_schedule[executor_id] = True
         async with self.executors_manager.cond[executor_id]:
-            self.executors_manager.can_kill[executor_id] = True
+            logger.debug(f"In update_from_output, executor {executor_id} status transition: OUTPUT_READY -> IDLE")
+            self.executors_manager.executors[executor_id].set_idle()
             self.executors_manager.cond[executor_id].notify()
-        # self.executors_manager.can_kill[executor_id].set()
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
@@ -1100,6 +1072,7 @@ class ClusterScheduler(SchedulerInterface):
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
+
 
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
@@ -1529,7 +1502,6 @@ class ClusterScheduler(SchedulerInterface):
     def remove_executor(self, executor_id: int) -> None:
         assert executor_id in self.executor_states
         for req_id in self.executor_states[executor_id].req_ids:
-            # clear their executors
             self.request_states[req_id].remove_executor()
         for req_id in self.executor_states[executor_id].pending_req_ids:
             self.request_states[req_id].remove_pending_executor()
@@ -1544,5 +1516,6 @@ class ClusterScheduler(SchedulerInterface):
                 self.add_executor(executor_id)
         
         for executor_id in list(self.executor_states.keys()):
-            if executor_id not in self.executors_manager.executors:
+            if executor_id not in self.executors_manager.executors or \
+                self.executors_manager.executors[executor_id].is_killing():
                 self.remove_executor(executor_id)

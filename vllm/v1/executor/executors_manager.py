@@ -35,8 +35,6 @@ class ExecutorsManager:
         self.executor_fail_callback = executor_fail_callback
 
         self.executors: dict[int, Executor] = {}
-        self.can_kill: dict[int, bool] = {}
-        self.can_schedule: dict[int, bool] = {}
         self.cond: dict[int, asyncio.Condition] = {}
 
         self.used_executor_ids = set()
@@ -70,8 +68,6 @@ class ExecutorsManager:
             executor.register_failure_callback(self.executor_fail_callback)
         
         self.executors[executor_id] = executor
-        self.can_kill[executor_id] = True
-        self.can_schedule[executor_id] = True
         self.cond[executor_id] = asyncio.Condition()
         
         self.used_executor_ids.add(executor_id)
@@ -90,34 +86,16 @@ class ExecutorsManager:
         executor = self.executors[executor_id]
         
         async with self.cond[executor_id]:
-            logger.debug(f"acquired cond, setting can_schedule to False for executor {executor_id}")
-            logger.debug(f"waiting for can_kill for executor {executor_id}")
+            logger.debug(f"waiting for executor {executor_id} to be idle")
             await self.cond[executor_id].wait_for(
-                lambda: self.can_kill[executor_id])
-            logger.debug(f"can_kill for executor {executor_id} is set, start shutdown")
-            logger.debug(f"setting can_schedule to False for executor {executor_id}")
-            self.can_schedule[executor_id] = False
+                lambda: executor.is_idle())
+            logger.debug(f"start shutting down executor {executor_id}. Status transition: IDLE -> KILLING")
+            self.executors[executor_id].set_killing()
             await asyncio.to_thread(self.executors[executor_id].shutdown)
 
         del self.executors[executor_id]
-        del self.can_kill[executor_id]
-        del self.can_schedule[executor_id]
         del self.cond[executor_id]
             
-        # logger.debug(f"waiting for can_kill for executor {executor_id}")
-        # await self.can_kill[executor_id].wait()
-        # logger.debug(f"can_kill for executor {executor_id} is set.")
-        # logger.debug(f"clearing can_schedule for executor {executor_id}")
-        # self.can_schedule[executor_id].clear()
-        # logger.debug(f"Executor {executor_id} lock acquired for killing.")
-        # # wait until released by executor that is being scheduled or 
-        # # in execution
-        # await asyncio.to_thread(self.executors[executor_id].shutdown)
-        # del self.executors[executor_id]
-        
-        # del self.can_kill[executor_id]
-        # del self.can_schedule[executor_id]
-
         logger.debug(f"Executor {executor_id} killed.")
     
     def collective_rpc(self, 
