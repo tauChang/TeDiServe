@@ -108,10 +108,16 @@ class Sampler(nn.Module):
         for i in range(len(sampling_metadata.num_tokens)):
             prompt_length = sampling_metadata.num_prompt_tokens[i]
             prompt_and_output_length = sampling_metadata.num_tokens[i]
+            block_start = sampling_metadata.cur_block_start[i]
+            block_end = block_start + sampling_metadata.denoise_block_size[i]
+            logger.debug(f"Request {i}: prompt_length={prompt_length}, "
+                         f"prompt_and_output_length={prompt_and_output_length}, "
+                         f"block_start={block_start}, block_end={block_end}, "
+                         )
             ranges.append(
-                (prompt_start + prompt_length,
-                 prompt_start + prompt_and_output_length,
-                 prompt_length)
+                (prompt_start + block_start,
+                    prompt_start + block_end,
+                    block_start)
             )
             prompt_start += prompt_and_output_length
         return ranges
@@ -152,16 +158,16 @@ class Sampler(nn.Module):
         x_0 = x_0.cpu()
         
         unmasked_tokens = []
-        for i, (start, end, prompt_length) in \
+        for i, (start, end, block_start) in \
             enumerate(self.get_output_range(sampling_metadata)):
             logger.debug(
-                f"Processing range {start}:{end}, prompt_length: {prompt_length}")
+                f"Processing range {start}:{end}, block_start={block_start}")
             x_0_slice = x_0[start:end]
             confidence_slice = confidence[start:end]
             is_mask_slice = is_mask[start:end]
 
-            logger.debug(f"confidence slice: {confidence_slice}")
-            logger.debug(f"is mask slice: {is_mask_slice}")
+            # logger.debug(f"confidence slice: {confidence_slice}")
+            # logger.debug(f"is mask slice: {is_mask_slice}")
             
             assert is_mask_slice.any(), f"No masked tokens in range {start}:{end}"
 
@@ -195,7 +201,7 @@ class Sampler(nn.Module):
             # [tau_chang]: Convert position back to absolute (including prompt).
             # append a list of tuples (index, token) to unmasked_tokens
             unmasked_tokens.append([
-                (index.item() + prompt_length, token.item())
+                (index.item() + block_start, token.item())
                 for index, token in zip(selected_indices, selected_tokens)
             ])
 

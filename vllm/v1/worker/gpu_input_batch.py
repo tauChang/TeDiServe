@@ -8,6 +8,7 @@ from typing import Optional, cast
 import numpy as np
 import torch
 
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.pooling_params import PoolingParams
@@ -23,6 +24,7 @@ from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 
+logger = init_logger(__name__)
 
 @dataclass
 class CachedRequestState:
@@ -41,6 +43,8 @@ class CachedRequestState:
     output_token_ids: list[int]
     unmasked_token_ids: list[tuple[int, int]]
     output_length: int
+    cur_block_start: int
+    denoise_block_size: int
 
     mrope_positions: Optional[torch.Tensor] = None
     mrope_position_delta: Optional[int] = None
@@ -112,7 +116,16 @@ class InputBatch:
         )
         self.num_computed_tokens_cpu = \
             self.num_computed_tokens_cpu_tensor.numpy()
-        self.num_denoise_ran = np.zeros(max_num_reqs, dtype=np.int32)
+        self.num_denoise_ran = torch.empty((max_num_reqs, ),
+                                           dtype=torch.int32,
+                                           device=device)
+        self.cur_block_start = torch.empty((max_num_reqs, ),
+                                             dtype=torch.int32,
+                                             device=device)
+        self.denoise_block_size = torch.empty((max_num_reqs, ),
+                                                dtype=torch.int32,
+                                                device=device)
+        self.sampling_metadata_needs_refresh = False
 
         # Block table.
         self.block_table = MultiGroupBlockTable(
@@ -307,6 +320,8 @@ class InputBatch:
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
         self.num_denoise_ran[req_index] = request.num_denoise_ran
+        self.cur_block_start[req_index] = request.cur_block_start
+        self.denoise_block_size[req_index] = request.denoise_block_size
         self.block_table.add_row(request.block_ids, req_index)
 
         if sampling_params := request.sampling_params:
@@ -462,6 +477,10 @@ class InputBatch:
             self.num_tokens[i2], self.num_tokens[i1]
         self.num_denoise_ran[i1], self.num_denoise_ran[i2] =\
             self.num_denoise_ran[i2], self.num_denoise_ran[i1]
+        self.cur_block_start[i1], self.cur_block_start[i2] =\
+            self.cur_block_start[i2], self.cur_block_start[i1]
+        self.denoise_block_size[i1], self.denoise_block_size[i2] =\
+            self.denoise_block_size[i2], self.denoise_block_size[i1]
         self.num_tokens_no_spec[i1], self.num_tokens_no_spec[i2] =\
             self.num_tokens_no_spec[i2], self.num_tokens_no_spec[i1]
         self.num_prompt_tokens[i1], self.num_prompt_tokens[i2] =\
@@ -568,6 +587,10 @@ class InputBatch:
                 empty_index] = self.num_computed_tokens_cpu[last_req_index]
             self.num_denoise_ran[empty_index] = self.num_denoise_ran[
                 last_req_index]
+            self.cur_block_start[empty_index] = self.cur_block_start[
+                last_req_index]
+            self.denoise_block_size[empty_index] = self.denoise_block_size[
+                last_req_index]
             self.block_table.move_row(last_req_index, empty_index)
             self.temperature_cpu[empty_index] = self.temperature_cpu[
                 last_req_index]
@@ -613,7 +636,8 @@ class InputBatch:
         batch_update = self.batch_update_builder.get_and_reset(self.num_reqs)
         for logit_proc in self.logitsprocs.all:
             logit_proc.update_state(batch_update)
-        if batch_update:
+        if batch_update or self.sampling_metadata_needs_refresh:
+            logger.debug("Refreshing sampling metadata")
             self.sampling_metadata = self._make_sampling_metadata()
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
@@ -678,6 +702,8 @@ class InputBatch:
             num_prompt_tokens= self.num_prompt_tokens[:self.num_reqs].tolist(),
             num_tokens=self.num_tokens[:self.num_reqs].tolist(),
             num_denoise_ran=self.num_denoise_ran[:self.num_reqs].tolist(),
+            cur_block_start=self.cur_block_start[:self.num_reqs].tolist(),
+            denoise_block_size=self.denoise_block_size[:self.num_reqs].tolist(),
         )
 
     @property

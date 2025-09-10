@@ -417,6 +417,9 @@ class ModelConfig:
     """Override dtype for attention"""
     mask_token_id: Optional[int] = 126336
     """The token ID to use for the mask token."""
+    denoise_block_size: Optional[int] = -1
+    """The block size for each denoising block. If -1, the entire
+    output is treated as a single denoising block."""
 
     def compute_hash(self) -> str:
         """

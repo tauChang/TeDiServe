@@ -811,6 +811,8 @@ class ClusterScheduler(SchedulerInterface):
         new_block_ids: list[tuple[list[int], ...]] = []
         num_computed_tokens: list[int] = []
         num_denoise_ran: list[int] = []
+        cur_block_start: list[int] = []
+        denoise_block_size: list[int] = []
 
         use_connector = self.connector is not None
         for req in itertools.chain(running_reqs, resumed_reqs):
@@ -838,6 +840,8 @@ class ClusterScheduler(SchedulerInterface):
             new_block_ids.append(req_to_new_block_ids[req_id])
             num_computed_tokens.append(req.num_computed_tokens)
             num_denoise_ran.append(req.num_denoise_ran)
+            cur_block_start.append(req.cur_block_start)
+            denoise_block_size.append(req.denoise_block_size)
         # Because resumed_reqs is usually empty, it is more efficient to do
         # in-place appending so that we don't need to allocate a new list.
         resumed_from_preemption = [False] * len(running_reqs)
@@ -850,6 +854,8 @@ class ClusterScheduler(SchedulerInterface):
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_denoise_ran=num_denoise_ran,
+            cur_block_start=cur_block_start,
+            denoise_block_size=denoise_block_size,
         )
 
     def _try_schedule_encoder_inputs(

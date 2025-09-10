@@ -45,4 +45,6 @@ class SamplingMetadata:
     num_prompt_tokens: list[int]
     num_tokens: list[int]
     num_denoise_ran: list[int]
+    cur_block_start: list[int]
+    denoise_block_size: list[int]
 

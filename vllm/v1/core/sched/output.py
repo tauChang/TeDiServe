@@ -34,6 +34,9 @@ class NewRequestData:
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
     output_length: int
+    num_denoise_ran: int
+    cur_block_start: int
+    denoise_block_size: int
 
     @classmethod
     def from_request(
@@ -54,6 +57,9 @@ class NewRequestData:
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
             output_length=request.output_length,
+            num_denoise_ran=request.num_denoise_ran,
+            cur_block_start=request.cur_block_start,
+            denoise_block_size=request.denoise_block_size,
         )
 
     def __repr__(self):
@@ -69,6 +75,9 @@ class NewRequestData:
                 f"num_computed_tokens={self.num_computed_tokens},"
                 f"lora_request={self.lora_request},"
                 f"output_length={self.output_length}"
+                f"num_denoise_ran={self.num_denoise_ran},"
+                f"cur_block_start={self.cur_block_start},"
+                f"denoise_block_size={self.denoise_block_size}"
                 ")")
 
     # Version of __repr__ with the prompt data obfuscated
@@ -85,6 +94,9 @@ class NewRequestData:
                 f"num_computed_tokens={self.num_computed_tokens},"
                 f"lora_request={self.lora_request},"
                 f"output_length={self.output_length}"
+                f"num_denoise_ran={self.num_denoise_ran},"
+                f"cur_block_start={self.cur_block_start},"
+                f"denoise_block_size={self.denoise_block_size}"
                 ")")
 
 
@@ -102,6 +114,8 @@ class CachedRequestData:
     new_block_ids: list[tuple[list[int], ...]]
     num_computed_tokens: list[int]
     num_denoise_ran: list[int] = None
+    cur_block_start: list[int] = None
+    denoise_block_size: list[int] = None
 
     @property
     def num_reqs(self) -> int:
@@ -115,6 +129,9 @@ class CachedRequestData:
             new_token_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
+            num_denoise_ran=[],
+            cur_block_start=[],
+            denoise_block_size=[],
         )
 
 

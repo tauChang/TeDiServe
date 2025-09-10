@@ -5,6 +5,7 @@ import enum
 import time
 from typing import TYPE_CHECKING, Any, Optional, Union
 
+from vllm.logger import init_logger
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -17,6 +18,7 @@ from vllm.v1.utils import ConstantList
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
 
+logger = init_logger(__name__)
 
 class Request:
 
@@ -37,6 +39,7 @@ class Request:
         structured_output_request: Optional["StructuredOutputRequest"] = None,
         cache_salt: Optional[str] = None,
         priority: int = 0,
+        denoise_block_size: int = -1,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -109,6 +112,13 @@ class Request:
         assert len(self.mm_inputs) == len(self.mm_positions)
         if self.mm_hashes:
             assert len(self.mm_inputs) == len(self.mm_hashes)
+        
+        # for block diffusion
+        self.denoise_block_size = denoise_block_size if denoise_block_size > 0 \
+            else self.output_length
+        assert self.output_length % self.denoise_block_size == 0
+        self.cur_block_start = len(self.prompt_token_ids)
+        self.cur_block_num_unmasked_tokens = 0
 
         # Read-only views
         # Prevent directly appending to these lists since
@@ -126,7 +136,8 @@ class Request:
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest,
-                                 mask_token_id: int) -> "Request":
+                                 mask_token_id: int,
+                                 denoise_block_size: int) -> "Request":
         if request.mm_inputs is not None:
             assert isinstance(request.mm_inputs, list)
             assert is_list_of(request.mm_inputs, MultiModalKwargs), (
@@ -150,6 +161,7 @@ class Request:
                     if request.sampling_params else None,
             cache_salt=request.cache_salt,
             priority=request.priority,
+            denoise_block_size=denoise_block_size,
         )
 
     def append_unmasked_token_ids(
@@ -160,6 +172,15 @@ class Request:
         self.num_last_unmasked_tokens = len(token_ids)
         self._unmasked_token_ids.extend(token_ids)
         for pos, token_id in token_ids:
+            assert pos >= self.cur_block_start and pos < self.cur_block_start + self.denoise_block_size
+            self.cur_block_num_unmasked_tokens += 1
+            logger.debug(f"updating cur_block_num_unmasked_tokens to {self.cur_block_num_unmasked_tokens} for request {self.request_id}")
+            if self.cur_block_num_unmasked_tokens == self.denoise_block_size:
+                # move to the next block
+                logger.debug(f"Request {self.request_id} finished denoising block starting at position {self.cur_block_start}. Moving to next block.")
+                self.cur_block_start += self.denoise_block_size
+                self.cur_block_num_unmasked_tokens = 0
+
             pos -= len(self.prompt_token_ids)
             self._all_token_ids[pos] = token_id
             

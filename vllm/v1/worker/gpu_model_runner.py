@@ -364,6 +364,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         The SamplingMetadata is updated and copied to the GPU if there is a
         new/resumed/paused/finished request in the batch.
         """
+        self.input_batch.sampling_metadata_needs_refresh = False
+        # gets updated to True if cur_block_start or block_size changes
+        def update_and_flag(target, req_index, new_value):
+            changed = target[req_index] != new_value
+            target[req_index] = new_value
+            return changed
+
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.free_req_ids:
             self.requests.pop(req_id, None)
@@ -432,11 +439,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 generator=generator,
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
-                num_denoise_ran=0,
+                num_denoise_ran=new_req_data.num_denoise_ran,
                 output_token_ids=[self.model_config.mask_token_id] * new_req_data.output_length,
                 unmasked_token_ids=new_req_data.unmasked_token_ids,
                 lora_request=new_req_data.lora_request,
                 output_length=new_req_data.output_length,
+                cur_block_start=new_req_data.cur_block_start,
+                denoise_block_size=new_req_data.denoise_block_size,
             )
             for pos, token_id in new_req_data.unmasked_token_ids:
                 self.requests[req_id].update_output_token_id(pos, token_id)
@@ -492,6 +501,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Update the cached states.
             # req_state.num_computed_tokens = num_computed_tokens
             req_state.num_denoise_ran = req_data.num_denoise_ran[i]
+            req_state.cur_block_start = req_data.cur_block_start[i]
+            req_state.denoise_block_size = req_data.denoise_block_size[i]
 
             if not is_last_rank:
                 # When using PP, the scheduler sends the sampled tokens back,
@@ -543,6 +554,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for pos, token_id in req_data.new_token_ids[i]:
                     self.input_batch.token_ids_cpu[
                         req_index, pos] = token_id
+            
+            update_and_flag(self.input_batch.num_denoise_ran, req_index, req_state.num_denoise_ran)
+            refresh = False
+            refresh |= update_and_flag(self.input_batch.cur_block_start, req_index, req_state.cur_block_start)
+            refresh |= update_and_flag(self.input_batch.denoise_block_size, req_index, req_state.denoise_block_size)
+
+            self.input_batch.sampling_metadata_needs_refresh = refresh
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -2239,6 +2257,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_prompt_tokens=[seq_len // 2],
             num_tokens=[seq_len],
             num_denoise_ran=[0],
+            cur_block_start=[0],
+            denoise_block_size=[seq_len]
         )
         confidence_thresholds = [0.9]
         try:
@@ -2456,9 +2476,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # We skip EPLB here since we don't want to record dummy metrics
                 for _ in range(
                         self.compilation_config.cudagraph_num_of_warmups):
+                    iter_start_time = time.perf_counter()
                     self._dummy_run(num_tokens,
                                     capture_attn_cudagraph=full_cg,
                                     skip_eplb=True)
+                    iter_end_time = time.perf_counter()
+                    elasped_time_in_ms = (iter_end_time - iter_start_time) * 1000
+                    logger.debug(
+                        "Warmup iteration for capturing graph with %d tokens took %.2f ms",
+                        num_tokens, elasped_time_in_ms)
                 self._dummy_run(num_tokens,
                                 capture_attn_cudagraph=full_cg,
                                 skip_eplb=True)

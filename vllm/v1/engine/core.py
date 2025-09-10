@@ -254,8 +254,9 @@ class EngineCore:
         #     request.mm_inputs = self.mm_input_cache_server.get_and_update_p1(
         #         request.mm_inputs, request.mm_hashes)
 
-        req = Request.from_engine_core_request(request, mask_token_id=
-                                    self.vllm_config.model_config.mask_token_id)
+        req = Request.from_engine_core_request(request, 
+            mask_token_id=self.vllm_config.model_config.mask_token_id,
+            denoise_block_size=self.vllm_config.model_config.denoise_block_size)
         # if req.use_structured_output:
         #     # Start grammar compilation asynchronously
         #     self.structured_output_manager.grammar_init(req)
