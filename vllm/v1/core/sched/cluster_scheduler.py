@@ -296,16 +296,46 @@ class ClusterScheduler(SchedulerInterface):
 
         self.default_confidence_threshold = \
             self.scheduler_config.default_confidence_threshold
+        
+        self.cache_prefix = vllm_config.model_config.cache_prefix
+        self.cache_suffix = vllm_config.model_config.cache_suffix
 
     async def schedule(self) -> SchedulerOutput:
         # utils
+        def determine_new_exec_tokens(request: Request) -> int:
+            request.exec_start_pos = 0
+            request.num_exec_tokens = len(request._all_token_ids)
+            return request.num_exec_tokens
+
+        def determine_running_exec_tokens(request: Request) -> int:
+            request.exec_start_pos = request.cur_block_start if \
+                (self.cache_prefix and not request.is_start_of_new_block) \
+                    else 0
+            request.num_exec_tokens = request.denoise_block_size if \
+                (self.cache_suffix and not request.is_start_of_new_block) \
+                    else len(request._all_token_ids) - request.exec_start_pos
+            logger.debug(f"determining running exec tokens for request {request.request_id}: "
+                         f"exec_start_pos={request.exec_start_pos}, "
+                         f"num_exec_tokens={request.num_exec_tokens}"
+                         f"is_start_of_new_block={request.is_start_of_new_block}")
+            
+            return request.num_exec_tokens
+        
         def add_new_request(request: Request, executor_id: int) -> None:
             scheduled_new_reqs[executor_id].append(request)
+            if self.cache_prefix or self.cache_suffix:
+                new_blocks = self.kv_cache_managers[executor_id].allocate_slots(
+                    request,
+                    request.num_tokens,
+                )
+                assert new_blocks is not None
+                logger.debug(f"request {request.request_id} allocated new blocks {new_blocks} on executor {executor_id}")
+
             req_to_new_block_ids[executor_id][request.request_id] = \
                 self.kv_cache_managers[executor_id].get_block_ids(
                     request.request_id)
-            num_scheduled_tokens[executor_id][request.request_id] = request.num_tokens
-
+            num_scheduled_tokens[executor_id][request.request_id] = \
+                determine_new_exec_tokens(request)
             self.executor_states[executor_id].add_request(
                 request.request_id, request.num_tokens
             )
@@ -316,7 +346,8 @@ class ClusterScheduler(SchedulerInterface):
         def add_running_request(request: Request, executor_id: int) -> None:
             scheduled_running_reqs[executor_id].append(request)
             req_to_new_block_ids[executor_id][request.request_id] = ()
-            num_scheduled_tokens[executor_id][request.request_id] = request.num_tokens
+            num_scheduled_tokens[executor_id][request.request_id] = \
+                determine_running_exec_tokens(request)
 
             self.executor_states[executor_id].assert_request_added(request.request_id)
             self.request_states[request.request_id].assert_executor_set(executor_id)
@@ -570,6 +601,7 @@ class ClusterScheduler(SchedulerInterface):
 
                         if executor_id in idle_executors:
                             logger.debug(f"Confirmed: Scheduling WAITING request {request.request_id} to executor {executor_id}.")
+
                             add_new_request(request, executor_id)
                             self.running.append(request)
                             break
@@ -678,6 +710,7 @@ class ClusterScheduler(SchedulerInterface):
 
             logger.debug(f"Executor {executor_id} status transition: CONSIDERED_FOR_SCHEDULING -> SCHEDULED")
             self.executors_manager.executors[executor_id].set_scheduled()
+            logger.debug(f"req_to_new_block_ids: {req_to_new_block_ids[executor_id]}")
             
             new_reqs_data = [
                 NewRequestData.from_request(req, 
@@ -701,10 +734,18 @@ class ClusterScheduler(SchedulerInterface):
                 else:
                     confidence_thresholds[req_id] = self.default_confidence_threshold
                     logger.debug(f"using default confidence threshold {confidence_thresholds[req_id]} for req {req_id}")
+            
+            exec_start_pos: dict[str, int] = {}
+            
+            for req in new_reqs_data:
+                exec_start_pos[req.req_id] = req.exec_start_pos
+            for idx, req_id in enumerate(cached_reqs_data.req_ids):
+                exec_start_pos[req_id] = cached_reqs_data.exec_start_pos[idx]
 
             scheduler_output = SchedulerOutput(
                 scheduled_new_reqs=new_reqs_data,
                 scheduled_cached_reqs=cached_reqs_data,
+                exec_start_pos=exec_start_pos,
                 num_scheduled_tokens=num_scheduled_tokens[executor_id],
                 total_num_scheduled_tokens=sum(
                     num_scheduled_tokens[executor_id].values()),
@@ -813,6 +854,7 @@ class ClusterScheduler(SchedulerInterface):
         num_denoise_ran: list[int] = []
         cur_block_start: list[int] = []
         denoise_block_size: list[int] = []
+        exec_start_pos: list[int] = []
 
         use_connector = self.connector is not None
         for req in itertools.chain(running_reqs, resumed_reqs):
@@ -842,6 +884,7 @@ class ClusterScheduler(SchedulerInterface):
             num_denoise_ran.append(req.num_denoise_ran)
             cur_block_start.append(req.cur_block_start)
             denoise_block_size.append(req.denoise_block_size)
+            exec_start_pos.append(req.exec_start_pos)
         # Because resumed_reqs is usually empty, it is more efficient to do
         # in-place appending so that we don't need to allocate a new list.
         resumed_from_preemption = [False] * len(running_reqs)
@@ -856,6 +899,7 @@ class ClusterScheduler(SchedulerInterface):
             num_denoise_ran=num_denoise_ran,
             cur_block_start=cur_block_start,
             denoise_block_size=denoise_block_size,
+            exec_start_pos=exec_start_pos,
         )
 
     def _try_schedule_encoder_inputs(
@@ -982,6 +1026,7 @@ class ClusterScheduler(SchedulerInterface):
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[
                 req_index] if sampled_token_ids else []
+            logger.debug(f"generated_token_ids for req {req_id}: {generated_token_ids}")
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))

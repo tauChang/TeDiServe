@@ -249,6 +249,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.slot_mapping = torch.zeros(self.max_num_tokens,
                                         dtype=torch.int64,
                                         device=self.device)
+        self.exec_start_pos_cpu = torch.zeros(self.max_num_reqs,
+                                            dtype=torch.int32,
+                                            device="cpu",
+                                            pin_memory=self.pin_memory)
+        self.num_exec_tokens_cpu = torch.zeros(self.max_num_reqs,
+                                        dtype=torch.int32,
+                                        device="cpu",
+                                        pin_memory=self.pin_memory)
 
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: Optional[IntermediateTensors] = None
@@ -492,6 +500,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Update the states of the running/resumed requests.
         is_last_rank = get_pp_group().is_last_rank
         req_data = scheduler_output.scheduled_cached_reqs
+        refresh = False
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
             # num_computed_tokens = req_data.num_computed_tokens[i]
@@ -556,11 +565,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         req_index, pos] = token_id
             
             update_and_flag(self.input_batch.num_denoise_ran, req_index, req_state.num_denoise_ran)
-            refresh = False
-            refresh |= update_and_flag(self.input_batch.cur_block_start, req_index, req_state.cur_block_start)
-            refresh |= update_and_flag(self.input_batch.denoise_block_size, req_index, req_state.denoise_block_size)
+            refresh |= update_and_flag(self.input_batch.cur_block_start_cpu, req_index, req_state.cur_block_start)
+            logger.debug(f"req_index {req_index} cur_block_start updated to {req_state.cur_block_start}")
+            refresh |= update_and_flag(self.input_batch.denoise_block_size_cpu, req_index, req_state.denoise_block_size)
+            logger.debug(f"req_index {req_index} denoise_block_size updated to {req_state.denoise_block_size}")
 
-            self.input_batch.sampling_metadata_needs_refresh = refresh
+        self.input_batch.sampling_metadata_needs_refresh = refresh
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -620,13 +630,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Get the number of scheduled tokens for each request.
         req_ids = self.input_batch.req_ids
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
-        num_scheduled_tokens = np.array(tokens, dtype=np.int32)
         max_num_scheduled_tokens = max(tokens)
+        num_scheduled_tokens = np.array(tokens, dtype=np.int32)
+        self.num_exec_tokens_cpu[:num_reqs].copy_(
+            torch.from_numpy(num_scheduled_tokens), non_blocking=True)
+
+        exec_start_pos = np.array(
+            [scheduler_output.exec_start_pos[i] for i in req_ids],
+            dtype=np.int32
+        )
+        self.exec_start_pos_cpu[:num_reqs].copy_(
+            torch.from_numpy(exec_start_pos), non_blocking=True)
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
         req_indices = np.repeat(self.arange_np[:num_reqs],
                                 num_scheduled_tokens)
+        logger.debug(f"req_indices: {req_indices}")
 
         # cu_num_tokens: [2, 5, 3] -> [2, 7, 10]
         # arange: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -634,12 +654,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_scheduled_tokens)
 
         # Get positions.
-        # positions_np = self.positions_np[:total_num_scheduled_tokens]
-        # np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
-        #        arange,
-        #        out=positions_np)
         positions_np = self.positions_np[:total_num_scheduled_tokens]
-        positions_np[:] = arange
+        np.add(exec_start_pos[req_indices],
+               arange,
+               out=positions_np)
+        logger.debug(f"exec_start_pos: {exec_start_pos}, "
+                        f"positions_np: {positions_np}")    
+        
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -670,9 +691,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.query_start_loc_np[0] = 0
         self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
 
-        self.seq_lens_np[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs] +
-            num_scheduled_tokens)
+        # self.seq_lens_np[:num_reqs] = (
+        #     self.input_batch.num_computed_tokens_cpu[:num_reqs] +
+        #     num_scheduled_tokens)
+        self.seq_lens_np[:num_reqs] = self.input_batch.num_tokens[:num_reqs]
 
         # Copy the tensors to the GPU.
         self.input_ids[:total_num_scheduled_tokens].copy_(
@@ -1513,13 +1535,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_time = time.time()
         sampling_metadata = self.input_batch.sampling_metadata
         if spec_decode_metadata is None:
-            sampler_output = self.sampler(
-                is_mask=input_ids == self.model_config.mask_token_id,
-                logits=logits,
-                sampling_metadata=sampling_metadata,
-                confidence_thresholds=confidence_thresholds,
-            )
-            logger.debug(f"Sampler output: {sampler_output}")
+            try:
+                sampler_output = self.sampler(
+                    is_mask=input_ids == self.model_config.mask_token_id,
+                    logits=logits,
+                    exec_start_pos=self.exec_start_pos_cpu[:self.input_batch.num_reqs],
+                    num_exec_tokens=self.num_exec_tokens_cpu[:self.input_batch.num_reqs],
+                    sampling_metadata=sampling_metadata,
+                    confidence_thresholds=confidence_thresholds,
+                )
+                logger.debug(f"Sampler output: {sampler_output}")
+            except Exception as e:
+                logger.error(f"Error in sampler: {e}")
+                raise e
         else:
             # When indexing with a tensor (bonus_logits_indices), PyTorch
             # creates a new tensor with separate storage from the original
@@ -1552,26 +1580,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             num_nans_in_logits = self._get_nans_in_logits(logits)
 
-        # TODO(woosuk): The following loop can be slow since it iterates over
-        # the requests one by one. Optimize.
-        loop_start_time = time.time()
-        discard_sampled_tokens_req_indices = []
-        for i, req_id in enumerate(self.input_batch.req_ids):
-            req_state = self.requests[req_id]
-            seq_len = (req_state.num_computed_tokens +
-                       scheduler_output.num_scheduled_tokens[req_id])
-            if seq_len < req_state.num_tokens:
-                # Ignore the sampled token for partial prefills.
-                # Rewind the generator state as if the token was not sampled.
-                # This relies on cuda-specific torch-internal impl details
-                generator = self.input_batch.generators.get(i)
-                if generator is not None:
-                    generator.set_offset(generator.get_offset() - 4)
-                # Record the index of the request that should not be sampled,
-                # so that we could clear the sampled tokens before returning.
-                discard_sampled_tokens_req_indices.append(i)
-        logger.debug(f"Loop over requests took "
-                    f"{time.time() - loop_start_time} seconds")
+        # # TODO(woosuk): The following loop can be slow since it iterates over
+        # # the requests one by one. Optimize.
+        # loop_start_time = time.time()
+        # discard_sampled_tokens_req_indices = []
+        # for i, req_id in enumerate(self.input_batch.req_ids):
+        #     req_state = self.requests[req_id]
+        #     seq_len = (req_state.num_computed_tokens +
+        #                scheduler_output.num_scheduled_tokens[req_id])
+        #     if seq_len < req_state.num_tokens:
+        #         # Ignore the sampled token for partial prefills.
+        #         # Rewind the generator state as if the token was not sampled.
+        #         # This relies on cuda-specific torch-internal impl details
+        #         generator = self.input_batch.generators.get(i)
+        #         if generator is not None:
+        #             generator.set_offset(generator.get_offset() - 4)
+        #         # Record the index of the request that should not be sampled,
+        #         # so that we could clear the sampled tokens before returning.
+        #         discard_sampled_tokens_req_indices.append(i)
+        # logger.debug(f"discard_sampled_tokens: {discard_sampled_tokens_req_indices}")
+        # logger.debug(f"Loop over requests took "
+        #             f"{time.time() - loop_start_time} seconds")
 
         logprob_start_time = time.time()
         # NOTE: GPU -> CPU Sync happens here.
@@ -1602,10 +1631,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # [tau_chang]: Get the valid generated tokens.
         valid_sampled_token_ids = sampler_output.sampled_token_ids
+        logger.debug(f"Valid sampled token ids: {valid_sampled_token_ids}")
 
         # Mask out the sampled tokens that should not be sampled.
-        for i in discard_sampled_tokens_req_indices:
-            valid_sampled_token_ids[i].clear()
+        # for i in discard_sampled_tokens_req_indices:
+        #     valid_sampled_token_ids[i].clear()
 
         valid_token_start_time = time.time()
         # Cache the sampled tokens in the model runner, so that the scheduler
@@ -2233,6 +2263,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         logits = self.model.compute_logits(hidden_states, None)
         num_reqs = logits.size(0)
+        
+        exec_start_pos = torch.zeros((1,), dtype=torch.int32)
+        num_exec_tokens = torch.tensor((seq_len,), dtype=torch.int32)
 
         dummy_tensors = lambda v: torch.full(
             (num_reqs, ), v, device=self.device)
@@ -2267,6 +2300,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 (seq_len), dtype=torch.bool, device=self.device)
             sampler_output = self.sampler(is_mask=is_mask,
                                           logits=logits,
+                                          exec_start_pos=exec_start_pos,
+                                          num_exec_tokens=num_exec_tokens,
                                           sampling_metadata=dummy_metadata,
                                           confidence_thresholds=confidence_thresholds)
         except RuntimeError as e:

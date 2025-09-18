@@ -37,6 +37,8 @@ class NewRequestData:
     num_denoise_ran: int
     cur_block_start: int
     denoise_block_size: int
+    exec_start_pos: int
+    num_exec_tokens: int
 
     @classmethod
     def from_request(
@@ -60,6 +62,8 @@ class NewRequestData:
             num_denoise_ran=request.num_denoise_ran,
             cur_block_start=request.cur_block_start,
             denoise_block_size=request.denoise_block_size,
+            exec_start_pos=request.exec_start_pos,
+            num_exec_tokens=request.num_exec_tokens,
         )
 
     def __repr__(self):
@@ -78,6 +82,8 @@ class NewRequestData:
                 f"num_denoise_ran={self.num_denoise_ran},"
                 f"cur_block_start={self.cur_block_start},"
                 f"denoise_block_size={self.denoise_block_size}"
+                f"exec_start_pos={self.exec_start_pos},"
+                f"num_exec_tokens={self.num_exec_tokens}"
                 ")")
 
     # Version of __repr__ with the prompt data obfuscated
@@ -97,6 +103,8 @@ class NewRequestData:
                 f"num_denoise_ran={self.num_denoise_ran},"
                 f"cur_block_start={self.cur_block_start},"
                 f"denoise_block_size={self.denoise_block_size}"
+                f"exec_start_pos={self.exec_start_pos},"
+                f"num_exec_tokens={self.num_exec_tokens}"
                 ")")
 
 
@@ -116,6 +124,8 @@ class CachedRequestData:
     num_denoise_ran: list[int] = None
     cur_block_start: list[int] = None
     denoise_block_size: list[int] = None
+    exec_start_pos: list[int] = None
+    num_exec_tokens: list[int] = None
 
     @property
     def num_reqs(self) -> int:
@@ -132,6 +142,8 @@ class CachedRequestData:
             num_denoise_ran=[],
             cur_block_start=[],
             denoise_block_size=[],
+            exec_start_pos=[],
+            num_exec_tokens=[],
         )
 
 
@@ -150,6 +162,10 @@ class SchedulerOutput:
     # req_id -> num_scheduled_tokens
     # Number of tokens scheduled for each request.
     num_scheduled_tokens: dict[str, int]
+
+    # req_id -> exec_start_pos
+    exec_start_pos: dict[str, int]
+
     # Total number of tokens scheduled for all requests.
     # Equal to sum(num_scheduled_tokens.values())
     total_num_scheduled_tokens: int

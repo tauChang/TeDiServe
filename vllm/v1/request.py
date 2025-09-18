@@ -101,6 +101,11 @@ class Request:
         self.num_last_unmasked_tokens = 0
         self.num_denoise_ran = 0
 
+        # [exec_start_pos, num_exec_tokens) fed into the model for execution.
+        # Might change in each iteration due to caching.
+        self.exec_start_pos = 0
+        self.num_exec_tokens = len(self._all_token_ids)
+
         # Multi-modal related
         self.mm_positions = multi_modal_placeholders or []
         self.mm_inputs = multi_modal_inputs or []
@@ -219,6 +224,10 @@ class Request:
         assert input_id < len(self.mm_positions)
         num_tokens = self.mm_positions[input_id].length
         return num_tokens
+    
+    @property
+    def is_start_of_new_block(self) -> bool:
+        return self.cur_block_num_unmasked_tokens == 0
 
     @property
     def use_structured_output(self) -> bool:

@@ -420,6 +420,10 @@ class ModelConfig:
     denoise_block_size: Optional[int] = -1
     """The block size for each denoising block. If -1, the entire
     output is treated as a single denoising block."""
+    cache_prefix: Optional[bool] = False
+    """Whether to cache the prefix key/values."""
+    cache_suffix: Optional[bool] = False
+    """Whether to cache the suffix key/values."""
 
     def compute_hash(self) -> str:
         """

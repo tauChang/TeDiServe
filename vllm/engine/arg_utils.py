@@ -445,6 +445,8 @@ class EngineArgs:
     num_gpus_per_model_executor: Union[str]= ClusterConfig.num_gpus_per_model_executor
     default_confidence_threshold: float = SchedulerConfig.default_confidence_threshold
     denoise_block_size: int = ModelConfig.denoise_block_size
+    cache_prefix: bool = ModelConfig.cache_prefix
+    cache_suffix: bool = ModelConfig.cache_suffix
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -551,6 +553,10 @@ class EngineArgs:
                                  **model_kwargs["mask_token_id"])
         model_group.add_argument("--denoise-block-size",
                                  **model_kwargs["denoise_block_size"])
+        model_group.add_argument("--cache-prefix",
+                                 **model_kwargs["cache_prefix"])
+        model_group.add_argument("--cache-suffix",
+                                 **model_kwargs["cache_suffix"])
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
@@ -959,6 +965,8 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
             mask_token_id=self.mask_token_id,
             denoise_block_size=self.denoise_block_size,
+            cache_prefix=self.cache_prefix,
+            cache_suffix=self.cache_suffix,
         )
 
     def validate_tensorizer_args(self):

@@ -125,6 +125,8 @@ class FlashAttentionMetadata:
     prefix_kv_lens: Optional[torch.Tensor]
     suffix_kv_lens: Optional[torch.Tensor]
 
+    use_cache: bool
+
     # Optional aot scheduling
     scheduler_metadata: Optional[torch.Tensor] = None
     prefix_scheduler_metadata: Optional[torch.Tensor] = None
@@ -195,6 +197,8 @@ class FlashAttentionMetadataBuilder(
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
         self.aot_sliding_window: Optional[tuple[int, int]] = None
+        
+        self.use_cache = self.model_config.cache_prefix or self.model_config.cache_suffix
 
     def build(self,
               common_prefix_len: int,
@@ -326,6 +330,7 @@ class FlashAttentionMetadataBuilder(
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
+            use_cache=self.use_cache
         )
         return attn_metadata
 
@@ -398,9 +403,9 @@ class FlashAttentionImpl(AttentionImpl):
         attn_metadata: FlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
-        use_cache: bool = False
     ) -> torch.Tensor:
-        if use_cache:
+        # could be None for dummy run
+        if attn_metadata is not None and attn_metadata.use_cache:
             return self.forward_use_cache(
                 layer,
                 query,
@@ -469,7 +474,7 @@ class FlashAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
 
         num_actual_tokens = attn_metadata.num_actual_tokens
-        # logger.debug(f"in flash attention impl, num_actual_tokens: {num_actual_tokens}")
+        logger.debug(f"in flash attention impl, num_actual_tokens: {num_actual_tokens}")
         # logger.debug(f"attention metadata: {attn_metadata}")
         key_cache, value_cache = kv_cache.unbind(0)
         # logger.debug(f"query shape: {query.shape}, key shape: {key.shape}, "
@@ -484,8 +489,8 @@ class FlashAttentionImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            logger.debug(f"before reshape_and_cache_flash, shape of key: {key.shape}, key_cache: {key_cache.shape}")
-            logger.debug(f"slot_mapping: {attn_metadata.slot_mapping}")
+            # logger.debug(f"before reshape_and_cache_flash, shape of key: {key.shape}, key_cache: {key_cache.shape}")
+            # logger.debug(f"slot_mapping: {attn_metadata.slot_mapping}")
             # logger.debug(f"before reshape, value is: {value}")
 
             # set slot_mapping to [0, 1, 2, ... len(slot_mapping) - 1]
@@ -503,7 +508,7 @@ class FlashAttentionImpl(AttentionImpl):
                 layer._k_scale,
                 layer._v_scale,
             )
-            logger.debug(f"after reshape_and_cache_flash, shape of key: {key.shape}, key_cache: {key_cache.shape}")
+            # logger.debug(f"after reshape_and_cache_flash, shape of key: {key.shape}, key_cache: {key_cache.shape}")
             # logger.debug(f"after reshape, value is: {value_cache}")
 
         if self.kv_cache_dtype.startswith("fp8"):

@@ -119,12 +119,15 @@ class InputBatch:
         self.num_denoise_ran = torch.empty((max_num_reqs, ),
                                            dtype=torch.int32,
                                            device=device)
-        self.cur_block_start = torch.empty((max_num_reqs, ),
+        self.cur_block_start_cpu_tensor = torch.empty((max_num_reqs, ),
                                              dtype=torch.int32,
-                                             device=device)
-        self.denoise_block_size = torch.empty((max_num_reqs, ),
+                                             device="cpu")
+        self.cur_block_start_cpu = self.cur_block_start_cpu_tensor.numpy()
+
+        self.denoise_block_size_cpu_tensor = torch.empty((max_num_reqs, ),
                                                 dtype=torch.int32,
-                                                device=device)
+                                                device="cpu")
+        self.denoise_block_size_cpu = self.denoise_block_size_cpu_tensor.numpy()
         self.sampling_metadata_needs_refresh = False
 
         # Block table.
@@ -290,6 +293,7 @@ class InputBatch:
         request: "CachedRequestState",
     ) -> int:
         req_index = self._register_add_request(request)
+        logger.debug(f"adding request. request {request.req_id} has block ids {request.block_ids}")
 
         req_id = request.req_id
         if req_index == len(self._req_ids):
@@ -320,8 +324,8 @@ class InputBatch:
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
         self.num_denoise_ran[req_index] = request.num_denoise_ran
-        self.cur_block_start[req_index] = request.cur_block_start
-        self.denoise_block_size[req_index] = request.denoise_block_size
+        self.cur_block_start_cpu[req_index] = request.cur_block_start
+        self.denoise_block_size_cpu[req_index] = request.denoise_block_size
         self.block_table.add_row(request.block_ids, req_index)
 
         if sampling_params := request.sampling_params:
@@ -477,8 +481,8 @@ class InputBatch:
             self.num_tokens[i2], self.num_tokens[i1]
         self.num_denoise_ran[i1], self.num_denoise_ran[i2] =\
             self.num_denoise_ran[i2], self.num_denoise_ran[i1]
-        self.cur_block_start[i1], self.cur_block_start[i2] =\
-            self.cur_block_start[i2], self.cur_block_start[i1]
+        self.cur_block_start_cpu[i1], self.cur_block_start_cpu[i2] =\
+            self.cur_block_start_cpu[i2], self.cur_block_start_cpu[i1]
         self.denoise_block_size[i1], self.denoise_block_size[i2] =\
             self.denoise_block_size[i2], self.denoise_block_size[i1]
         self.num_tokens_no_spec[i1], self.num_tokens_no_spec[i2] =\
@@ -587,10 +591,10 @@ class InputBatch:
                 empty_index] = self.num_computed_tokens_cpu[last_req_index]
             self.num_denoise_ran[empty_index] = self.num_denoise_ran[
                 last_req_index]
-            self.cur_block_start[empty_index] = self.cur_block_start[
+            self.cur_block_start_cpu[empty_index] = self.cur_block_start_cpu[
                 last_req_index]
-            self.denoise_block_size[empty_index] = self.denoise_block_size[
-                last_req_index]
+            self.denoise_block_size_cpu[empty_index] = \
+                self.denoise_block_size_cpu[last_req_index]
             self.block_table.move_row(last_req_index, empty_index)
             self.temperature_cpu[empty_index] = self.temperature_cpu[
                 last_req_index]
@@ -702,8 +706,8 @@ class InputBatch:
             num_prompt_tokens= self.num_prompt_tokens[:self.num_reqs].tolist(),
             num_tokens=self.num_tokens[:self.num_reqs].tolist(),
             num_denoise_ran=self.num_denoise_ran[:self.num_reqs].tolist(),
-            cur_block_start=self.cur_block_start[:self.num_reqs].tolist(),
-            denoise_block_size=self.denoise_block_size[:self.num_reqs].tolist(),
+            cur_block_start=self.cur_block_start_cpu[:self.num_reqs].tolist(),
+            denoise_block_size=self.denoise_block_size_cpu[:self.num_reqs].tolist(),
         )
 
     @property

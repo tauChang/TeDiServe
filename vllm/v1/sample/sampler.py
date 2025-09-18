@@ -31,6 +31,8 @@ class Sampler(nn.Module):
         is_mask: torch.Tensor, # [tau_chang]: shape [sum of request.num_tokens]
         logits: torch.Tensor, # [tau_chang]: shape [sum of request.num_tokens, 
                               # vocab_size]
+        exec_start_pos: torch.Tensor, # [tau_chang]: shape [num_reqs]
+        num_exec_tokens: torch.Tensor, # [tau_chang]: shape [num_reqs]
         sampling_metadata: SamplingMetadata,
         confidence_thresholds: list[float]
     ) -> SamplerOutput:
@@ -65,7 +67,8 @@ class Sampler(nn.Module):
         # Sample the next token.
 
         # sampled = self.sample(logits, sampling_metadata) # [TODO (tau_chang)]: output should be List[List[Tuple[int, int]]]
-        unmasked = self.unmask(is_mask, logits, sampling_metadata, confidence_thresholds)
+        unmasked = self.unmask(is_mask, logits, exec_start_pos, num_exec_tokens,
+                               sampling_metadata, confidence_thresholds)
         logprobs_tensors = None
 
         # [tau_chang] Ignore for now.
@@ -101,25 +104,31 @@ class Sampler(nn.Module):
     def greedy_sample(self, logits: torch.Tensor) -> torch.Tensor:
         return logits.argmax(dim=-1).view(-1)
     
-    def get_output_range(self, sampling_metadata: SamplingMetadata) -> \
+    def get_output_range(self, sampling_metadata: SamplingMetadata,
+                         exec_start_pos: torch.Tensor,
+                         num_exec_tokens: torch.Tensor) -> \
         list[tuple[int, int, int]]:
-        prompt_start = 0
+        # req_start is the start position of the current request relative to
+        # the entire batch.
+        # exec_start is the position of the first token in execution in the
+        # request.
+        # block_start is the position of the first token in the denoising
+        # block in the request.
+        req_start = 0
         ranges = []
         for i in range(len(sampling_metadata.num_tokens)):
-            prompt_length = sampling_metadata.num_prompt_tokens[i]
-            prompt_and_output_length = sampling_metadata.num_tokens[i]
+            exec_start = exec_start_pos[i].item()
             block_start = sampling_metadata.cur_block_start[i]
             block_end = block_start + sampling_metadata.denoise_block_size[i]
-            logger.debug(f"Request {i}: prompt_length={prompt_length}, "
-                         f"prompt_and_output_length={prompt_and_output_length}, "
+            logger.debug(f"Request {i}:"
                          f"block_start={block_start}, block_end={block_end}, "
                          )
             ranges.append(
-                (prompt_start + block_start,
-                    prompt_start + block_end,
-                    block_start)
+                (req_start + block_start - exec_start,
+                 req_start + block_end - exec_start,
+                 block_start)
             )
-            prompt_start += prompt_and_output_length
+            req_start += num_exec_tokens[i].item()
         return ranges
 
     
@@ -136,6 +145,8 @@ class Sampler(nn.Module):
         self,
         is_mask: torch.Tensor,
         logits: torch.Tensor,
+        exec_start_pos: torch.Tensor,
+        num_exec_tokens: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         confidence_thresholds: list[float]
     ) -> list[list[tuple[int, int]]]:
@@ -159,7 +170,7 @@ class Sampler(nn.Module):
         
         unmasked_tokens = []
         for i, (start, end, block_start) in \
-            enumerate(self.get_output_range(sampling_metadata)):
+            enumerate(self.get_output_range(sampling_metadata, exec_start_pos, num_exec_tokens)):
             logger.debug(
                 f"Processing range {start}:{end}, block_start={block_start}")
             x_0_slice = x_0[start:end]
@@ -206,7 +217,7 @@ class Sampler(nn.Module):
             ])
 
             logger.debug(
-                f"Unmasked tokens for range {start}:{end}: {unmasked_tokens}"
+                f"Unmasked tokens for range {start}:{end}: {unmasked_tokens[-1]}"
             )
         
         return unmasked_tokens
