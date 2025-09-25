@@ -45,10 +45,15 @@ MORE_ARGS_LIST = [
 
 def run_test(more_args):
     """Run the end to end accuracy test."""
+    prefix = False
+    suffix = False
+    block_size = 32
+    confidence = 0.5
+    output_length = 256
 
-    args = list(DEFAULT_ARGS)
-    args.extend(more_args)
-    print(f"Running with: {args}")
+    # args = list(DEFAULT_ARGS)
+    # args.extend(more_args)
+    # print(f"Running with: {args}")
 
     # Launch proxy to sit in front of the actual server
     real_base_url = "http://localhost:8000/v1"
@@ -70,12 +75,17 @@ def run_test(more_args):
         write_out=True,
         log_samples=True,
         verbosity="INFO",
+        gen_kwargs={
+            "max_tokens": output_length,
+        },
         limit=100
     )
 
+    
+
     # RESULTS IS A DICT. SAVE AS JSON
     import json
-    with open("results.json", "w") as f:
+    with open(f"results{'_prefix' if prefix else ''}{'_suffix' if suffix else ''}_block{block_size}_conf{confidence}_out{output_length}.json", "w") as f:
         json.dump(results, f, indent=2)
 
     measured_value = results["results"][TASK][FILTER]

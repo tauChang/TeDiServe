@@ -138,7 +138,7 @@ class RequestState:
         self.executors_to_free.discard(executor_id)
         logger.debug(f"after removing, request state: {self}")
 
-class ClusterScheduler(SchedulerInterface):
+class ClusterMigrateScheduler(SchedulerInterface):
 
     def __init__(
         self,
@@ -548,9 +548,27 @@ class ClusterScheduler(SchedulerInterface):
             # token_budget[executor_id] -= num_tokens_needed
             # self.request_to_executor[request.request_id] = executor_id
             # req_index += 1
+
+            # if request.is_start_of_new_block:
+            if True:
+                new_executor_id = (cur_executor_id + 1) % len(self.executors_manager.executors)
+            else:
+                new_executor_id = cur_executor_id
             
-            logger.debug(f"Confirmed: Running request {request.request_id} to executor {cur_executor_id}.")
-            add_running_request(request, cur_executor_id)
+            if new_executor_id != cur_executor_id:
+                self._free_request_on_executor(request, cur_executor_id, False, False)
+                if new_executor_id not in idle_executors:
+                    logger.debug(f"Request {request.request_id}'s next executor {new_executor_id} is not idle. Mark as pending and put to waiting.")
+                    mark_request_as_pending(request, new_executor_id)
+                    self.waiting.prepend_request(request)
+                    self.running.pop(req_index)
+                else:
+                    logger.debug(f"Scheduling RUNNING request {request.request_id} to its next executor {new_executor_id}")
+                    add_new_request(request, new_executor_id)
+                    req_index += 1
+            else:
+                logger.debug(f"Confirmed: Running request {request.request_id} to executor {cur_executor_id}.")
+                add_running_request(request, cur_executor_id)
             req_index += 1
 
         # Use a temporary RequestQueue to collect requests that need to be

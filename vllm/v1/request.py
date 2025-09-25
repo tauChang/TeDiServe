@@ -10,6 +10,7 @@ from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_list_of
+from vllm.v1.core.sched.step_estimator import StepStats
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
 from vllm.v1.structured_output.request import StructuredOutputRequest
@@ -122,8 +123,10 @@ class Request:
         self.denoise_block_size = denoise_block_size if denoise_block_size > 0 \
             else self.output_length
         assert self.output_length % self.denoise_block_size == 0
+        self.cur_block = 0
         self.cur_block_start = len(self.prompt_token_ids)
         self.cur_block_num_unmasked_tokens = 0
+        self.cur_block_denoise_ran = 0
 
         # Read-only views
         # Prevent directly appending to these lists since
@@ -173,21 +176,41 @@ class Request:
         self,
         token_ids: list[tuple[int, int]]
     ) -> None:
-        self.num_denoise_ran += 1
         self.num_last_unmasked_tokens = len(token_ids)
         self._unmasked_token_ids.extend(token_ids)
+        self.cur_block_num_unmasked_tokens += len(token_ids)
+        assert self.cur_block_num_unmasked_tokens <= self.denoise_block_size
+        
+        stats = StepStats(
+            id=self.request_id,
+            num_denoise_ran=self.num_denoise_ran,
+            num_unmasked_tokens=len(self._unmasked_token_ids),
+            output_length=self.output_length,
+            block=self.cur_block,
+            block_num_denoise_ran=self.cur_block_denoise_ran,
+            block_num_unmasked_tokens=self.cur_block_num_unmasked_tokens,
+            block_size=self.denoise_block_size
+        )
+
+        self.num_denoise_ran += 1
+        self.cur_block_denoise_ran += 1
+        old_cur_block_start = self.cur_block_start
+        
+        if self.cur_block_num_unmasked_tokens == self.denoise_block_size:
+            # move to the next block
+            logger.debug(f"Request {self.request_id} finished denoising block starting at position {self.cur_block_start}. Moving to next block.")
+            self.cur_block += 1
+            self.cur_block_start += self.denoise_block_size
+            self.cur_block_num_unmasked_tokens = 0
+            self.cur_block_denoise_ran = 0
+
         for pos, token_id in token_ids:
-            assert pos >= self.cur_block_start and pos < self.cur_block_start + self.denoise_block_size
-            self.cur_block_num_unmasked_tokens += 1
-            logger.debug(f"updating cur_block_num_unmasked_tokens to {self.cur_block_num_unmasked_tokens} for request {self.request_id}")
-            if self.cur_block_num_unmasked_tokens == self.denoise_block_size:
-                # move to the next block
-                logger.debug(f"Request {self.request_id} finished denoising block starting at position {self.cur_block_start}. Moving to next block.")
-                self.cur_block_start += self.denoise_block_size
-                self.cur_block_num_unmasked_tokens = 0
+            assert pos >= old_cur_block_start and pos < old_cur_block_start + self.denoise_block_size
 
             pos -= len(self.prompt_token_ids)
             self._all_token_ids[pos] = token_id
+        
+        return stats
             
 
     @property
