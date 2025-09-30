@@ -31,7 +31,8 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelDType, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
-                         PrefixCachingHashAlgo, PromptAdapterConfig,
+                         PrefixCachingHashAlgo, ProfileConfig, 
+                         PromptAdapterConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
                          TaskOption, TokenizerMode, VllmConfig, get_attr_docs,
                          get_field)
@@ -447,6 +448,9 @@ class EngineArgs:
     denoise_block_size: int = ModelConfig.denoise_block_size
     cache_prefix: bool = ModelConfig.cache_prefix
     cache_suffix: bool = ModelConfig.cache_suffix
+    latency_profile_dir: Optional[str] = ProfileConfig.latency_profile_dir
+    num_profile_runs: int = ProfileConfig.num_profile_runs
+    num_profile_warmup_runs: int = ProfileConfig.num_profile_warmup_runs
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -794,6 +798,22 @@ class EngineArgs:
             default=None,
             help="The configurations for speculative decoding. Should be a "
             "JSON string.")
+
+        # Profile arguments
+        profile_kwargs = get_kwargs(ProfileConfig)
+        profile_group = parser.add_argument_group(
+            title="ProfileConfig",
+            description=ProfileConfig.__doc__,
+        )
+        profile_group.add_argument(
+            "--latency-profile-dir",
+            **profile_kwargs["latency_profile_dir"])
+        profile_group.add_argument(
+            "--num-profile-runs",
+            **profile_kwargs["num_profile_runs"])
+        profile_group.add_argument(
+            "--num-profile-warmup-runs",
+            **profile_kwargs["num_profile_warmup_runs"])
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
@@ -1311,6 +1331,11 @@ class EngineArgs:
             collect_detailed_traces=self.collect_detailed_traces,
         )
 
+        profile_config = ProfileConfig(
+            latency_profile_dir=self.latency_profile_dir,
+            num_profile_runs=self.num_profile_runs,
+            num_profile_warmup_runs=self.num_profile_warmup_runs,)
+
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1324,6 +1349,7 @@ class EngineArgs:
             decoding_config=decoding_config,
             observability_config=observability_config,
             prompt_adapter_config=prompt_adapter_config,
+            profile_config=profile_config,
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,

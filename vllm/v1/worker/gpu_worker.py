@@ -10,6 +10,8 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
+import tqdm
+
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
@@ -220,7 +222,7 @@ class Worker(WorkerBase):
                 self.init_snapshot,
                 weights_memory=int(
                     self.model_runner.model_memory_usage)) as profile_result:
-            self.model_runner.profile_run()
+            self.model_runner.memory_profile_run()
 
         free_gpu_memory = profile_result.after_profile.free_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
@@ -247,6 +249,26 @@ class Worker(WorkerBase):
         gc.collect()
 
         return int(available_kv_cache_memory)
+    
+    @torch.inference_mode()
+    def profile_latency(self) -> dict[int, float]:
+        results = {}
+        max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+        block_size = self.model_config.denoise_block_size \
+            if self.model_config.denoise_block_size > 0 else 32
+        num_tokens_list = list(range(block_size, 
+                                      max_num_batched_tokens + 1, block_size))
+            
+        for num_tokens in tqdm.tqdm(num_tokens_list, desc="Profiling Latency"):
+            logger.info("Profile latency for %d tokens", num_tokens)
+            raw_data = self.model_runner.\
+                latency_profile_run(num_tokens, 
+                                    self.profile_config.num_profile_runs,
+                                    self.profile_config.num_profile_warmup_runs)
+            # compute average
+            results[num_tokens] = sum(raw_data) / len(raw_data)
+        logger.debug(f"Latency profile results: {results}")
+        return results
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()

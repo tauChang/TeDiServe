@@ -135,11 +135,20 @@ class ResourceManager:
             for node in ray.nodes():
                 logger.info("Node resources: %s", node["Resources"])
                 devices = int(node["Resources"].get(device_str, 0))
+                accelerator_type = None
+                for key in node["Resources"].keys():
+                    if key.startswith("accelerator_type:"):
+                        accelerator_type = key.split(":")[1]
+                        break
+                else:
+                    raise ValueError(
+                        f"Node {node} has {device_str} but no accelerator_type.")
                 for _ in range(devices):
                     ip = node["NodeManagerAddress"]
                     bundles.append({
                         device_str: 1,
-                        f"node:{ip}": 0.001
+                        f"node:{ip}": 0.001,
+                        f"accelerator_type:{accelerator_type}": 0.001
                     })
 
             if device_required is not None and \

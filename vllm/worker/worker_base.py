@@ -53,6 +53,7 @@ class WorkerBase:
         self.observability_config = vllm_config.observability_config
         self.kv_transfer_config = vllm_config.kv_transfer_config
         self.compilation_config = vllm_config.compilation_config
+        self.profile_config = vllm_config.profile_config
         from vllm.platforms import current_platform
         self.current_platform = current_platform
 

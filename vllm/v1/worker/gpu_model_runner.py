@@ -2109,7 +2109,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
          - during DP rank dummy run 
         """
         dp_size = self.vllm_config.parallel_config.data_parallel_size
-        randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and dp_size > 1
+        # randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and dp_size > 1
+        randomize_inputs = False
         if not randomize_inputs:
             yield
         else:
@@ -2136,10 +2137,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         capture_attn_cudagraph: bool = False,
         skip_eplb: bool = False,
         is_profile: bool = False,
+        use_attn_metadata: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
         # Padding for DP
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
+        logger.debug(f"Dummy run with num_tokens: {num_tokens}, "
+                     f"num_pad: {num_pad}, ")
         num_tokens += num_pad
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
@@ -2147,7 +2151,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # has num_tokens in total.
         assert num_tokens <= self.scheduler_config.max_num_batched_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
-        num_reqs = min(num_tokens, max_num_reqs)
+        # num_reqs = min(num_tokens, max_num_reqs)
+        if self.model_config.denoise_block_size > 0:
+            num_reqs = num_tokens // self.model_config.denoise_block_size
+        else:
+            num_reqs = num_tokens // self.model_config.max_model_len
+        num_reqs = max(1, num_reqs)
         min_tokens_per_req = num_tokens // num_reqs
         num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
         num_scheduled_tokens_list[-1] += num_tokens % num_reqs
@@ -2157,7 +2166,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         dtype=np.int32)
 
         attn_metadata: Optional[dict[str, Any]] = None
-        if capture_attn_cudagraph:
+        # if capture_attn_cudagraph:
+        if use_attn_metadata:
             attn_metadata = {}
 
             # Make sure max_model_len is used at the graph capture time.
@@ -2216,18 +2226,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
                 intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                     num_tokens, None, False)
+            
 
             with self.maybe_randomize_inputs(input_ids), set_forward_context(
                     attn_metadata,
                     self.vllm_config,
                     num_tokens=num_tokens,
                     num_tokens_across_dp=num_tokens_across_dp):
+                self._sync_device()
+                start_time = time.time()
                 outputs = model(
                     input_ids=input_ids,
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
                 )
+                self._sync_device()
+                logger.debug(f"in _dummy_run model forward took "
+                             f"{time.time() - start_time} seconds")
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
             else:
@@ -2391,9 +2407,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 raise e
         return pooler_output
 
-    def profile_run(self) -> None:
+    def memory_profile_run(self) -> None:
         # return
-
         # Profile with multimodal encoder & encoder cache.
         # TODO: handle encoder-decoder models once we support them.
         if (self.is_multimodal_model and self.max_num_encoder_input_tokens > 0
@@ -2466,8 +2481,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
         # Add `is_profile` here to pre-allocate communication buffers
+        logger.debug(f"max_num_tokens: {self.max_num_tokens}")
         hidden_states, last_hidden_states \
             = self._dummy_run(self.max_num_tokens, is_profile=True)
+        logger.debug(f"last_hidden_states: {last_hidden_states.shape}")
+        logger.debug(f"hidden_states: {hidden_states.shape}")
         if get_pp_group().is_last_rank:
             if self.is_pooling_model:
                 output = self._dummy_pooler_run(hidden_states)
@@ -2479,6 +2497,32 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         del hidden_states, output
         self.encoder_cache.clear()
         gc.collect()
+    
+    def latency_profile_run(self, num_tokens, num_run=3, num_warmup_run=2) -> \
+        list[float]:
+        # Add `is_profile` here to pre-allocate communication buffers
+        results = []
+        for i in range(num_warmup_run + num_run):
+            self._sync_device()
+            start_time = time.time()
+            hidden_states, last_hidden_states \
+                = self._dummy_run(num_tokens, is_profile=False, use_attn_metadata=True)
+            if get_pp_group().is_last_rank:
+                if self.is_pooling_model:
+                    output = self._dummy_pooler_run(hidden_states)
+                else:
+                    output = self._dummy_sampler_run(last_hidden_states)
+            else:
+                output = None
+            self._sync_device()
+            end_time = time.time()
+            logger.debug(f"Latency profile run {i} for {num_tokens} tokens took {end_time - start_time:.4f} seconds")
+            if i >= num_warmup_run:
+                results.append(end_time - start_time)
+            
+        gc.collect()
+        return results
+        
 
     def capture_model(self) -> None:
         # return

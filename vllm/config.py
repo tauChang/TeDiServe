@@ -3354,6 +3354,19 @@ class PoolerConfig:
                                usedforsecurity=False).hexdigest()
         return hash_str
 
+@config
+@dataclass
+class ProfileConfig:
+    """Configuration for profiling."""
+
+    latency_profile_dir: Optional[str] = './latency_profiles'
+    """Directory to save latency profiles."""
+
+    num_profile_runs: int = 3
+    """Number of runs to profile and average over."""
+    num_profile_warmup_runs: int = 2
+    """Number of warmup runs before profiling."""
+
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,
@@ -4425,6 +4438,8 @@ class VllmConfig:
     """Device configuration."""
     load_config: LoadConfig = field(default_factory=LoadConfig)
     """Load configuration."""
+    profile_config: ProfileConfig = field(default_factory=ProfileConfig)
+    """Profiling configuration."""
     lora_config: Optional[LoRAConfig] = None
     """LoRA configuration."""
     speculative_config: Optional[SpeculativeConfig] = None

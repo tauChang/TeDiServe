@@ -15,14 +15,41 @@ from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
 
+import json
 import os
 import time
 import threading
+from pathlib import Path
 
 from typing import Any, Callable, Optional, TypeVar, Union
 _R = TypeVar("_R")
 
 logger = init_logger(__name__)
+
+
+def get_latency_profile_path(vllm_config: VllmConfig,
+                             bundle_ids: list[int]) -> Optional[str]:
+    dirname = vllm_config.profile_config.latency_profile_dir
+    model_name = vllm_config.model_config.model.replace("/", "_")
+    denoise_block_size = vllm_config.model_config.denoise_block_size
+
+    accelerator_type = None
+    print(f"bundle_specs: {vllm_config.cluster_config.placement_group.bundle_specs}")
+    for bundle in vllm_config.cluster_config.placement_group.bundle_specs:
+        for key in bundle:
+            print(f"key: {key}")
+            if key.startswith("accelerator_type:"):
+                accelerator_type = key.split(":")[1]
+                break
+        if accelerator_type is not None:
+            break
+
+    assert accelerator_type is not None
+    
+    tp_degree = len(bundle_ids)
+
+    return f"{dirname}/{model_name}_block{denoise_block_size}/{accelerator_type}/TP{tp_degree}.json"
+
 
 class ExecutorsManager:
     def __init__(self, 
@@ -51,9 +78,11 @@ class ExecutorsManager:
             f"executors={self.executors}, "
             f"used_executor_ids={self.used_executor_ids})"
         )
-                
     
-    async def launch_executor(self, executor_id, bundle_ids) -> int:
+    async def launch_executor(self, 
+                              executor_id: int,
+                              bundle_ids: list[int]
+                              ) -> None:
         assert executor_id not in self.used_executor_ids
 
         logger.debug(f"Launching executor {executor_id} with bundles {bundle_ids}")
@@ -63,6 +92,25 @@ class ExecutorsManager:
 
         num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config = \
             await asyncio.to_thread(self.initialize_kv_caches, executor)
+        
+        latency_profile_path = get_latency_profile_path(
+            self.vllm_config, bundle_ids)
+
+        if not os.path.exists(latency_profile_path):
+            logger.info(f"Profiling latency for executor {executor_id}")
+            # touch it so other executors know it's being profiled
+            os.makedirs(os.path.dirname(latency_profile_path), exist_ok=True)
+            Path(latency_profile_path).touch()
+            try:
+                profile = executor.collective_rpc("profile_latency", args=())
+                profile = profile[0]
+                with open(latency_profile_path, "w") as f:
+                    json.dump(profile, f, indent=4)
+
+                logger.info(f"Latency profile saved to {latency_profile_path}")
+            except Exception as e:
+                os.remove(latency_profile_path)
+                raise e
 
         if self.executor_fail_callback is not None:
             executor.register_failure_callback(self.executor_fail_callback)
