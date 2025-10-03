@@ -55,6 +55,7 @@ logger = init_logger(__name__)
 
 POLLING_TIMEOUT_S = 2.5
 HANDSHAKE_TIMEOUT_MINS = 5
+TIMESTAMP = time.strftime("%Y-%m-%d_%H:%M:%S")
 
 _R = TypeVar('_R')  # Return type for collective_rpc
 
@@ -281,11 +282,19 @@ class EngineCore:
         try:
             logger.debug(f"Executor {executor_id} status transition: SCHEDULED -> EXECUTING")
             self.executors_manager.executors[executor_id].set_executing()
-            logger.debug(f"Executing model for executor {executor_id}")
-            print(f"Executing model for executor {executor_id} ", flush=True)
+            start_time = time.time()
             model_output = await self.executors_manager.executors[executor_id].\
                 execute_model_async(scheduler_output)  # type: ignore
-
+            end_time = time.time()
+            # write to a file for profiling
+            try:
+                with open(f"executor_{executor_id}_profile_{TIMESTAMP}.txt", "a") as f:
+                    # write input_ids size and time
+                    f.write(f"{scheduler_output.total_num_scheduled_tokens},"
+                            f"{end_time - start_time}\n")
+            except Exception as e:
+                logger.error(f"Failed to write executor profile: {e}")
+                raise e
             logger.debug(f"Executor {executor_id} status transition: EXECUTING -> OUTPUT_READY")
             self.executors_manager.executors[executor_id].set_output_ready()
             logger.debug(f"Model output for executor {executor_id}: {model_output}")

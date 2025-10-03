@@ -200,15 +200,15 @@ class Sampler(nn.Module):
                 selected_indices = torch.tensor([top_index], dtype=torch.int32)
                 logger.debug(
                     f"No masked tokens with confidence > {confidence_thresholds[i]}, selecting top token: {selected_indices}")
-            else:
-                logger.debug(
-                    f"Token with confidence > {confidence_thresholds[i]}! Selected indices: {selected_indices}")
+            # else:
+            #     logger.debug(
+            #         f"Token with confidence > {confidence_thresholds[i]}! Selected indices: {selected_indices}")
                 
             selected_tokens = x_0_slice[selected_indices]
-            logger.debug(
-                f"Selected tokens: {selected_tokens}, "
-                f"Selected indices: {selected_indices}, "
-            )
+            # logger.debug(
+            #     f"Selected tokens: {selected_tokens}, "
+            #     f"Selected indices: {selected_indices}, "
+            # )
             # [tau_chang]: Convert position back to absolute (including prompt).
             # append a list of tuples (index, token) to unmasked_tokens
             unmasked_tokens.append([
@@ -216,9 +216,9 @@ class Sampler(nn.Module):
                 for index, token in zip(selected_indices, selected_tokens)
             ])
 
-            logger.debug(
-                f"Unmasked tokens for range {start}:{end}: {unmasked_tokens[-1]}"
-            )
+            # logger.debug(
+            #     f"Unmasked tokens for range {start}:{end}: {unmasked_tokens[-1]}"
+            # )
         
         return unmasked_tokens
 

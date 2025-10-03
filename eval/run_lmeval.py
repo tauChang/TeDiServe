@@ -18,8 +18,9 @@ from vllm.platforms import current_platform
 from llm_proxy_server import launch_proxy
 
 # MODEL_NAME = "Qwen/Qwen2-1.5B-Instruct"
-MODEL_NAME = "GSAI-ML/LLaDA-8B-Base"
-NUM_CONCURRENT = 3
+# MODEL_NAME = "GSAI-ML/LLaDA-8B-Base"
+MODEL_NAME = "GSAI-ML/LLaDA-8B-Instruct"
+NUM_CONCURRENT = 100
 TASK = "gsm8k"
 FILTER = "exact_match,strict-match"
 RTOL = 0.03
@@ -41,6 +42,10 @@ MORE_ARGS_LIST = [
     # ["--max-tokens", "128"]
     []
 ]
+SHOULD_APPLY_CHAT_TEMPLATE = {
+    "GSAI-ML/LLaDA-8B-Instruct": True,
+    "GSAI-ML/LLaDA-8B-Base": False,
+}
 
 
 def run_test(more_args):
@@ -48,7 +53,7 @@ def run_test(more_args):
     prefix = False
     suffix = False
     block_size = 32
-    confidence = 0.5
+    confidence = 0.9
     output_length = 256
 
     # args = list(DEFAULT_ARGS)
@@ -57,7 +62,10 @@ def run_test(more_args):
 
     # Launch proxy to sit in front of the actual server
     real_base_url = "http://localhost:8000/v1"
-    launch_proxy(real_base_url, port=12345)
+    launch_proxy(real_base_url, port=12345, 
+                 apply_chat_template=SHOULD_APPLY_CHAT_TEMPLATE[MODEL_NAME],
+                 tokenizer_name=MODEL_NAME
+                 )
 
     proxy_url = "http://localhost:12345/v1/completions"
 
@@ -85,7 +93,7 @@ def run_test(more_args):
 
     # RESULTS IS A DICT. SAVE AS JSON
     import json
-    with open(f"results{'_prefix' if prefix else ''}{'_suffix' if suffix else ''}_block{block_size}_conf{confidence}_out{output_length}.json", "w") as f:
+    with open(f"results{'_prefix' if prefix else ''}{'_suffix' if suffix else ''}_block{block_size}_conf{confidence}_out{output_length}_instruct.json", "w") as f:
         json.dump(results, f, indent=2)
 
     measured_value = results["results"][TASK][FILTER]

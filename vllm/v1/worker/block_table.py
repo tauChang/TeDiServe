@@ -97,21 +97,21 @@ class BlockTable:
         # NOTE(woosuk): We can't simply use `token_indices // block_size`
         # here because M (max_model_len) is not necessarily divisible by
         # block_size.
-        logger.debug(f"req_indices: {req_indices}")
-        logger.debug(f"positions: {positions}")
+        # logger.debug(f"req_indices: {req_indices}")
+        # logger.debug(f"positions: {positions}")
         block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                positions // self.block_size)
-        logger.debug(f"block_table_indices: {block_table_indices}")
+        # logger.debug(f"block_table_indices: {block_table_indices}")
         block_table_cpu = self.get_cpu_tensor()
-        logger.debug(f"block_table_cpu: {block_table_cpu}")
+        # logger.debug(f"block_table_cpu: {block_table_cpu}")
         block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
-        logger.debug(f"block_numbers: {block_numbers}")
+        # logger.debug(f"block_numbers: {block_numbers}")
         block_offsets = positions % self.block_size
-        logger.debug(f"block_offsets: {block_offsets}")
+        # logger.debug(f"block_offsets: {block_offsets}")
         np.add(block_numbers * self.block_size,
                block_offsets,
                out=self.slot_mapping_np[:req_indices.shape[0]])
-        logger.debug(f"slot_mapping_np: {self.slot_mapping_np[:req_indices.shape[0]]}")
+        # logger.debug(f"slot_mapping_np: {self.slot_mapping_np[:req_indices.shape[0]]}")
 
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table[:num_reqs].copy_(self.block_table_cpu[:num_reqs],

@@ -1,6 +1,7 @@
 import asyncio, time, random, logging
 from fastapi import FastAPI, Request
 import httpx
+from transformers import AutoTokenizer
 
 logger = logging.getLogger("llm_proxy")
 logger.setLevel(logging.INFO)
@@ -8,6 +9,8 @@ app = FastAPI()
 
 UPSTREAM_URL = None
 LAMBDA = 0.5         # mean 0.5 req/sec (adjust as needed)
+APPLY_CHAT_TEMPLATE = False
+TOKENIZER = None
 req_count = 0
 next_release_time = None
 resp_time = []
@@ -21,7 +24,18 @@ async def proxy_completions(request: Request):
     data = await request.json()
     cur_req_count = req_count
     req_count += 1
+    logger.info(f"data: {data}")
 
+    if APPLY_CHAT_TEMPLATE:
+        prompt = data["prompt"]
+        m = [{"role": "user", "content": prompt}, ]
+        prompt = TOKENIZER.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
+
+        data["prompt"] = prompt 
+
+        logger.info(f"Request {cur_req_count} after chat template: {data['prompt']}")
+    
+        
     # Schedule the release time for this request
     inter_arrival = random.expovariate(LAMBDA)
     next_release_time += inter_arrival
@@ -51,9 +65,13 @@ async def proxy_completions(request: Request):
     logger.info(f"resp.json(): {resp.json()}")
     return resp.json()
 
-def launch_proxy(upstream_url: str, port: int = 12345):
-    global UPSTREAM_URL
+def launch_proxy(upstream_url: str, port: int = 12345, 
+                 apply_chat_template: bool = False,
+                 tokenizer_name: str = "GSAI-ML/LLaDA-8B-Instruct"):
+    global UPSTREAM_URL, APPLY_CHAT_TEMPLATE, TOKENIZER
     UPSTREAM_URL = upstream_url
+    APPLY_CHAT_TEMPLATE = apply_chat_template
+    TOKENIZER = AutoTokenizer.from_pretrained(tokenizer_name)
     import uvicorn, threading
     random.seed(42)
     def _run():

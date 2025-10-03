@@ -31,7 +31,11 @@ def get_latency_profile_path(vllm_config: VllmConfig,
                              bundle_ids: list[int]) -> Optional[str]:
     dirname = vllm_config.profile_config.latency_profile_dir
     model_name = vllm_config.model_config.model.replace("/", "_")
-    denoise_block_size = vllm_config.model_config.denoise_block_size
+    # cache_prefix = "_prefix" if vllm_config.model_config.cache_prefix else ""
+    # cache_suffix = "_suffix" if vllm_config.model_config.cache_suffix else ""
+    # block = ""
+    # if cache_prefix != "" or cache_suffix != "":
+    #     block = f"_block{vllm_config.model_config.denoise_block_size}"
 
     accelerator_type = None
     print(f"bundle_specs: {vllm_config.cluster_config.placement_group.bundle_specs}")
@@ -48,7 +52,7 @@ def get_latency_profile_path(vllm_config: VllmConfig,
     
     tp_degree = len(bundle_ids)
 
-    return f"{dirname}/{model_name}_block{denoise_block_size}/{accelerator_type}/TP{tp_degree}.json"
+    return f"{dirname}/{model_name}/{accelerator_type}/TP{tp_degree}.json"
 
 
 class ExecutorsManager:
@@ -111,6 +115,8 @@ class ExecutorsManager:
             except Exception as e:
                 os.remove(latency_profile_path)
                 raise e
+        else:
+            logger.info(f"Latency profile {latency_profile_path} exists. Skip profiling.")
 
         if self.executor_fail_callback is not None:
             executor.register_failure_callback(self.executor_fail_callback)

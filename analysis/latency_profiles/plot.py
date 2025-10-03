@@ -2,7 +2,8 @@ import json
 import matplotlib.pyplot as plt
 
 # Filenames
-dir = "../../latency_profiles/GSAI-ML_LLaDA-8B-Base_block32/GH200"
+model = "GSAI-ML_LLaDA-8B-Instruct"
+dir = f"../../latency_profiles/{model}/GH200"
 files = ["TP1.json", "TP2.json", "TP4.json"]
 
 # Load data
@@ -25,7 +26,7 @@ for fname, d in data.items():
 
 plt.xlabel("Batch size")
 plt.ylabel("Time (ms)")
-plt.title("Batch size vs Time across TP settings")
+plt.title(f"Batch size vs Time across TP settings for {model}")
 plt.legend()
 plt.grid(True)
-plt.savefig("latency_profiles.png")
+plt.savefig(f"latency_profiles_{model}_new.png")

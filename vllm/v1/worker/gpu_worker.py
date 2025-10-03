@@ -258,8 +258,10 @@ class Worker(WorkerBase):
             if self.model_config.denoise_block_size > 0 else 32
         num_tokens_list = list(range(block_size, 
                                       max_num_batched_tokens + 1, block_size))
+        num_tokens_list = list(reversed(num_tokens_list))
             
         for num_tokens in tqdm.tqdm(num_tokens_list, desc="Profiling Latency"):
+            
             logger.info("Profile latency for %d tokens", num_tokens)
             raw_data = self.model_runner.\
                 latency_profile_run(num_tokens, 
@@ -267,6 +269,9 @@ class Worker(WorkerBase):
                                     self.profile_config.num_profile_warmup_runs)
             # compute average
             results[num_tokens] = sum(raw_data) / len(raw_data)
+
+            torch.cuda.empty_cache()
+            gc.collect()
         logger.debug(f"Latency profile results: {results}")
         return results
 
@@ -312,20 +317,23 @@ class Worker(WorkerBase):
         # NOTE: This is called after `capture_model` on purpose to prevent
         # memory buffers from being cleared by `torch.cuda.empty_cache`.
         if get_pp_group().is_last_rank:
-            max_num_reqs = min(self.scheduler_config.max_num_seqs,
-                               self.scheduler_config.max_num_batched_tokens)
+            # max_num_reqs = min(self.scheduler_config.max_num_seqs,
+            #                    self.scheduler_config.max_num_batched_tokens)
 
             # We skip EPLB here since we don't want to record dummy metrics
             hidden_states, last_hidden_states = \
                 self.model_runner._dummy_run(
-                    num_tokens=max_num_reqs,
+                    # num_tokens=max_num_reqs,
+                    num_tokens=self.scheduler_config.max_num_batched_tokens,
                     skip_eplb=True,
                 )
+            available_memory = torch.cuda.mem_get_info()[0]
             if self.model_runner.is_pooling_model:
                 self.model_runner._dummy_pooler_run(hidden_states)
             else:
-                self.model_runner._dummy_sampler_run(
-                    hidden_states=last_hidden_states)
+                # self.model_runner._dummy_sampler_run(
+                #     hidden_states=last_hidden_states)
+                self.model_runner._dummy_sampler_run(hidden_states)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
