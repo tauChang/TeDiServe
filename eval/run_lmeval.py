@@ -11,121 +11,85 @@ AsyncLLMEngine are working correctly.
 
 import lm_eval
 import pytest
+import argparse
+import json
+import os
 
 from vllm.platforms import current_platform
 
-# from ....utils import RemoteOpenAIServer
 from llm_proxy_server import launch_proxy
 
-# MODEL_NAME = "Qwen/Qwen2-1.5B-Instruct"
-# MODEL_NAME = "GSAI-ML/LLaDA-8B-Base"
-MODEL_NAME = "GSAI-ML/LLaDA-8B-Instruct"
-NUM_CONCURRENT = 100
-TASK = "gsm8k"
-FILTER = "exact_match,strict-match"
-RTOL = 0.03
-EXPECTED_VALUE = 0.54
-# DEFAULT_ARGS = ["--max-model-len", "4096", "--disable-log-requests"]
-DEFAULT_ARGS = ["--trust-remote-code",
-                "--distributed-executor-backend", "ray", 
-                "--num-gpus-per-model-executor", "1", 
-                "--scheduler_cls", "vllm.v1.core.sched.cluster_scheduler.ClusterScheduler", 
-                "--denoise-block-size", "32", 
-                "--cache-prefix", 
-                "--cache-suffix"
-]
-MORE_ARGS_LIST = [
-    # [],  # Default
-    # ["--enable-chunked-prefill"],  # Chunked
-    # ["--num-scheduler-steps", "8"],  # MS
-    # ["--num-scheduler-steps", "8", "--multi-step-stream-outputs"]  # MS+Stream
-    # ["--max-tokens", "128"]
-    []
-]
 SHOULD_APPLY_CHAT_TEMPLATE = {
     "GSAI-ML/LLaDA-8B-Instruct": True,
     "GSAI-ML/LLaDA-8B-Base": False,
 }
 
 
-def run_test(more_args):
+def run_test(args):
     """Run the end to end accuracy test."""
-    prefix = False
-    suffix = False
-    block_size = 32
-    confidence = 0.9
-    output_length = 256
-
-    # args = list(DEFAULT_ARGS)
-    # args.extend(more_args)
-    # print(f"Running with: {args}")
-
-    # Launch proxy to sit in front of the actual server
     real_base_url = "http://localhost:8000/v1"
-    launch_proxy(real_base_url, port=12345, 
-                 apply_chat_template=SHOULD_APPLY_CHAT_TEMPLATE[MODEL_NAME],
-                 tokenizer_name=MODEL_NAME
+    launch_proxy(real_base_url, 
+                 port=12345, 
+                 apply_chat_template=SHOULD_APPLY_CHAT_TEMPLATE[args.model],
+                 tokenizer_name=args.model,
+                 avg_inter_arrival_time=args.avg_inter_arrival_time,
+                 num_requests=args.limit,
+                 output_path=args.output_path
                  )
 
     proxy_url = "http://localhost:12345/v1/completions"
 
     model_args = (
-        f"model={MODEL_NAME},"
+        f"model={args.model},"
         f"base_url={proxy_url},"
-        f"num_concurrent={NUM_CONCURRENT},"
+        f"num_concurrent={args.num_concurrent},"
         f"tokenized_requests=False,"
         f"timeout=10000")
 
     results = lm_eval.simple_evaluate(
         model="local-completions",
         model_args=model_args,
-        tasks=TASK,
+        tasks=args.task,
         write_out=True,
         log_samples=True,
         verbosity="INFO",
         gen_kwargs={
-            "max_tokens": output_length,
+            "max_tokens": args.output_length,
         },
-        limit=100
+        limit=args.limit,
     )
 
+    os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
     
-
-    # RESULTS IS A DICT. SAVE AS JSON
-    import json
-    with open(f"results{'_prefix' if prefix else ''}{'_suffix' if suffix else ''}_block{block_size}_conf{confidence}_out{output_length}_instruct.json", "w") as f:
+    with open(args.output_path, "w") as f:
         json.dump(results, f, indent=2)
 
-    measured_value = results["results"][TASK][FILTER]
+    measured_value = results["results"][args.task]
     print(f"Measured value: {measured_value}")
-    # assert (measured_value - RTOL < EXPECTED_VALUE
-    #         and measured_value + RTOL > EXPECTED_VALUE
-    #         ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
-
-@pytest.mark.skipif(not current_platform.is_cuda()
-                    and not current_platform.is_tpu(),
-                    reason="V1 currently only supported on CUDA and TPU")
-def test_lm_eval_accuracy_v1_engine(monkeypatch: pytest.MonkeyPatch):
-    """Run with the V1 Engine."""
-
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-        more_args = []
-
-        # Limit compilation time for V1
-        if current_platform.is_tpu():
-            # more_args = ["--max-num-seqs", "64"]
-            more_args = ["--max-num-seqs", "10"]
-
-        run_test(more_args)
-
-
-# @pytest.mark.parametrize("more_args", MORE_ARGS_LIST)
-# def test_lm_eval_accuracy_v0_engine(monkeypatch: pytest.MonkeyPatch,
-#                                     more_args):
-#     """Run with the V0 Engine."""
-
-#     with monkeypatch.context() as m:
-#         m.setenv("VLLM_USE_V1", "0")
-#         run_test(more_args)
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--model", type=str, help="Model name")
+    parser.add_argument(
+        "--task", type=str, help="Task name")
+    parser.add_argument(
+        "--limit", type=int, default=100, help="Limit the number of samples to eval"
+    )
+    parser.add_argument(
+        "--output-length", type=int, help="Output length"
+    )
+    parser.add_argument(
+        "--output-path", type=str, help="Output path"
+    )
+    parser.add_argument(
+        "--num-concurrent", type=int, default=100, help="Number of concurrent connections"
+    )
+    parser.add_argument(
+        "--avg-inter-arrival-time", type=float, default=0.0, help="Average inter-arrival time between requests in seconds"
+    )
+    args = parser.parse_args()
+    run_test(args)
+    
+if __name__ == "__main__":
+    main()
