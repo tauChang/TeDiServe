@@ -235,6 +235,11 @@ class NCCLLibrary:
     def __init__(self, so_file: Optional[str] = None):
 
         so_file = so_file or find_nccl_library()
+        logger.debug(f"Using NCCL library from {so_file}")
+        if so_file not in NCCLLibrary.path_to_dict_mapping:
+            lib = ctypes.CDLL(so_file)
+            NCCLLibrary.path_to_library_cache[so_file] = lib
+        self.lib = NCCLLibrary.path_to_library_cache[so_file]
 
         try:
             if so_file not in NCCLLibrary.path_to_dict_mapping:

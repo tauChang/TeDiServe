@@ -28,7 +28,7 @@ logger = init_logger(__name__)
 
 
 def get_latency_profile_path(vllm_config: VllmConfig,
-                             bundle_ids: list[int]) -> Optional[str]:
+                             tp_degree: int) -> Optional[str]:
     dirname = vllm_config.profile_config.latency_profile_dir
     model_name = vllm_config.model_config.model.replace("/", "_")
     # cache_prefix = "_prefix" if vllm_config.model_config.cache_prefix else ""
@@ -50,8 +50,6 @@ def get_latency_profile_path(vllm_config: VllmConfig,
 
     assert accelerator_type is not None
     
-    tp_degree = len(bundle_ids)
-
     return f"{dirname}/{model_name}/{accelerator_type}/TP{tp_degree}.json"
 
 
@@ -98,7 +96,7 @@ class ExecutorsManager:
             await asyncio.to_thread(self.initialize_kv_caches, executor)
         
         latency_profile_path = get_latency_profile_path(
-            self.vllm_config, bundle_ids)
+            self.vllm_config, len(bundle_ids))
 
         if not os.path.exists(latency_profile_path):
             logger.info(f"Profiling latency for executor {executor_id}")

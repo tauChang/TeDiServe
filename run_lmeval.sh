@@ -3,11 +3,20 @@
 # ----------------------
 # VLLM Args
 MODEL=GSAI-ML/LLaDA-8B-Instruct
-NUM_GPUS_PER_MODEL_EXECUTOR=4,
-SCHEUDULER_CLASS=vllm.v1.core.sched.cluster_scheduler.ClusterScheduler
+NUM_GPUS_PER_MODEL_EXECUTOR=2,1,1
+# SCHEDULER_CLASS=vllm.v1.core.sched.cluster_scheduler.ClusterScheduler
+# SCHEDULER_CLASS=vllm.v1.core.sched.dynamic_cofidence_scheduler.ClusterScheduler
+# SCHEDULER_CLASS=vllm.v1.core.sched.urgent_scheduler.UrgentOpportunisticScheduler
+SCHEDULER_CLASS=vllm.v1.core.sched.urgent_opportunistic_scheduler.UrgentOpportunisticScheduler
 DEFAULT_CONFIDENCE_THRESHOLD=0.9
 NUM_PROFILE_RUNS=8
 NUM_PROFILE_WARMUP_RUNS=3
+STEP_ESTIMATOR_MODEL_CLASS=vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine.LightGradientBoostMachine
+STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/model.bin
+STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/features.txt
+# CONF=599
+# STEP_DATA_DIR=./step_data_dynamic_${CONF}
+STEP_DATA_DIR=./step_data
 
 DENOISE_BLOCK_SIZE=32
 CACHE_PREFIX=false
@@ -16,10 +25,12 @@ CACHE_SUFFIX=false
 # ----------------------
 # LMEval Args
 TASK=gsm8k
-LIMIT=100
+LIMIT=10
 OUTPUT_LENGTH=256
-AVG_INTER_ARRIVAL_TIME=0.0
-NUM_CONCURRENT=100
+AVG_INTER_ARRIVAL_TIME=3
+NUM_CONCURRENT=10
+WRITE_RESULTS=true
+RESULTS_DIR=eval/results
 
 # ----------------------
 # Output path name
@@ -32,8 +43,8 @@ else
     BLOCK_SIZE_STR=""
 fi
 CONFIDENCE_STR="_conf${DEFAULT_CONFIDENCE_THRESHOLD}"
-OUTPUT_LENGTH_STR="_out${OUTPUT_LENGTH}"
-OUTPUT_PATH="eval/results/${TASK}_${LIMIT}/${OUTPUT_LENGTH}/${SAFE_MODEL_NAME}${CACHE_PREFIX_STR}${CACHE_SUFFIX_STR}${BLOCK_SIZE_STR}${CONFIDENCE_STR}.json"
+# OUTPUT_PATH="eval/results/${TASK}_${LIMIT}/${OUTPUT_LENGTH}/${SAFE_MODEL_NAME}${CACHE_PREFIX_STR}${CACHE_SUFFIX_STR}${BLOCK_SIZE_STR}${CONFIDENCE_STR}.json"
+OUTPUT_PATH="${RESULTS_DIR}/${TASK}_${LIMIT}/${OUTPUT_LENGTH}/${SAFE_MODEL_NAME}${CACHE_PREFIX_STR}${CACHE_SUFFIX_STR}${BLOCK_SIZE_STR}.json"
 
 # ----------------------
 # Build the commands
@@ -41,10 +52,17 @@ VLLM_CMD="vllm serve --trust-remote-code ${MODEL} \
     --distributed-executor-backend ray \
     --enforce-eager \
     --num-gpus-per-model-executor ${NUM_GPUS_PER_MODEL_EXECUTOR} \
-    --scheduler_cls ${SCHEUDULER_CLASS} \
+    --scheduler_cls ${SCHEDULER_CLASS} \
     --default-confidence-threshold ${DEFAULT_CONFIDENCE_THRESHOLD} \
     --num-profile-runs ${NUM_PROFILE_RUNS} \
-    --num-profile-warmup-runs ${NUM_PROFILE_WARMUP_RUNS}"
+    --num-profile-warmup-runs ${NUM_PROFILE_WARMUP_RUNS} \
+    --eval-task ${TASK}_${LIMIT} \
+    --gen-len ${OUTPUT_LENGTH} \
+    --step-estimator-model-class ${STEP_ESTIMATOR_MODEL_CLASS} \
+    --step-estimator-model-path ${STEP_ESTIMATOR_MODEL_PATH} \
+    --step-estimator-features-path ${STEP_ESTIMATOR_FEATURES_PATH} \
+    --step-data-dir ${STEP_DATA_DIR} \
+    "
 
 if [ "$CACHE_PREFIX" = "true" ]; then
   VLLM_CMD="$VLLM_CMD --cache-prefix"
@@ -63,7 +81,12 @@ EVAL_CMD="python eval/run_lmeval.py \
     --output-length $OUTPUT_LENGTH \
     --output-path $OUTPUT_PATH \
     --num-concurrent $NUM_CONCURRENT \
-    --avg-inter-arrival-time $AVG_INTER_ARRIVAL_TIME"
+    --avg-inter-arrival-time $AVG_INTER_ARRIVAL_TIME\
+    "
+
+if [ "$WRITE_RESULTS" = "true" ]; then
+    EVAL_CMD="$EVAL_CMD --write-results"
+fi
 
 # ----------------------
 # Start tmux session with two panes

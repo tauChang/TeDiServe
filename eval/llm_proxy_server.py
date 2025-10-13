@@ -8,15 +8,17 @@ import time
 import threading
 import uvicorn
 import atexit
+import os
 
 from fastapi import FastAPI, Request
 from transformers import AutoTokenizer
 
-logger = logging.getLogger("llm_proxy")
-logger.setLevel(logging.INFO)
+logger = logging.getLogger(__name__)
+# logger.setLevel(logging.INFO)
 app = FastAPI()
 
 def generate_request_arrival_times(num_requests, inter_arrival_time):
+    random.seed(42)  # for reproducibility
     arrival_times = []
     current_time = 0.0
     for _ in range(num_requests):
@@ -63,7 +65,7 @@ async def proxy_completions(request: Request):
 
         data["prompt"] = prompt 
 
-        logger.info(f"Request {req_id} after chat template: {data['prompt']}")
+        # logger.info(f"Request {req_id} after chat template: {data['prompt']}")
     
         
     # Schedule the release time for this request
@@ -95,7 +97,13 @@ async def proxy_completions(request: Request):
     return resp
 
 def write_response_times(file_path: str):
-    # file_path should already exist. We read it, append the resp_time dict, and write it back
+    # if write-results is true, file_path should already exist. We read it, append the resp_time dict, and write it back
+    # else, we don nothing
+
+    if not os.path.exists(file_path):
+        logger.warning(f"Output path {file_path} does not exist, not writing response times.")
+        return
+
     with open(file_path, "r") as f:
         data = json.load(f)
     

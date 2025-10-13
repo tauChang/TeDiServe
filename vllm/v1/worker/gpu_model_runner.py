@@ -632,15 +632,32 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
         max_num_scheduled_tokens = max(tokens)
         num_scheduled_tokens = np.array(tokens, dtype=np.int32)
-        self.num_exec_tokens_cpu[:num_reqs].copy_(
-            torch.from_numpy(num_scheduled_tokens), non_blocking=True)
+        try:
+            self.num_exec_tokens_cpu[:num_reqs].copy_(
+                torch.from_numpy(num_scheduled_tokens), non_blocking=True)
+        except Exception as e:
+            logger.error(
+                f"req_ids: {req_ids}, "
+                f"num_scheduled_tokens: {num_scheduled_tokens}, "
+                f"num_reqs: {num_reqs}, "
+                f"total_num_scheduled_tokens: {total_num_scheduled_tokens}")
+            raise e
 
         exec_start_pos = np.array(
             [scheduler_output.exec_start_pos[i] for i in req_ids],
             dtype=np.int32
         )
-        self.exec_start_pos_cpu[:num_reqs].copy_(
-            torch.from_numpy(exec_start_pos), non_blocking=True)
+        try:
+            self.exec_start_pos_cpu[:num_reqs].copy_(
+                torch.from_numpy(exec_start_pos), non_blocking=True)
+        except Exception as e:
+            logger.error(
+                f"req_ids: {req_ids}, "
+                f"exec_start_pos: {exec_start_pos}, "
+                f"num_scheduled_tokens: {num_scheduled_tokens}, "
+                f"num_reqs: {num_reqs}, "
+                f"total_num_scheduled_tokens: {total_num_scheduled_tokens}")
+            raise e
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
@@ -1355,355 +1372,362 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
-        execution_start_time = time.time()
-        logger.debug(f"start of execute_model, scheduler_output: "
-                    f"{scheduler_output}, intermediate_tensors: "
-                    f"{intermediate_tensors}")
-        
-        update_states_start_time = time.time()
-        self._update_states(scheduler_output)
-        logger.debug(f"_update_states took "
-                    f"{time.time() - update_states_start_time} seconds")
-        if not scheduler_output.total_num_scheduled_tokens:
-            if not has_kv_transfer_group():
-                # Return empty ModelRunnerOutput if there's no work to do.
-                return EMPTY_MODEL_RUNNER_OUTPUT
+        try:
+            execution_start_time = time.time()
+            logger.debug(f"start of execute_model, scheduler_output: "
+                        f"{scheduler_output}, intermediate_tensors: "
+                        f"{intermediate_tensors}")
+            
+            update_states_start_time = time.time()
+            self._update_states(scheduler_output)
+            logger.debug(f"_update_states took "
+                        f"{time.time() - update_states_start_time} seconds")
+            if not scheduler_output.total_num_scheduled_tokens:
+                if not has_kv_transfer_group():
+                    # Return empty ModelRunnerOutput if there's no work to do.
+                    return EMPTY_MODEL_RUNNER_OUTPUT
 
-            return self.kv_connector_no_forward(scheduler_output)
+                return self.kv_connector_no_forward(scheduler_output)
 
-        # Prepare the decoder inputs.
-        prepare_inputs_start_time = time.time()
-        (attn_metadata, attention_cuda_graphs, logits_indices,
-         confidence_thresholds,
-         spec_decode_metadata, num_scheduled_tokens_np,
-         spec_decode_common_attn_metadata) = (
-             self._prepare_inputs(scheduler_output))
-        logger.debug(f"_prepare_inputs took "
-                    f"{time.time() - prepare_inputs_start_time} seconds")
-        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        if (self.use_cuda_graph
-                and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
-            # Use piecewise CUDA graphs.
-            # Add padding to the batch size.
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                num_scheduled_tokens)
-        else:
-            # Eager mode.
-            # Pad tokens to multiple of tensor_parallel_size when
-            # enabled collective fusion for SP
-            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-            if self.compilation_config.pass_config. \
-                enable_sequence_parallelism and tp_size > 1:
-                num_input_tokens = round_up(num_scheduled_tokens, tp_size)
+            # Prepare the decoder inputs.
+            prepare_inputs_start_time = time.time()
+            (attn_metadata, attention_cuda_graphs, logits_indices,
+            confidence_thresholds,
+            spec_decode_metadata, num_scheduled_tokens_np,
+            spec_decode_common_attn_metadata) = (
+                self._prepare_inputs(scheduler_output))
+            logger.debug(f"_prepare_inputs took "
+                        f"{time.time() - prepare_inputs_start_time} seconds")
+            num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+            if (self.use_cuda_graph
+                    and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
+                # Use piecewise CUDA graphs.
+                # Add padding to the batch size.
+                num_input_tokens = self.vllm_config.pad_for_cudagraph(
+                    num_scheduled_tokens)
             else:
-                num_input_tokens = num_scheduled_tokens
+                # Eager mode.
+                # Pad tokens to multiple of tensor_parallel_size when
+                # enabled collective fusion for SP
+                tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+                if self.compilation_config.pass_config. \
+                    enable_sequence_parallelism and tp_size > 1:
+                    num_input_tokens = round_up(num_scheduled_tokens, tp_size)
+                else:
+                    num_input_tokens = num_scheduled_tokens
 
-        # Padding for DP
-        num_pad, num_tokens_across_dp = self.get_dp_padding(num_input_tokens)
-        num_input_tokens += num_pad
+            # Padding for DP
+            num_pad, num_tokens_across_dp = self.get_dp_padding(num_input_tokens)
+            num_input_tokens += num_pad
 
-        # _prepare_inputs may reorder the batch, so we must gather multi
-        # modal outputs after that to ensure the correct order
-        if self.is_multimodal_model:
-            # Run the multimodal encoder if any.
-            self._execute_mm_encoder(scheduler_output)
-            mm_embeds = self._gather_mm_embeddings(scheduler_output)
-        else:
-            mm_embeds = []
+            # _prepare_inputs may reorder the batch, so we must gather multi
+            # modal outputs after that to ensure the correct order
+            if self.is_multimodal_model:
+                # Run the multimodal encoder if any.
+                self._execute_mm_encoder(scheduler_output)
+                mm_embeds = self._gather_mm_embeddings(scheduler_output)
+            else:
+                mm_embeds = []
 
-        if self.is_multimodal_model and get_pp_group().is_first_rank:
-            # NOTE(woosuk): To unify token ids and soft tokens (vision
-            # embeddings), we always use embeddings (rather than token ids)
-            # as input to the multimodal model, even when the input is text.
-            input_ids = self.input_ids[:num_scheduled_tokens]
-            inputs_embeds = self.model.get_input_embeddings(
-                input_ids=input_ids,
-                multimodal_embeddings=mm_embeds or None,
-            )
-            # TODO(woosuk): Avoid the copy. Optimize.
-            self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
-            inputs_embeds = self.inputs_embeds[:num_input_tokens]
-            input_ids = None
-        else:
-            # For text-only models, we use token ids as input.
-            # While it is possible to use embeddings as input just like the
-            # multimodal models, it is not desirable for performance since
-            # then the embedding layer is not included in the CUDA graph.
-            input_ids = self.input_ids[:num_input_tokens]
-            inputs_embeds = None
-        if self.uses_mrope:
-            positions = self.mrope_positions[:, :num_input_tokens]
-        else:
-            positions = self.positions[:num_input_tokens]
-
-        if get_pp_group().is_first_rank:
-            intermediate_tensors = None
-        else:
-            intermediate_tensors = self.sync_and_slice_intermediate_tensors(
-                num_input_tokens, intermediate_tensors, True)
-
-        # Some attention backends only support CUDA Graphs in pure decode.
-        # If attention doesn't support CUDA Graphs for this batch, but we
-        # compiled with full CUDA graphs, we have to skip them entirely.
-        skip_cuda_graphs = self.full_cuda_graph and not attention_cuda_graphs
-
-        # Run the model.
-        # Use persistent buffers for CUDA graphs.
-        with set_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                num_tokens=num_input_tokens,
-                num_tokens_across_dp=num_tokens_across_dp,
-                skip_cuda_graphs=skip_cuda_graphs,
-        ):
-            self.maybe_setup_kv_connector(scheduler_output)
-
-            # logger.debug(f"Running model with input_ids: {input_ids}, "
-            #             f"positions: {positions}, "
-            #             f"intermediate_tensors: {intermediate_tensors}, ")
-            self._sync_device()
-            model_start_time = time.time()
-            model_output = self.model(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-            )
-            self._sync_device()
-            logger.debug(f"Model forward took {time.time() - model_start_time} "
-                        f"seconds")
-
-            self.maybe_wait_for_kv_save()
-            finished_sending, finished_recving = (
-                self.get_finished_kv_transfers(scheduler_output))
-
-        if self.use_aux_hidden_state_outputs:
-            hidden_states, aux_hidden_states = model_output
-        else:
-            hidden_states = model_output
-            aux_hidden_states = None
-
-        # Broadcast PP output for external_launcher (torchrun)
-        # to make sure we are synced across pp ranks
-        # TODO: Support overlapping mirco-batches
-        # https://github.com/vllm-project/vllm/issues/18019
-        broadcast_pp_output = \
-            self.parallel_config.distributed_executor_backend \
-            == "external_launcher" and len(get_pp_group().ranks) > 0
-        if not get_pp_group().is_last_rank:
-            logger.debug(f"PP rank {get_pp_group().rank} is not the last rank")
-            # For mid-pipeline stages, return the hidden states.
-            if not broadcast_pp_output:
-                if finished_sending or finished_recving:
-                    hidden_states.finished_sending = finished_sending
-                    hidden_states.finished_recving = finished_recving
-                return hidden_states
-            assert isinstance(hidden_states, IntermediateTensors)
-            logger.debug(f"PP rank {get_pp_group().rank} is sending hidden states {hidden_states}")
-            get_pp_group().send_tensor_dict(hidden_states.tensors,
-                                            all_gather_group=get_tp_group())
-            logits = None
-        else:
-            if self.input_batch.pooling_params:
-                return self._pool(hidden_states, num_scheduled_tokens,
-                                  num_scheduled_tokens_np, finished_sending,
-                                  finished_recving)
-
-            # sample_hidden_states = hidden_states[logits_indices]
-            # logits = self.model.compute_logits(sample_hidden_states, None)
-            self._sync_device()
-            logits_start_time = time.time()
-            logits = self.model.compute_logits(hidden_states, None)
-            self._sync_device()
-            logger.debug(f"Computing logits took "
-                        f"{time.time() - logits_start_time} seconds")
-        if broadcast_pp_output:
-            model_output_broadcast_data = {
-                "logits": logits.contiguous(),
-            } if logits is not None else {}
-            model_output_broadcast_data = get_pp_group().broadcast_tensor_dict(
-                model_output_broadcast_data, src=len(get_pp_group().ranks) - 1)
-            assert model_output_broadcast_data is not None
-            logits = model_output_broadcast_data["logits"]
-
-        # Apply structured output bitmasks if present
-        if scheduler_output.grammar_bitmask is not None:
-            self.apply_grammar_bitmask(scheduler_output, logits)
-
-        # Sample the next token and get logprobs if needed.
-        self._sync_device()
-        start_time = time.time()
-        sampling_metadata = self.input_batch.sampling_metadata
-        if spec_decode_metadata is None:
-            try:
-                sampler_output = self.sampler(
-                    is_mask=input_ids == self.model_config.mask_token_id,
-                    logits=logits,
-                    exec_start_pos=self.exec_start_pos_cpu[:self.input_batch.num_reqs],
-                    num_exec_tokens=self.num_exec_tokens_cpu[:self.input_batch.num_reqs],
-                    sampling_metadata=sampling_metadata,
-                    confidence_thresholds=confidence_thresholds,
+            if self.is_multimodal_model and get_pp_group().is_first_rank:
+                # NOTE(woosuk): To unify token ids and soft tokens (vision
+                # embeddings), we always use embeddings (rather than token ids)
+                # as input to the multimodal model, even when the input is text.
+                input_ids = self.input_ids[:num_scheduled_tokens]
+                inputs_embeds = self.model.get_input_embeddings(
+                    input_ids=input_ids,
+                    multimodal_embeddings=mm_embeds or None,
                 )
-                logger.debug(f"Sampler output: {sampler_output}")
-            except Exception as e:
-                logger.error(f"Error in sampler: {e}")
-                raise e
-        else:
-            # When indexing with a tensor (bonus_logits_indices), PyTorch
-            # creates a new tensor with separate storage from the original
-            # logits tensor. This means any in-place operations on bonus_logits
-            # won't affect the original logits tensor.
-            assert logits is not None
-            bonus_logits = logits[spec_decode_metadata.bonus_logits_indices]
-            sampler_output = self.sampler(
-                logits=bonus_logits,
-                sampling_metadata=sampling_metadata,
-            )
-            bonus_token_ids = sampler_output.sampled_token_ids
+                # TODO(woosuk): Avoid the copy. Optimize.
+                self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
+                inputs_embeds = self.inputs_embeds[:num_input_tokens]
+                input_ids = None
+            else:
+                # For text-only models, we use token ids as input.
+                # While it is possible to use embeddings as input just like the
+                # multimodal models, it is not desirable for performance since
+                # then the embedding layer is not included in the CUDA graph.
+                input_ids = self.input_ids[:num_input_tokens]
+                inputs_embeds = None
+            if self.uses_mrope:
+                positions = self.mrope_positions[:, :num_input_tokens]
+            else:
+                positions = self.positions[:num_input_tokens]
 
-            # Just like `bonus_logits`, `target_logits` is a new tensor with
-            # separate storage from the original `logits` tensor. Therefore,
-            # it is safe to update `target_logits` in place.
-            target_logits = logits[spec_decode_metadata.target_logits_indices]
-            output_token_ids = self.rejection_sampler(
-                spec_decode_metadata,
-                None,  # draft_probs
-                target_logits,
-                bonus_token_ids,
-                sampling_metadata,
-            )
-            sampler_output.sampled_token_ids = output_token_ids
-        self._sync_device()
-        logger.debug(f"Sampling took {time.time() - start_time} seconds")
+            if get_pp_group().is_first_rank:
+                intermediate_tensors = None
+            else:
+                intermediate_tensors = self.sync_and_slice_intermediate_tensors(
+                    num_input_tokens, intermediate_tensors, True)
 
-        num_nans_in_logits = {}
-        if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
-            num_nans_in_logits = self._get_nans_in_logits(logits)
+            # Some attention backends only support CUDA Graphs in pure decode.
+            # If attention doesn't support CUDA Graphs for this batch, but we
+            # compiled with full CUDA graphs, we have to skip them entirely.
+            skip_cuda_graphs = self.full_cuda_graph and not attention_cuda_graphs
 
-        # # TODO(woosuk): The following loop can be slow since it iterates over
-        # # the requests one by one. Optimize.
-        # loop_start_time = time.time()
-        # discard_sampled_tokens_req_indices = []
-        # for i, req_id in enumerate(self.input_batch.req_ids):
-        #     req_state = self.requests[req_id]
-        #     seq_len = (req_state.num_computed_tokens +
-        #                scheduler_output.num_scheduled_tokens[req_id])
-        #     if seq_len < req_state.num_tokens:
-        #         # Ignore the sampled token for partial prefills.
-        #         # Rewind the generator state as if the token was not sampled.
-        #         # This relies on cuda-specific torch-internal impl details
-        #         generator = self.input_batch.generators.get(i)
-        #         if generator is not None:
-        #             generator.set_offset(generator.get_offset() - 4)
-        #         # Record the index of the request that should not be sampled,
-        #         # so that we could clear the sampled tokens before returning.
-        #         discard_sampled_tokens_req_indices.append(i)
-        # logger.debug(f"discard_sampled_tokens: {discard_sampled_tokens_req_indices}")
-        # logger.debug(f"Loop over requests took "
-        #             f"{time.time() - loop_start_time} seconds")
+            # Run the model.
+            # Use persistent buffers for CUDA graphs.
+            with set_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_input_tokens,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    skip_cuda_graphs=skip_cuda_graphs,
+            ):
+                self.maybe_setup_kv_connector(scheduler_output)
 
-        logprob_start_time = time.time()
-        # NOTE: GPU -> CPU Sync happens here.
-        # Move as many CPU operations as possible before this sync point.
-        logprobs_tensors = sampler_output.logprobs_tensors
-        logprobs_lists = logprobs_tensors.tolists() \
-            if logprobs_tensors is not None else None
+                # logger.debug(f"Running model with input_ids: {input_ids}, "
+                #             f"positions: {positions}, "
+                #             f"intermediate_tensors: {intermediate_tensors}, ")
+                self._sync_device()
+                model_start_time = time.time()
+                model_output = self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                )
+                self._sync_device()
+                logger.debug(f"Model forward took {time.time() - model_start_time} "
+                            f"seconds")
 
-        # Compute prompt logprobs if needed.
-        prompt_logprobs_dict = self._get_prompt_logprobs_dict(
-            hidden_states[:num_scheduled_tokens],
-            scheduler_output,
-        )
-        logger.debug(f"Logprobs took {time.time() - logprob_start_time} seconds")
+                self.maybe_wait_for_kv_save()
+                finished_sending, finished_recving = (
+                    self.get_finished_kv_transfers(scheduler_output))
 
-        # Get the valid generated tokens.
-        # sampled_token_ids = sampler_output.sampled_token_ids
-        # max_gen_len = sampled_token_ids.shape[-1]
-        # if max_gen_len == 1:
-        #     # No spec decode tokens.
-        #     valid_sampled_token_ids = sampled_token_ids.tolist()
-        # else:
-        #     # Includes spec decode tokens.
-        #     valid_sampled_token_ids = self.rejection_sampler.parse_output(
-        #         sampled_token_ids,
-        #         self.input_batch.vocab_size,
-        #     )
+            if self.use_aux_hidden_state_outputs:
+                hidden_states, aux_hidden_states = model_output
+            else:
+                hidden_states = model_output
+                aux_hidden_states = None
 
-        # [tau_chang]: Get the valid generated tokens.
-        valid_sampled_token_ids = sampler_output.sampled_token_ids
-        logger.debug(f"Valid sampled token ids: {valid_sampled_token_ids}")
+            # Broadcast PP output for external_launcher (torchrun)
+            # to make sure we are synced across pp ranks
+            # TODO: Support overlapping mirco-batches
+            # https://github.com/vllm-project/vllm/issues/18019
+            broadcast_pp_output = \
+                self.parallel_config.distributed_executor_backend \
+                == "external_launcher" and len(get_pp_group().ranks) > 0
+            if not get_pp_group().is_last_rank:
+                logger.debug(f"PP rank {get_pp_group().rank} is not the last rank")
+                # For mid-pipeline stages, return the hidden states.
+                if not broadcast_pp_output:
+                    if finished_sending or finished_recving:
+                        hidden_states.finished_sending = finished_sending
+                        hidden_states.finished_recving = finished_recving
+                    return hidden_states
+                assert isinstance(hidden_states, IntermediateTensors)
+                logger.debug(f"PP rank {get_pp_group().rank} is sending hidden states {hidden_states}")
+                get_pp_group().send_tensor_dict(hidden_states.tensors,
+                                                all_gather_group=get_tp_group())
+                logits = None
+            else:
+                if self.input_batch.pooling_params:
+                    return self._pool(hidden_states, num_scheduled_tokens,
+                                    num_scheduled_tokens_np, finished_sending,
+                                    finished_recving)
 
-        # Mask out the sampled tokens that should not be sampled.
-        # for i in discard_sampled_tokens_req_indices:
-        #     valid_sampled_token_ids[i].clear()
+                # sample_hidden_states = hidden_states[logits_indices]
+                # logits = self.model.compute_logits(sample_hidden_states, None)
+                self._sync_device()
+                logits_start_time = time.time()
+                logits = self.model.compute_logits(hidden_states, None)
+                self._sync_device()
+                logger.debug(f"Computing logits took "
+                            f"{time.time() - logits_start_time} seconds")
+            if broadcast_pp_output:
+                model_output_broadcast_data = {
+                    "logits": logits.contiguous(),
+                } if logits is not None else {}
+                model_output_broadcast_data = get_pp_group().broadcast_tensor_dict(
+                    model_output_broadcast_data, src=len(get_pp_group().ranks) - 1)
+                assert model_output_broadcast_data is not None
+                logits = model_output_broadcast_data["logits"]
 
-        valid_token_start_time = time.time()
-        # Cache the sampled tokens in the model runner, so that the scheduler
-        # doesn't need to send them back.
-        # NOTE(woosuk): As an exception, when using PP, the scheduler sends
-        # the sampled tokens back, because there's no direct communication
-        # between the first-stage worker and the last-stage worker.
-        for req_idx, sampled_ids in enumerate(valid_sampled_token_ids):
-            if not sampled_ids:
-                continue
-        
-            for pos, token_id in sampled_ids:
-                self.input_batch.token_ids_cpu[req_idx, pos] = token_id
+            # Apply structured output bitmasks if present
+            if scheduler_output.grammar_bitmask is not None:
+                self.apply_grammar_bitmask(scheduler_output, logits)
 
-                req_id = self.input_batch.req_ids[req_idx]
-                req_state = self.requests[req_id]
-                req_state.unmasked_token_ids.append((pos, token_id))
-                req_state.update_output_token_id(pos, token_id)
+            # Sample the next token and get logprobs if needed.
+            self._sync_device()
+            start_time = time.time()
+            sampling_metadata = self.input_batch.sampling_metadata
+            if spec_decode_metadata is None:
+                try:
+                    sampler_output = self.sampler(
+                        is_mask=input_ids == self.model_config.mask_token_id,
+                        logits=logits,
+                        exec_start_pos=self.exec_start_pos_cpu[:self.input_batch.num_reqs],
+                        num_exec_tokens=self.num_exec_tokens_cpu[:self.input_batch.num_reqs],
+                        sampling_metadata=sampling_metadata,
+                        confidence_thresholds=confidence_thresholds,
+                    )
+                    logger.debug(f"Sampler output: {sampler_output}")
+                except Exception as e:
+                    logger.error(f"Error in sampler: {e}")
+                    raise e
+            else:
+                # When indexing with a tensor (bonus_logits_indices), PyTorch
+                # creates a new tensor with separate storage from the original
+                # logits tensor. This means any in-place operations on bonus_logits
+                # won't affect the original logits tensor.
+                assert logits is not None
+                bonus_logits = logits[spec_decode_metadata.bonus_logits_indices]
+                sampler_output = self.sampler(
+                    logits=bonus_logits,
+                    sampling_metadata=sampling_metadata,
+                )
+                bonus_token_ids = sampler_output.sampled_token_ids
 
-            # start_idx = self.input_batch.num_tokens_no_spec[req_idx]
-            # end_idx = start_idx + len(sampled_ids)
-            # assert end_idx <= self.max_model_len, (
-            #     "Sampled token IDs exceed the max model length. "
-            #     f"Total number of tokens: {end_idx} > max_model_len: "
-            #     f"{self.max_model_len}")
+                # Just like `bonus_logits`, `target_logits` is a new tensor with
+                # separate storage from the original `logits` tensor. Therefore,
+                # it is safe to update `target_logits` in place.
+                target_logits = logits[spec_decode_metadata.target_logits_indices]
+                output_token_ids = self.rejection_sampler(
+                    spec_decode_metadata,
+                    None,  # draft_probs
+                    target_logits,
+                    bonus_token_ids,
+                    sampling_metadata,
+                )
+                sampler_output.sampled_token_ids = output_token_ids
+            self._sync_device()
+            logger.debug(f"Sampling took {time.time() - start_time} seconds")
 
-            # self.input_batch.token_ids_cpu[req_idx,
-            #                                start_idx:end_idx] = sampled_ids
-            # self.input_batch.num_tokens_no_spec[req_idx] = end_idx
-            # self.input_batch.num_tokens[req_idx] = end_idx
-            # req_id = self.input_batch.req_ids[req_idx]
-            # req_state = self.requests[req_id]
-            # req_state.output_token_ids.extend(sampled_ids)
-        logger.debug(f"Valid token IDs took "
-                    f"{time.time() - valid_token_start_time} seconds")
+            num_nans_in_logits = {}
+            if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
+                num_nans_in_logits = self._get_nans_in_logits(logits)
 
-        if not self.speculative_config:
-            # Speculative decoding is not enabled.
-            spec_token_ids = None
-        else:
-            assert spec_decode_common_attn_metadata is not None
-            spec_token_ids = self.propose_draft_token_ids(
+            # # TODO(woosuk): The following loop can be slow since it iterates over
+            # # the requests one by one. Optimize.
+            # loop_start_time = time.time()
+            # discard_sampled_tokens_req_indices = []
+            # for i, req_id in enumerate(self.input_batch.req_ids):
+            #     req_state = self.requests[req_id]
+            #     seq_len = (req_state.num_computed_tokens +
+            #                scheduler_output.num_scheduled_tokens[req_id])
+            #     if seq_len < req_state.num_tokens:
+            #         # Ignore the sampled token for partial prefills.
+            #         # Rewind the generator state as if the token was not sampled.
+            #         # This relies on cuda-specific torch-internal impl details
+            #         generator = self.input_batch.generators.get(i)
+            #         if generator is not None:
+            #             generator.set_offset(generator.get_offset() - 4)
+            #         # Record the index of the request that should not be sampled,
+            #         # so that we could clear the sampled tokens before returning.
+            #         discard_sampled_tokens_req_indices.append(i)
+            # logger.debug(f"discard_sampled_tokens: {discard_sampled_tokens_req_indices}")
+            # logger.debug(f"Loop over requests took "
+            #             f"{time.time() - loop_start_time} seconds")
+
+            logprob_start_time = time.time()
+            # NOTE: GPU -> CPU Sync happens here.
+            # Move as many CPU operations as possible before this sync point.
+            logprobs_tensors = sampler_output.logprobs_tensors
+            logprobs_lists = logprobs_tensors.tolists() \
+                if logprobs_tensors is not None else None
+
+            # Compute prompt logprobs if needed.
+            prompt_logprobs_dict = self._get_prompt_logprobs_dict(
+                hidden_states[:num_scheduled_tokens],
                 scheduler_output,
-                valid_sampled_token_ids,
-                sampling_metadata,
-                hidden_states,
-                sample_hidden_states,
-                aux_hidden_states,
-                spec_decode_metadata,
-                spec_decode_common_attn_metadata,
             )
+            logger.debug(f"Logprobs took {time.time() - logprob_start_time} seconds")
 
-        self.eplb_step()
+            # Get the valid generated tokens.
+            # sampled_token_ids = sampler_output.sampled_token_ids
+            # max_gen_len = sampled_token_ids.shape[-1]
+            # if max_gen_len == 1:
+            #     # No spec decode tokens.
+            #     valid_sampled_token_ids = sampled_token_ids.tolist()
+            # else:
+            #     # Includes spec decode tokens.
+            #     valid_sampled_token_ids = self.rejection_sampler.parse_output(
+            #         sampled_token_ids,
+            #         self.input_batch.vocab_size,
+            #     )
 
-        self._sync_device()
-        logger.debug(f"execute_model took {time.time() - execution_start_time} ")
-        return ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids,
-            req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids=valid_sampled_token_ids,
-            spec_token_ids=spec_token_ids,
-            logprobs=logprobs_lists,
-            prompt_logprobs_dict=prompt_logprobs_dict,
-            pooler_output=[],
-            finished_sending=finished_sending,
-            finished_recving=finished_recving,
-            num_nans_in_logits=num_nans_in_logits,
-        )
+            # [tau_chang]: Get the valid generated tokens.
+            valid_sampled_token_ids = sampler_output.sampled_token_ids
+            logger.debug(f"Valid sampled token ids: {valid_sampled_token_ids}")
+
+            # Mask out the sampled tokens that should not be sampled.
+            # for i in discard_sampled_tokens_req_indices:
+            #     valid_sampled_token_ids[i].clear()
+
+            valid_token_start_time = time.time()
+            # Cache the sampled tokens in the model runner, so that the scheduler
+            # doesn't need to send them back.
+            # NOTE(woosuk): As an exception, when using PP, the scheduler sends
+            # the sampled tokens back, because there's no direct communication
+            # between the first-stage worker and the last-stage worker.
+            for req_idx, sampled_ids in enumerate(valid_sampled_token_ids):
+                if not sampled_ids:
+                    continue
+            
+                for pos, token_id in sampled_ids:
+                    self.input_batch.token_ids_cpu[req_idx, pos] = token_id
+
+                    req_id = self.input_batch.req_ids[req_idx]
+                    req_state = self.requests[req_id]
+                    req_state.unmasked_token_ids.append((pos, token_id))
+                    req_state.update_output_token_id(pos, token_id)
+
+                # start_idx = self.input_batch.num_tokens_no_spec[req_idx]
+                # end_idx = start_idx + len(sampled_ids)
+                # assert end_idx <= self.max_model_len, (
+                #     "Sampled token IDs exceed the max model length. "
+                #     f"Total number of tokens: {end_idx} > max_model_len: "
+                #     f"{self.max_model_len}")
+
+                # self.input_batch.token_ids_cpu[req_idx,
+                #                                start_idx:end_idx] = sampled_ids
+                # self.input_batch.num_tokens_no_spec[req_idx] = end_idx
+                # self.input_batch.num_tokens[req_idx] = end_idx
+                # req_id = self.input_batch.req_ids[req_idx]
+                # req_state = self.requests[req_id]
+                # req_state.output_token_ids.extend(sampled_ids)
+            logger.debug(f"Valid token IDs took "
+                        f"{time.time() - valid_token_start_time} seconds")
+
+            if not self.speculative_config:
+                # Speculative decoding is not enabled.
+                spec_token_ids = None
+            else:
+                assert spec_decode_common_attn_metadata is not None
+                spec_token_ids = self.propose_draft_token_ids(
+                    scheduler_output,
+                    valid_sampled_token_ids,
+                    sampling_metadata,
+                    hidden_states,
+                    sample_hidden_states,
+                    aux_hidden_states,
+                    spec_decode_metadata,
+                    spec_decode_common_attn_metadata,
+                )
+
+            self.eplb_step()
+
+            self._sync_device()
+            logger.debug(f"execute_model took {time.time() - execution_start_time} ")
+            return ModelRunnerOutput(
+                req_ids=self.input_batch.req_ids,
+                req_id_to_index=self.input_batch.req_id_to_index,
+                sampled_token_ids=valid_sampled_token_ids,
+                spec_token_ids=spec_token_ids,
+                logprobs=logprobs_lists,
+                prompt_logprobs_dict=prompt_logprobs_dict,
+                pooler_output=[],
+                finished_sending=finished_sending,
+                finished_recving=finished_recving,
+                num_nans_in_logits=num_nans_in_logits,
+            )
+        except Exception as e:
+            # write to file this error
+            import traceback
+            logger.error(f"Exception in execute_model: {e}")
+            logger.error(traceback.format_exc())
+            raise e
 
     def propose_draft_token_ids(
         self,

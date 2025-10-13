@@ -165,6 +165,17 @@ def train_and_evaluate(train_path: Union[str, list[str]],
     for feature, importance in feature_importances:
         print(f"  {feature}: {importance}")
     # # model.save_model("denoise_ratio_model.txt")
+
+    # save the model and features used to ./models
+    model_path = "models/lgb/model.bin"
+    features_path = "models/lgb/features.txt"
+    import os
+    os.makedirs(os.path.dirname(model_path), exist_ok=True)
+    os.makedirs(os.path.dirname(features_path), exist_ok=True)
+    model.save_model(model_path)
+    with open(features_path, "w") as f:
+        for feature in included_features:
+            f.write(f"{feature}\n")
     
     # # Evaluate
     # import time
@@ -255,12 +266,17 @@ def train_and_evaluate(train_path: Union[str, list[str]],
 train_and_evaluate(
     # "GSAI-ML_LLaDA-8B-Base_prefix_step_estimator.json",
     [
-        "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block16_conf0.8_out256.json",
-        "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block16_conf0.8_out512.json",
+        "../../step_data/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
+        "../../step_data/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
+        "../../step_data/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
+        "../../step_data/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
+        "../../step_data/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
+        # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block16_conf0.8_out256.json",
+        # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block16_conf0.8_out512.json",
         # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block16_conf0.9_out256.json",
         # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block16_conf0.9_out512.json",
-        "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block32_conf0.8_out256.json",
-        "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block32_conf0.8_out512.json",
+        # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block32_conf0.8_out256.json",
+        # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block32_conf0.8_out512.json",
         # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block32_conf0.9_out256.json",
         # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block32_conf0.9_out512.json",
     ],

@@ -26,7 +26,7 @@ from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              get_supported_lora_modules,
                              is_regex_target_modules,
                              parse_fine_tuned_lora_name, replace_submodule)
-from vllm.model_executor.layers.fused_moe import FusedMoE
+# from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.interfaces import is_pooling_model

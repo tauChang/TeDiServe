@@ -59,7 +59,6 @@ TIMESTAMP = time.strftime("%Y-%m-%d_%H:%M:%S")
 
 _R = TypeVar('_R')  # Return type for collective_rpc
 
-
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
@@ -235,7 +234,7 @@ class EngineCore:
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
-
+    
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
         # if pooling_params := request.pooling_params:
@@ -288,7 +287,7 @@ class EngineCore:
             end_time = time.time()
             # write to a file for profiling
             try:
-                with open(f"executor_{executor_id}_profile_{TIMESTAMP}.txt", "a") as f:
+                with open(f"executor_profiles/{executor_id}_{TIMESTAMP}.txt", "a") as f:
                     # write input_ids size and time
                     f.write(f"{scheduler_output.total_num_scheduled_tokens},"
                             f"{end_time - start_time}\n")
@@ -725,7 +724,7 @@ class EngineCoreProc(EngineCore):
                 self.addresses.coordinator_input,
                 self.identity
             ),
-            self.run_reconfigure_loop(),
+            # self.run_reconfigure_loop(),
         )
 
     async def run_reconfigure_loop(self):
@@ -746,7 +745,8 @@ class EngineCoreProc(EngineCore):
         while True:
             needs_engine_step |= await self._process_input_queue()
             # must have request at this point
-            if needs_engine_step:
+            # if needs_engine_step:
+            if needs_engine_step or self.scheduler.has_requests():
                 await self._process_engine_step()
             needs_engine_step = await self._process_executor_output_queue()
 
@@ -799,7 +799,12 @@ class EngineCoreProc(EngineCore):
         
     async def _process_engine_step(self) -> bool:
         # dict: executor_id -> SchedulerOutput
+        start_time = time.time()
         scheduler_outputs = await self.scheduler.schedule()
+        end_time = time.time()
+        # write to a file
+        with open(f"scheduler_profiles/{TIMESTAMP}.txt", "a") as f:
+            f.write(f"{len(self.executors_manager.executors)}, {self.scheduler.get_num_unfinished_requests()}, {end_time - start_time}\n")
 
         logger.debug(f"Scheduler outputs: {scheduler_outputs}")
         for executor_id, scheduler_output in scheduler_outputs.items():

@@ -2383,6 +2383,22 @@ class SchedulerConfig:
     default_confidence_threshold: float = 0.9
     """Default confidence threshold for dllm unmasking."""
 
+    step_estimator_model_class: Optional[str] = None
+    """Class name of the step estimator. If None, no step estimator is used."""
+    step_estimator_model_path: Optional[str] = None
+    """Path to the step estimator model."""
+    step_estimator_features_path: Optional[str] = None
+    """Path to the step estimator features config."""
+    step_estimator_features: Optional[list[str]] = None
+    """ Features used for step estimator."""
+
+    step_data_dir: Optional[str] = "./step_data"
+    """Directory of the collected step data."""
+    eval_task: Optional[str] = "gsm8k"
+    """Eval task name. Only for saving step data. Not actually used in engine."""
+    gen_len: Optional[int] = None
+    """Generation length. Only for saving step data. Not actually used in engine."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

@@ -4,7 +4,9 @@ import matplotlib.pyplot as plt
 # Filenames
 model = "GSAI-ML_LLaDA-8B-Instruct"
 dir = f"../../latency_profiles/{model}/GH200"
-files = ["TP1.json", "TP2.json", "TP4.json"]
+files = ["TP1.json", "TP2.json", "TP4.json"
+        #  , "TP1.bak.json", "TP2.bak.json", "TP4.bak.json"
+         ]
 
 # Load data
 data = {}
@@ -22,7 +24,7 @@ for fname, d in data.items():
     if d:
         xs = sorted(d.keys())
         ys = [d[x] for x in xs]
-        plt.plot(xs, ys, marker="o", label=fname.split(".")[0])
+        plt.plot(xs, ys, marker="o", label=".".join(fname.split(".")[:-1]))
 
 plt.xlabel("Batch size")
 plt.ylabel("Time (ms)")

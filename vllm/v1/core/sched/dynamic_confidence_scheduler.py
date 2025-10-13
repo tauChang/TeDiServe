@@ -305,12 +305,12 @@ class ClusterScheduler(SchedulerInterface):
 
         self.system_load_history: list[tuple[str, int]] = [] # (timestamp, num_tokens)
         self.update_system_load()
-    
+
     def update_system_load(self):
         self.system_load_history.append(
             (get_cur_timestamp(), 
              sum(self.requests[req_id].num_tokens for req_id in self.requests)))
-    
+
     async def schedule(self) -> SchedulerOutput:
         # utils
         def determine_new_exec_tokens(request: Request) -> int:
@@ -743,8 +743,26 @@ class ClusterScheduler(SchedulerInterface):
                     confidence_thresholds[req_id] = req_confidence_threshold
                     logger.debug(f"using user-defined confidence threshold {confidence_thresholds[req_id]} for req {req_id}")
                 else:
-                    confidence_thresholds[req_id] = self.default_confidence_threshold
-                    logger.debug(f"using default confidence threshold {confidence_thresholds[req_id]} for req {req_id}")
+                    # confidence_thresholds[req_id] = self.default_confidence_threshold
+                    request = self.requests[req_id]
+                    progress = len(request.unmasked_token_ids) / request.output_length
+                    # if progress <= 0.5:
+                    #     confidence_thresholds[req_id] = 0.9
+                    #     logger.debug(f"progress {progress} <= 0.5, using confidence threshold {confidence_thresholds[req_id]}")
+                    # else:
+                    #     confidence_thresholds[req_id] = 0.5
+                    #     logger.debug(f"progress {progress} > 0.5, using confidence threshold {confidence_thresholds[req_id]}")
+
+                    if progress <= 0.33:
+                        confidence_thresholds[req_id] = 0.5
+                        logger.debug(f"progress {progress} <= 0.33, using confidence threshold {confidence_thresholds[req_id]}")
+                    elif progress <= 0.66:
+                        confidence_thresholds[req_id] = 0.9
+                        logger.debug(f"progress {progress} <= 0.66, using confidence threshold {confidence_thresholds[req_id]}")
+                    else:
+                        confidence_thresholds[req_id] = 0.9
+                        logger.debug(f"progress {progress} > 0.66, using confidence threshold {confidence_thresholds[req_id]}")
+                    # logger.debug(f"using default confidence threshold {confidence_thresholds[req_id]} for req {req_id}")
             
             exec_start_pos: dict[str, int] = {}
             
@@ -1236,7 +1254,7 @@ class ClusterScheduler(SchedulerInterface):
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
         self.update_system_load()
-    
+
     def finish_requests(
         self,
         request_ids: Union[str, Iterable[str]],

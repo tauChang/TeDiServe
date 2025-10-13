@@ -142,6 +142,9 @@ class Request:
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0
 
+        # TODO: fix SLO
+        self.latency_slo = 5
+
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest,
                                  mask_token_id: int,
@@ -175,16 +178,20 @@ class Request:
     def append_unmasked_token_ids(
         self,
         token_ids: list[tuple[int, int]]
-    ) -> None:
+    ) -> StepStats:
         self.num_last_unmasked_tokens = len(token_ids)
         self._unmasked_token_ids.extend(token_ids)
         self.cur_block_num_unmasked_tokens += len(token_ids)
+        logger.debug(f"Request {self.request_id} has unmasked {self.num_unmasked_tokens} tokens so far.")
+        logger.debug(f"Request {self.request_id} has unmasked {self.cur_block_num_unmasked_tokens} tokens in the current block (block {self.cur_block}).")
+        logger.debug(f"get {len(token_ids)} token_ids: {token_ids}")
         assert self.cur_block_num_unmasked_tokens <= self.denoise_block_size
         
         stats = StepStats(
             id=self.request_id,
             num_denoise_ran=self.num_denoise_ran,
             num_unmasked_tokens=len(self._unmasked_token_ids),
+            num_cur_unmasked_tokens=self.num_last_unmasked_tokens,
             output_length=self.output_length,
             block=self.cur_block,
             block_num_denoise_ran=self.cur_block_denoise_ran,
@@ -205,6 +212,8 @@ class Request:
             self.cur_block_denoise_ran = 0
 
         for pos, token_id in token_ids:
+            logger.debug(f"Request {self.request_id} unmasked token {token_id} at position {pos}.")
+            logger.debug(f"cur block: {old_cur_block_start} to {old_cur_block_start + self.denoise_block_size - 1}")
             assert pos >= old_cur_block_start and pos < old_cur_block_start + self.denoise_block_size
 
             pos -= len(self.prompt_token_ids)
@@ -269,6 +278,13 @@ class Request:
             return None
         events, self.events = self.events, []
         return events
+
+    @property
+    def slo_time_remaining(self) -> float:
+        if self.latency_slo is None:
+            return float("inf")
+        elapsed = time.time() - self.arrival_time
+        return self.latency_slo - elapsed
 
 
 class RequestStatus(enum.IntEnum):

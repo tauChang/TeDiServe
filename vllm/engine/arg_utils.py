@@ -445,6 +445,13 @@ class EngineArgs:
     mask_token_id: int = ModelConfig.mask_token_id
     num_gpus_per_model_executor: Union[str]= ClusterConfig.num_gpus_per_model_executor
     default_confidence_threshold: float = SchedulerConfig.default_confidence_threshold
+    step_estimator_model_class: Optional[str] = SchedulerConfig.step_estimator_model_class
+    step_estimator_model_path: Optional[str] = SchedulerConfig.step_estimator_model_path
+    step_estimator_features_path: Optional[str] = SchedulerConfig.step_estimator_features_path
+    step_estimator_features: Optional[List[str]] = SchedulerConfig.step_estimator_features
+    step_data_dir: Optional[str] = SchedulerConfig.step_data_dir
+    eval_task: Optional[str] = SchedulerConfig.eval_task
+    gen_len: Optional[int] = SchedulerConfig.gen_len
     denoise_block_size: int = ModelConfig.denoise_block_size
     cache_prefix: bool = ModelConfig.cache_prefix
     cache_suffix: bool = ModelConfig.cache_suffix
@@ -889,6 +896,20 @@ class EngineArgs:
                                      **scheduler_kwargs["async_scheduling"])
         scheduler_group.add_argument("--default-confidence-threshold",
                                      **scheduler_kwargs["default_confidence_threshold"])
+        scheduler_group.add_argument("--step-estimator-model-class",
+                                     **scheduler_kwargs["step_estimator_model_class"])
+        scheduler_group.add_argument("--step-estimator-model-path",
+                                     **scheduler_kwargs["step_estimator_model_path"])
+        scheduler_group.add_argument("--step-estimator-features-path",
+                                     **scheduler_kwargs["step_estimator_features_path"])
+        scheduler_group.add_argument("--step-estimator-features",
+                                     **scheduler_kwargs["step_estimator_features"])
+        scheduler_group.add_argument("--step-data-dir",
+                                     **scheduler_kwargs["step_data_dir"])
+        scheduler_group.add_argument("--eval-task",
+                                     **scheduler_kwargs["eval_task"])
+        scheduler_group.add_argument("--gen-len",
+                                     **scheduler_kwargs["gen_len"])
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1286,6 +1307,13 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             default_confidence_threshold=self.default_confidence_threshold,
+            step_estimator_model_class=self.step_estimator_model_class,
+            step_estimator_model_path=self.step_estimator_model_path,
+            step_estimator_features_path=self.step_estimator_features_path,
+            step_estimator_features=self.step_estimator_features,
+            step_data_dir=self.step_data_dir,
+            eval_task=self.eval_task,
+            gen_len=self.gen_len,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
