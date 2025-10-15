@@ -32,7 +32,7 @@ from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
 from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
                                               create_request_queue)
-from vllm.v1.core.sched.utils import check_stop, LatencyProfile, get_cur_timestamp
+from vllm.v1.core.sched.utils import check_stop, LatencyProfile, SystemLogger
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.executor.abstract import Executor
@@ -497,18 +497,9 @@ class UrgentOpportunisticScheduler(SchedulerInterface):
             path = get_latency_profile_path(vllm_config, tp_degree)
             self.latency_profiles[tp_degree] = LatencyProfile(path)
         
-        self.system_load_history: list[tuple[str, int]] = [] # (timestamp, num_tokens)
-        self.update_system_load()
+        self.system_logger = SystemLogger("system_logs", self)
+        self.system_logger.log()
 
-    def update_system_load(self, write_out: bool = False):
-        self.system_load_history.append(
-            (get_cur_timestamp(), 
-             sum(self.requests[req_id].num_tokens for req_id in self.requests)))
-            
-        if write_out:
-            with open("system_load_history.json", "w") as f:
-                json.dump(self.system_load_history, f, indent=4)
-    
     def update_step_estimates(self, req_id: str) -> None:
         req = self.request_states[req_id]
         stats_with_confidence = []
@@ -938,96 +929,96 @@ class UrgentOpportunisticScheduler(SchedulerInterface):
         logger.debug(f"End B\n")
         
         
-        logger.debug(f"Start C (schedule opportunistic requests)")
-        # Opportunistic promoting (only looking at requests on idle executors)
-        # only promote to executors with no requests scheduled at all
-        promoted_req_ids = set()
+        # logger.debug(f"Start C (schedule opportunistic requests)")
+        # # Opportunistic promoting (only looking at requests on idle executors)
+        # # only promote to executors with no requests scheduled at all
+        # promoted_req_ids = set()
         
-        zero_load_executors = [ex_id for ex_id in [e_id for e_id in idle_executors if self.executor_states[e_id].has_no_pending_changes()] if len(self.executor_states[ex_id].req_ids) == 0]
-        while len(zero_load_executors) > 0:
-            # find the executor with highest TP degree
-            tgt_ex_id = max(zero_load_executors, key=lambda eid: self.executor_states[eid].tp_degree)
-            logger.debug(f"Looking at zero load executor {tgt_ex_id} with TP degree {self.executor_states[tgt_ex_id].tp_degree}")
-            logger.debug(f"{self.executor_states[tgt_ex_id]}")
-            # find a job to promote
-            # find the job with the least (priority, conf, estimated_time_left - slo_time_remaining)
-            best_req_id = None
-            best_metric = (RequestStatePriority.BEST_EFFORT + 1, 1.1, float('inf'))
-            # only look at req on idle executors
-            for src_ex_id in idle_executors:
-                for req_id in self.executor_states[src_ex_id].req_ids:
-                    if req_id in promoted_req_ids:
-                        continue
-                    logger.debug(f"Considering request {req_id} on executor {src_ex_id} for promotion to executor {tgt_ex_id}")
-                    num_tokens = self.requests[req_id].num_tokens
-                    _, src_step_latency = self.get_profile_latency(
-                        self.executor_states[src_ex_id].tp_degree, self.executor_states[src_ex_id].get_projected_batch_size())
-                    _, tgt_step_latency = self.get_profile_latency(
-                        self.executor_states[tgt_ex_id].tp_degree, num_tokens)
-                    logger.debug(f"src_step_latency: {src_step_latency}")
-                    logger.debug(f"tgt_step_latency: {tgt_step_latency}")
-                    if tgt_step_latency < src_step_latency:
-                        # possibly just pick the first one we see that satisfies this 
-                        est_time_left = self.get_estimated_time_left(
-                            req_id, self.executor_states[src_ex_id].tp_degree,
-                            self.executor_states[src_ex_id].get_batch_size(),
-                            self.request_states[req_id].confidence_threshold)
-                        slo_time_remaining = self.requests[req_id].slo_time_remaining
-                        metric = (
-                            self.request_states[req_id].priority,
-                            self.request_states[req_id].confidence_threshold,
-                            est_time_left - slo_time_remaining
-                        )
-                        if metric < best_metric:
-                            best_metric = metric
-                            best_req_id = req_id
-                            logger.debug(f"Found a better candidate for promotion: request {req_id} from executor {src_ex_id} with metric {metric}")
+        # zero_load_executors = [ex_id for ex_id in [e_id for e_id in idle_executors if self.executor_states[e_id].has_no_pending_changes()] if len(self.executor_states[ex_id].req_ids) == 0]
+        # while len(zero_load_executors) > 0:
+        #     # find the executor with highest TP degree
+        #     tgt_ex_id = max(zero_load_executors, key=lambda eid: self.executor_states[eid].tp_degree)
+        #     logger.debug(f"Looking at zero load executor {tgt_ex_id} with TP degree {self.executor_states[tgt_ex_id].tp_degree}")
+        #     logger.debug(f"{self.executor_states[tgt_ex_id]}")
+        #     # find a job to promote
+        #     # find the job with the least (priority, conf, estimated_time_left - slo_time_remaining)
+        #     best_req_id = None
+        #     best_metric = (RequestStatePriority.BEST_EFFORT + 1, 1.1, float('inf'))
+        #     # only look at req on idle executors
+        #     for src_ex_id in idle_executors:
+        #         for req_id in self.executor_states[src_ex_id].req_ids:
+        #             if req_id in promoted_req_ids:
+        #                 continue
+        #             logger.debug(f"Considering request {req_id} on executor {src_ex_id} for promotion to executor {tgt_ex_id}")
+        #             num_tokens = self.requests[req_id].num_tokens
+        #             _, src_step_latency = self.get_profile_latency(
+        #                 self.executor_states[src_ex_id].tp_degree, self.executor_states[src_ex_id].get_projected_batch_size())
+        #             _, tgt_step_latency = self.get_profile_latency(
+        #                 self.executor_states[tgt_ex_id].tp_degree, num_tokens)
+        #             logger.debug(f"src_step_latency: {src_step_latency}")
+        #             logger.debug(f"tgt_step_latency: {tgt_step_latency}")
+        #             if tgt_step_latency < src_step_latency:
+        #                 # possibly just pick the first one we see that satisfies this 
+        #                 est_time_left = self.get_estimated_time_left(
+        #                     req_id, self.executor_states[src_ex_id].tp_degree,
+        #                     self.executor_states[src_ex_id].get_batch_size(),
+        #                     self.request_states[req_id].confidence_threshold)
+        #                 slo_time_remaining = self.requests[req_id].slo_time_remaining
+        #                 metric = (
+        #                     self.request_states[req_id].priority,
+        #                     self.request_states[req_id].confidence_threshold,
+        #                     est_time_left - slo_time_remaining
+        #                 )
+        #                 if metric < best_metric:
+        #                     best_metric = metric
+        #                     best_req_id = req_id
+        #                     logger.debug(f"Found a better candidate for promotion: request {req_id} from executor {src_ex_id} with metric {metric}")
             
-            logger.debug(f"Best request to promote to executor {tgt_ex_id}: {best_req_id}")
-            # promote it
-            if best_req_id is not None:
-                src_ex_id = self.request_states[best_req_id].executor_id
-                logger.debug(f"Promoting opportunistic request {best_req_id} from executor {src_ex_id} to executor {tgt_ex_id}")
-                assert src_ex_id != tgt_ex_id
+        #     logger.debug(f"Best request to promote to executor {tgt_ex_id}: {best_req_id}")
+        #     # promote it
+        #     if best_req_id is not None:
+        #         src_ex_id = self.request_states[best_req_id].executor_id
+        #         logger.debug(f"Promoting opportunistic request {best_req_id} from executor {src_ex_id} to executor {tgt_ex_id}")
+        #         assert src_ex_id != tgt_ex_id
 
-                # find the highest confidence that can meet SLO on the new executor
-                # if best effort, just use the highest confidence
-                if self.request_states[best_req_id].is_best_effort:
-                    new_conf = max(self.candidate_confidence_thresholds)
-                else:
-                    new_conf = None
-                    for conf in self.candidate_confidence_thresholds:
-                        if all_slos_met(
-                            [best_req_id],
-                            self.executor_states[tgt_ex_id].tp_degree,
-                            self.requests[best_req_id].num_tokens,
-                            {best_req_id: conf}):
-                            new_conf = conf
-                            break
-                assert new_conf is not None
-                assert new_conf >= self.request_states[best_req_id].confidence_threshold
+        #         # find the highest confidence that can meet SLO on the new executor
+        #         # if best effort, just use the highest confidence
+        #         if self.request_states[best_req_id].is_best_effort:
+        #             new_conf = max(self.candidate_confidence_thresholds)
+        #         else:
+        #             new_conf = None
+        #             for conf in self.candidate_confidence_thresholds:
+        #                 if all_slos_met(
+        #                     [best_req_id],
+        #                     self.executor_states[tgt_ex_id].tp_degree,
+        #                     self.requests[best_req_id].num_tokens,
+        #                     {best_req_id: conf}):
+        #                     new_conf = conf
+        #                     break
+        #         assert new_conf is not None
+        #         assert new_conf >= self.request_states[best_req_id].confidence_threshold
 
-                # remove from src
-                self.executor_states[src_ex_id].remove_request(best_req_id)
-                self.request_states[best_req_id].remove_executor()
-                self.request_states[best_req_id].remove_pending_executor()
+        #         # remove from src
+        #         self.executor_states[src_ex_id].remove_request(best_req_id)
+        #         self.request_states[best_req_id].remove_executor()
+        #         self.request_states[best_req_id].remove_pending_executor()
                 
-                self.executor_states[tgt_ex_id].add_request(self.requests[best_req_id])
-                self.request_states[best_req_id].set_executor(tgt_ex_id, RequestStatePriority.OPPORTUNISTIC, new_conf)
-                self.request_states[best_req_id].set_pending_executor(tgt_ex_id, RequestStatePriority.OPPORTUNISTIC, new_conf)
+        #         self.executor_states[tgt_ex_id].add_request(self.requests[best_req_id])
+        #         self.request_states[best_req_id].set_executor(tgt_ex_id, RequestStatePriority.OPPORTUNISTIC, new_conf)
+        #         self.request_states[best_req_id].set_pending_executor(tgt_ex_id, RequestStatePriority.OPPORTUNISTIC, new_conf)
                 
-                promoted_req_ids.add(best_req_id)
-                requests_in_scheduler_output.add(best_req_id)
+        #         promoted_req_ids.add(best_req_id)
+        #         requests_in_scheduler_output.add(best_req_id)
 
-                zero_load_executors.remove(tgt_ex_id)
-                if len(self.executor_states[src_ex_id].req_ids) == 0:
-                    zero_load_executors.append(src_ex_id)
-            else:
-                # nothing to promote
-                logger.debug(f"Nothing to promote to executor {tgt_ex_id}.")
-                break
+        #         zero_load_executors.remove(tgt_ex_id)
+        #         if len(self.executor_states[src_ex_id].req_ids) == 0:
+        #             zero_load_executors.append(src_ex_id)
+        #     else:
+        #         # nothing to promote
+        #         logger.debug(f"Nothing to promote to executor {tgt_ex_id}.")
+        #         break
         
-        logger.debug(f"End C\n")
+        # logger.debug(f"End C\n")
 
         logger.debug(f"Start D (schedule best-effort requests)")
         # Best Effort
@@ -1353,6 +1344,7 @@ class UrgentOpportunisticScheduler(SchedulerInterface):
         # self._update_after_schedule(0, scheduler_output)
         logger.debug(f"returning scheduler output: {scheduler_outputs}")
 
+        self.system_logger.log()
         return scheduler_outputs
 
         # First, schedule the RUNNING requests.
@@ -2156,7 +2148,7 @@ class UrgentOpportunisticScheduler(SchedulerInterface):
         self.update_step_estimates(request.request_id)
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
-        self.update_system_load()
+        self.system_logger.log()
 
     def finish_requests(
         self,
@@ -2253,7 +2245,7 @@ class UrgentOpportunisticScheduler(SchedulerInterface):
         if prune and not self.request_states[request_id].executors_to_free:
             del self.request_states[request_id]
             del self.requests[request_id]
-            self.update_system_load(write_out=True)
+            self.system_logger.log(write_out=True)
         
         return None
         

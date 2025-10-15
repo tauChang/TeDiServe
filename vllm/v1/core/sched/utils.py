@@ -9,7 +9,11 @@ import os
 from datetime import datetime
 
 from vllm.v1.request import Request, RequestStatus
+from dataclasses import dataclass, field
+from typing import Dict, List
+from vllm.logger import init_logger
 
+logger = init_logger(__name__)
 
 def check_stop(request: Request,
                max_model_len: int,
@@ -71,5 +75,60 @@ class LatencyProfile:
         return self.batch_sizes[idx], self.latencies[idx]
     
 
-def get_cur_timestamp():
+def get_cur_timestamp(include_ms: bool = True) -> str:
+    if not include_ms:
+        return datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
     return datetime.now().strftime("%Y-%m-%d_%H:%M:%S.%f")[:-3]
+
+@dataclass
+class SystemSnapshot:
+    executor_tp_degree: Dict[str, int]
+    executor_to_requests: Dict[str, List[str]]
+    num_tokens: int
+    request_confidence_thresholds: Dict[str, float]
+    timestamp: str = field(default_factory=get_cur_timestamp)
+
+    @staticmethod
+    def from_states(scheduler) -> "SystemSnapshot":
+        executor_tp_degree = {
+            es.executor_id: es.tp_degree for es in scheduler.executor_states.values()
+        }
+        executor_to_requests = {
+            es.executor_id: list(es.req_ids) for es in scheduler.executor_states.values()
+        }
+        num_tokens = sum(r.num_tokens for r in scheduler.requests.values())
+        request_confidence_thresholds = {
+            r.request_id: r.confidence_threshold for r in scheduler.request_states.values()
+        }
+        return SystemSnapshot(
+            executor_tp_degree=executor_tp_degree,
+            executor_to_requests=executor_to_requests,
+            num_tokens=num_tokens,
+            request_confidence_thresholds=request_confidence_thresholds,
+        )
+    
+    def __str__(self) -> str:
+        return json.dumps(self.__dict__, indent=2)
+    
+class SystemLogger:
+    def __init__(self, log_dir: str, scheduler: object):
+        self.scheduler = scheduler
+        self.log_dir = log_dir
+        os.makedirs(log_dir, exist_ok=True)
+        self.log_file = os.path.join(log_dir, f"system_log_{get_cur_timestamp(include_ms=False)}.log")
+        with open(self.log_file, "w") as f:
+            f.write("")  # Create or clear the log file
+        self.snapshots = []
+
+    def log(self, write_out: bool = False):
+        snapshot = SystemSnapshot.from_states(self.scheduler)
+        self.snapshots.append(snapshot)
+        logger.debug(f"System Snapshot at {snapshot.timestamp}:\n{snapshot}")
+
+        if write_out:
+            logger.info(f"Writing {len(self.snapshots)} snapshots to {self.log_file}")
+            with open(self.log_file, "a") as f:
+                for snap in self.snapshots:
+                    f.write(str(snap) + "\n")
+            
+            self.snapshots.clear()

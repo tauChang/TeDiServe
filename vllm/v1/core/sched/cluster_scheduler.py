@@ -27,7 +27,7 @@ from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
 from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
                                               create_request_queue)
-from vllm.v1.core.sched.utils import check_stop, get_cur_timestamp
+from vllm.v1.core.sched.utils import check_stop, SystemLogger
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.executor.abstract import Executor
@@ -44,14 +44,15 @@ logger = init_logger(__name__)
 class ExecutorState:
     def __init__(self, executor, token_budget: int) -> None:
         self.executor = executor
-        self.num_gpus = len(executor.bundle_ids)
+        self.executor_id = executor.id # for logging
+        self.tp_degree = len(executor.bundle_ids)
         self.req_ids: set[str] = set()
         self.pending_req_ids: set[str] = set()
         self.req_to_tokens_needed: dict[str, int] = {}
         self._token_budget = token_budget
     
     def __repr__(self) -> str:
-        return (f"ExecutorState(num_gpus={self.num_gpus}, "
+        return (f"ExecutorState(tp_degree={self.tp_degree}, "
                 f"req_ids={self.req_ids}, "
                 f"pending_req_ids={self.pending_req_ids}, "
                 f"req_to_tokens_needed={self.req_to_tokens_needed}, "
@@ -94,9 +95,11 @@ class ExecutorState:
 class RequestState:
     def __init__(self, request: Request) -> None:
         self.request = request
+        self.request_id = request.request_id # for logging
         self.executor_id = None
         self.executors_to_free: set[int] = set()
         self.pending_executor_id = None
+        self.confidence_threshold = None # for logging
     
     def __str__(self) -> str:
         return (f"RequestState(request_id={self.request.request_id}, "
@@ -303,14 +306,9 @@ class ClusterScheduler(SchedulerInterface):
 
         self.step_estimator = StepEstimator(vllm_config)
 
-        self.system_load_history: list[tuple[str, int]] = [] # (timestamp, num_tokens)
-        self.update_system_load()
-    
-    def update_system_load(self):
-        self.system_load_history.append(
-            (get_cur_timestamp(), 
-             sum(self.requests[req_id].num_tokens for req_id in self.requests)))
-    
+        self.system_logger = SystemLogger("system_logs", self)
+        self.system_logger.log()
+        
     async def schedule(self) -> SchedulerOutput:
         # utils
         def determine_new_exec_tokens(request: Request) -> int:
@@ -812,7 +810,7 @@ class ClusterScheduler(SchedulerInterface):
         # return scheduler_output
         # [TODO (tau_chang)]: update this
         # return {0: scheduler_output}
-
+        self.system_logger.log()
         return scheduler_outputs
 
     def _update_after_schedule(
@@ -1235,7 +1233,7 @@ class ClusterScheduler(SchedulerInterface):
         self.request_states[request.request_id] = RequestState(request)
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
-        self.update_system_load()
+        self.system_logger.log()
     
     def finish_requests(
         self,
@@ -1314,7 +1312,7 @@ class ClusterScheduler(SchedulerInterface):
         if prune and not self.request_states[request_id].executors_to_free:
             del self.request_states[request_id]
             del self.requests[request_id]
-            self.update_system_load()
+            self.system_logger.log(write_out=True)
         
         return None
         
