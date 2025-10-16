@@ -78,6 +78,8 @@ async def proxy_completions(request: Request):
         f"scheduled after {delay:.3f}s (gap {app.state.request_arrival_time[req_id]:.3f}s)"
     )
 
+    headers = {"X-Request-Id": str(req_id)}
+
     # Sleep until its release time
     await asyncio.sleep(delay)
     logger.info(f"Request {req_id} released after waiting {delay:.3f}s")
@@ -85,7 +87,10 @@ async def proxy_completions(request: Request):
     start_time = time.monotonic()
     # Forward to the real vLLM server
     async with httpx.AsyncClient(timeout=1200) as client:
-        resp = await client.post(f"{app.state.upstream_url}/completions", json=data)
+        resp = await client.post(
+            f"{app.state.upstream_url}/completions", 
+            json=data,
+            headers=headers)
         resp.raise_for_status()
     elapsed = time.monotonic() - start_time
     app.state.resp_time[req_id] = elapsed
