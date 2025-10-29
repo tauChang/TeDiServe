@@ -31,6 +31,18 @@ SHOULD_APPLY_CHAT_TEMPLATE = {
     "GSAI-ML/LLaDA-8B-Base": False,
 }
 
+def parse_arrival_pattern(pattern_str: str):
+    """
+    Parse a string like '50:1.0,50:3.0' into a list of (num_requests, inter_arrival_time) tuples.
+    """
+    phases = []
+    for phase in pattern_str.split(","):
+        if not phase.strip():
+            continue
+        num_str, interval_str = phase.split(":")
+        phases.append((int(num_str.strip()), float(interval_str.strip())))
+    return phases
+
 
 def run_test(args):
     """Run the end to end accuracy test."""
@@ -38,12 +50,19 @@ def run_test(args):
     real_base_url = "http://localhost:8000/v1"
 
     logger.info(f"launching proxy to {real_base_url}")
+
+    if args.arrival_pattern:
+        arrival_pattern = parse_arrival_pattern(args.arrival_pattern)
+        args.limit = sum(num for num, _ in arrival_pattern)
+    else:
+        arrival_pattern = [(args.limit, args.avg_inter_arrival_time)]
+    logger.info(f"Using arrival pattern: {arrival_pattern}")
+    
     launch_proxy(real_base_url, 
                  port=12345, 
                  apply_chat_template=SHOULD_APPLY_CHAT_TEMPLATE[args.model],
                  tokenizer_name=args.model,
-                 avg_inter_arrival_time=args.avg_inter_arrival_time,
-                 num_requests=args.limit,
+                 arrival_pattern=arrival_pattern,
                  output_path=args.output_path
                  )
 
@@ -85,7 +104,19 @@ def main():
     parser.add_argument(
         "--task", type=str, help="Task name")
     parser.add_argument(
-        "--limit", type=int, default=100, help="Limit the number of samples to eval"
+        "--limit", type=int, help="Limit the number of samples to eval"
+    )
+    parser.add_argument(
+        "--num-concurrent", type=int, help="Number of concurrent connections"
+    )
+    parser.add_argument(
+        "--avg-inter-arrival-time", type=float, help="Average inter-arrival time between requests in seconds"
+    )
+    parser.add_argument(
+        "--arrival-pattern",
+        type=str,
+        help="Arrival pattern in 'num:interval,num:interval;...' format. "
+            "Example: '50:1.0,50:3.0' means first 50 req at 1s gaps, next 50 at 3s."
     )
     parser.add_argument(
         "--output-length", type=int, help="Output length"
@@ -94,15 +125,19 @@ def main():
         "--output-path", type=str, help="Output path"
     )
     parser.add_argument(
-        "--num-concurrent", type=int, default=100, help="Number of concurrent connections"
-    )
-    parser.add_argument(
-        "--avg-inter-arrival-time", type=float, default=0.0, help="Average inter-arrival time between requests in seconds"
-    )
-    parser.add_argument(
         "--write-results", action="store_true", help="Whether to write results to output path"
     )
     args = parser.parse_args()
+
+    # --- Argument validation ---
+    if args.arrival_pattern is not None:
+        assert args.limit is None and args.avg_inter_arrival_time is None, \
+            "--arrival-pattern cannot be used with --limit or --avg-inter-arrival-time"
+    else:
+        assert args.limit is not None and args.avg_inter_arrival_time is not None, \
+            "Both --limit and --avg-inter-arrival-time must be specified when --arrival-pattern is not provided."
+
+    
     run_test(args)
     
 if __name__ == "__main__":

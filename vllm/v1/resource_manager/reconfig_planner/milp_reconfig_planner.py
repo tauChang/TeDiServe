@@ -1,0 +1,667 @@
+from vllm.config import VllmConfig
+from vllm.logger import init_logger
+from vllm.v1.core.sched.utils import LatencyProfile
+from vllm.v1.executor.executors_manager import get_latency_profile_path
+from vllm.v1.resource_manager.workload_monitor import WorkloadClass
+
+from gurobipy import Model, GRB, quicksum
+import asyncio
+
+logger = init_logger(__name__)
+
+class MILPReconfigPlanner:
+    def __init__(self,
+                 vllm_config: VllmConfig = None,
+                 latency_profile_paths: dict[int, str] = None,
+                 ):
+        self.vllm_config = vllm_config
+        # TODO
+        self.candidate_confidence_thresholds = [.9, .8, .7, .6, .5]
+        self.confidence_unmasked_tokens_per_step = {.9: 3.18, .8: 4.12, .7: 5.14, .6: 6.25, .5: 7.14}
+        self.candidate_tp_degree = [4, 2, 1]
+        if not latency_profile_paths:
+            self.latency_profile_dir = vllm_config.profile_config.latency_profile_dir
+
+            self.latency_profiles: dict[int, LatencyProfile] = {}
+            for tp_degree in [1, 2, 4]:
+                path = get_latency_profile_path(vllm_config, tp_degree)
+                self.latency_profiles[tp_degree] = LatencyProfile(path)
+        else:
+            self.latency_profiles: dict[int, LatencyProfile] = {}
+            for tp_degree, path in latency_profile_paths.items():
+                self.latency_profiles[tp_degree] = LatencyProfile(path)
+    
+    def get_minimum_movement_config(
+        self,
+        x_ng: dict,                       # {(node, g): Var/float/int} -> solved MILP counts (aggregate per g)
+        old_config: dict[int, list[int]], # {me_id: [bundle_ids]}
+        node_to_bundles: dict[int, list[int]],
+    ) -> dict[int, list[int]]:
+        """
+        ILP that:
+          - Meets required counts per TP degree (node-agnostic).
+          - Keeps every executor's bundles on a single node.
+          - Maximizes # of unchanged old executors (exact same bundle set).
+          - Returns new_config: {me_id: [bundle_ids]} with re-used IDs when kept
+            and reuses surplus IDs before creating new ones.
+
+        Assumptions:
+          - self.node_to_bundles: Dict[node, List[bundle_id]] (node is hashable)
+          - Each old executor is already node-local (all bundles on the same node)
+        """
+        # ---------- Preprocess -------------------------------------------------
+        # Candidate TP degrees (e.g., [4,2,1]) – you already have this:
+        G = list(self.candidate_tp_degree)
+
+        # Required counts per degree g (aggregate across nodes)
+        required_counts: dict[int, int] = {}
+        for (n, g), var in x_ng.items():
+            val = getattr(var, "X", var)
+            cnt = int(round(val))
+            if cnt > 0:
+                required_counts[g] = required_counts.get(g, 0) + cnt
+
+        # Build quick maps
+        N = list(node_to_bundles.keys())
+        Bn: dict = {n: list(node_to_bundles[n]) for n in N}
+        bundle_to_node = {}
+        for n in N:
+            for b in Bn[n]:
+                bundle_to_node[b] = n
+
+        # Old executors grouped; also verify each is node-local
+        E = list(old_config.keys())
+        old_exec_info = {}  # e -> (n_e, g_e, S_e)
+        for e in E:
+            bundles = old_config[e]
+            if not bundles:
+                # Treat empty as trivially node-local but useless; skip keeps
+                continue
+            nodes = {bundle_to_node[b] for b in bundles}
+            if len(nodes) != 1:
+                raise ValueError(
+                    f"Old executor {e} spans multiple nodes: {nodes}. "
+                    "ILP requires per-executor single-node bundles."
+                )
+            n_e = next(iter(nodes))
+            g_e = len(bundles)
+            old_exec_info[e] = (n_e, g_e, tuple(sorted(bundles)))
+
+        # Per-node slot upper bounds: K_{n,g} = floor(|B_n| / g)
+        K = {}
+        for n in N:
+            for g in G:
+                if g <= 0:
+                    continue
+                cap = len(Bn[n]) // g
+                assert len(Bn[n]) % g == 0, f"Node {n} has {len(Bn[n])} bundles not divisible by g={g}"
+                if cap > 0:
+                    K[(n, g)] = cap
+
+        # ---------- Build ILP --------------------------------------------------
+        m = Model("reconfig_slots")
+        m.Params.OutputFlag = 0  # quiet; toggle to 1 if you want logs
+
+        # u[n,g,k] ∈ {0,1} : slot used
+        u = {}
+        for (n, g), cap in K.items():
+            for k in range(cap):
+                u[(n, g, k)] = m.addVar(vtype=GRB.BINARY, name=f"u[{n},{g},{k}]")
+
+        # a[n,g,k,b] ∈ {0,1} : bundle b assigned to slot (n,g,k)
+        a = {}
+        for (n, g), cap in K.items():
+            for k in range(cap):
+                for b in Bn[n]:
+                    a[(n, g, k, b)] = m.addVar(vtype=GRB.BINARY, name=f"a[{n},{g},{k},{b}]")
+
+        # m_keep[e,k] ∈ {0,1} : old executor e kept by mapping to slot (n_e,g_e,k)
+        m_keep = {}
+        for e, (n_e, g_e, S_e) in old_exec_info.items():
+            cap = K.get((n_e, g_e), 0)
+            for k in range(cap):
+                m_keep[(e, k)] = m.addVar(vtype=GRB.BINARY, name=f"mkeep[{e},{k}]")
+
+        m.update()
+
+        # ---------- Constraints -----------------------------------------------
+        # 1) Slot fill and node locality: sum_b a = g * u
+        for (n, g), cap in K.items():
+            for k in range(cap):
+                m.addConstr(quicksum(a[(n, g, k, b)] for b in Bn[n]) == g * u[(n, g, k)],
+                            name=f"fill[{n},{g},{k}]")
+
+        # 2) Bundle exclusivity: each bundle used at most once
+        all_bundles = [b for n in N for b in Bn[n]]
+        for b in all_bundles:
+            n_b = bundle_to_node[b]
+            sum_terms = []
+            for (n, g), cap in K.items():
+                if n != n_b:
+                    continue
+                for k in range(cap):
+                    sum_terms.append(a[(n, g, k, b)])
+            if sum_terms:
+                m.addConstr(quicksum(sum_terms) == 1, name=f"exclusive[{b}]")
+
+        # 3) Meet required counts per TP degree
+        for g in G:
+            req = required_counts.get(g, 0)
+            # Sum of used slots over all nodes for this g equals R_g
+            sum_u = []
+            for (n2, g2), cap in K.items():
+                if g2 == g:
+                    for k in range(cap):
+                        sum_u.append(u[(n2, g2, k)])
+            if sum_u:
+                m.addConstr(quicksum(sum_u) == req, name=f"req[{g}]")
+            else:
+                # No capacity for this g anywhere; must require 0
+                if req != 0:
+                    raise RuntimeError(f"Infeasible: no capacity to place TP={g} while R_g={req}")
+
+        # 4) Keep mapping: each old executor kept at most once
+        for e, (n_e, g_e, S_e) in old_exec_info.items():
+            cap = K.get((n_e, g_e), 0)
+            assert cap > 0 # it's already assigned, so there must be capacity
+            m.addConstr(quicksum(m_keep[(e, k)] for k in range(cap)) <= 1, name=f"keep_once[{e}]")
+
+        # 5) If kept, that slot must be active
+        for e, (n_e, g_e, S_e) in old_exec_info.items():
+            cap = K.get((n_e, g_e), 0)
+            assert cap > 0
+            for k in range(cap):
+                m.addConstr(m_keep[(e, k)] <= u[(n_e, g_e, k)], name=f"keep_implies_u[{e},{k}]")
+
+        # 6) If kept, all bundles in S_e must be assigned to that slot
+        for e, (n_e, g_e, S_e) in old_exec_info.items():
+            cap = K.get((n_e, g_e), 0)
+            assert cap > 0
+            for k in range(cap):
+                for b in S_e:
+                    m.addConstr(m_keep[(e, k)] <= a[(n_e, g_e, k, b)],
+                                name=f"keep_implies_a[{e},{k},{b}]")
+
+        # ---------- Objective ---------------------------------------------------
+        # Maximize sum_e keep_e  - epsilon * sum_{n,g,k} u[n,g,k]
+        # keep_e = sum_k m_keep[e,k]
+        obj_keep = quicksum(m_keep[(e, k)] for e in old_exec_info for k in range(K.get((old_exec_info[e][0], old_exec_info[e][1]), 0)))
+        m.setObjective(obj_keep, GRB.MAXIMIZE)
+
+        # ---------- Solve -------------------------------------------------------
+        m.Params.MIPGap = 0.01
+        m.optimize()
+        status = m.Status
+        if status not in (GRB.OPTIMAL, GRB.TIME_LIMIT):
+            raise RuntimeError(f"Reconfig ILP ended with status {status}")
+
+        # ---------- Extract solution -------------------------------------------
+        # Gather used slots and their assigned bundles
+        used_slots = []  # (n, g, k, [bundles])
+        for (n, g), cap in K.items():
+            for k in range(cap):
+                if u[(n, g, k)].X > 0.5:
+                    # Collect bundles
+                    bundles = [b for b in Bn[n] if a[(n, g, k, b)].X > 0.5]
+                    # Sanity: must be exactly g bundles
+                    if len(bundles) != g:
+                        raise RuntimeError(f"Slot ({n},{g},{k}) has {len(bundles)} bundles, expected {g}")
+                    used_slots.append((n, g, k, sorted(bundles)))
+        # assert num bundles used = total bundles available
+        total_used_bundles = sum(len(bundles) for (_, _, _, bundles) in used_slots)
+        assert total_used_bundles == len(all_bundles)
+
+        # Map kept old executors first
+        new_config: dict[int, list[int]] = {}
+        assigned_slots = set()
+        kept_ids = set()
+        for e, (n_e, g_e, S_e) in old_exec_info.items():
+            cap = K.get((n_e, g_e), 0)
+            keep_k = None
+            for k in range(cap):
+                if m_keep[(e, k)].X > 0.5:
+                    keep_k = k
+                    break
+            if keep_k is not None:
+                # Find the corresponding slot in used_slots
+                for idx, (n, g, k, bundles) in enumerate(used_slots):
+                    if (n == n_e) and (g == g_e) and (k == keep_k):
+                        # bundles should equal S_e (by constraints)
+                        new_config[e] = list(bundles)
+                        assigned_slots.add((n, g, k))
+                        kept_ids.add(e)
+                        break
+
+        next_id = (max(E) + 1) if E else 0
+
+        # Assign remaining used slots to IDs (reuse surplus first)
+        for (n, g, k, bundles) in used_slots:
+            if (n, g, k) in assigned_slots:
+                continue
+            me_id = next_id
+            next_id += 1
+            new_config[me_id] = list(bundles)
+
+        return new_config
+    
+    async def plan_reconfiguration_async(self,
+                                    node_to_bundles: dict[int, list[int]],
+                                    current_config: dict[int, list[int]], # me_id -> [bundle_ids]
+                                    workload_classes: list[WorkloadClass],
+                                    ) -> dict[int, list[int]]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            self.plan_reconfiguration,
+            node_to_bundles,
+            current_config,
+            workload_classes,
+        )
+    
+    def plan_reconfiguration(self, 
+                             node_to_bundles: dict[int, list[int]],
+                             current_config: dict[int, list[int]], # me_id -> [bundle_ids]
+                             workload_classes: list[WorkloadClass],
+                             ) -> dict[int, list[int]]:
+        if len(workload_classes) == 0:
+            logger.info("No workload detected; keeping current configuration.")
+            return current_config
+        # --- Inputs ---
+        K = [workload_class.name for workload_class in workload_classes]
+        C = self.candidate_confidence_thresholds
+        G = self.candidate_tp_degree
+        B = {tp_degree: self.latency_profiles[tp_degree].batch_sizes for tp_degree in G}
+        N = list(node_to_bundles.keys())
+
+        P_k = {workload_class.name: workload_class.prompt_length for workload_class in workload_classes}
+        O_k = {workload_class.name: workload_class.output_length for workload_class in workload_classes}
+        SLO_k = {workload_class.name: workload_class.slo for workload_class in workload_classes}
+        RPS_k = {workload_class.name: workload_class.rps for workload_class in workload_classes}
+        
+        T_c = self.confidence_unmasked_tokens_per_step
+        L_gb = {(tp_degree, batch_size): self.latency_profiles[tp_degree].lookup(batch_size)[1] for tp_degree in G for batch_size in B[tp_degree]}
+
+        G_n = {node: len(node_to_bundles[node]) for node in N}
+
+        # Create model
+        m = Model("reconfig_planner")
+        
+        # --- Decision Variables ---
+        # ------ Main decision variables ------
+        # Integer number of TP=g instances on node n
+        x_ng = m.addVars(N, G, lb=0.0, vtype=GRB.INTEGER, name="x_ng")
+
+        # ------ Auxiliary decision variables ------
+        # Steps per class k at confidence c
+        s_kc = m.addVars(K, C, lb=0.0, vtype=GRB.CONTINUOUS, name="s_kc")
+
+        # Steps per class k executed on TP degree g
+        s_kg = m.addVars(K, G, lb=0.0, vtype=GRB.CONTINUOUS, name="s_kg")
+
+        # Binary batch-bin choice per TP degree g
+        z_gb = {(g,b): m.addVar(vtype=GRB.BINARY, name=f"z[{g},{b}]")
+                for g in G for b in B[g]}
+        
+        # SLO slack per class k
+        r_k = m.addVars(K, lb=0.0, vtype=GRB.CONTINUOUS, name="r_k")
+
+        m.update()
+        
+        # --- Objective ---
+        # Maximize avg confidence per token
+        total_RPS = sum(RPS_k[k] for k in K)
+        token_conf_obj = quicksum(
+            (RPS_k[k] / O_k[k]) * quicksum(c * T_c[c] * s_kc[k, c] for c in C)
+            for k in K
+        ) / total_RPS
+        # m.setObjective(obj, GRB.MAXIMIZE)
+        slack_obj = quicksum(r_k[k] / SLO_k[k] * RPS_k[k] / total_RPS for k in K)
+
+        # minimize number of executors used as third objective
+        executor_count_obj = quicksum(x_ng[n,g] for n in N for g in G)
+
+        m.setObjectiveN(-token_conf_obj, index=0, priority=2, name="max_token_conf")
+        m.setObjectiveN(-slack_obj,index=1, priority=1, name="max_slack")
+        m.setObjectiveN(executor_count_obj, index=2, priority=0, name="min_executors")
+        
+        # --- Constraints ---
+        # 1) Token completion
+        for k in K:
+            m.addConstr(quicksum(T_c[c] * s_kc[k, c] for c in C) == O_k[k],
+                        name=f"token_completion[{k}]")
+            
+        # 2) Step accounting
+        for k in K:
+            m.addConstr(quicksum(s_kc[k, c] for c in C)
+                        == quicksum(s_kg[k, g] for g in G),
+                        name=f"step_accounting[{k}]")
+        
+        # 3) SLO
+        for k in K:
+            lhs = quicksum(
+                s_kg[k, g] * quicksum(L_gb[(g,b)] * z_gb[(g,b)] for b in B[g])
+                for g in G
+            )
+            m.addConstr(lhs + r_k[k] <= SLO_k[k], name=f"SLO[{k}]")
+        
+        # 4) Batch size selection
+        for g in G:
+            m.addConstr(quicksum(z_gb[(g,b)] for b in B[g]) == 1,
+                        name=f"one_bin[{g}]")
+        
+        # 5) Node capacity
+        for n in N:
+            m.addConstr(
+                quicksum(g * x_ng[n,g] for g in G) <= G_n[n],
+                name=f"gpu_cap[{n}]"
+            )
+
+        # 6) Aggregate Token Throughput
+        M_big = 1e6  # Big-M constant
+        for g in G:
+            for b in B[g]:
+                lhs = quicksum(RPS_k[k] * s_kg[k,g] * (P_k[k] + O_k[k]) for k in K)
+                rhs = (b / L_gb[(g,b)]) * quicksum(x_ng[n,g] for n in N)
+                m.addConstr(lhs <= rhs + M_big * (1 - z_gb[(g,b)]),
+                            name=f"token_throughput_{g}_{b}")
+        
+        # 7) Each batch must have at least one request
+        for g in G:
+            m.addConstr(
+                quicksum(b * z_gb[(g,b)] for b in B[g]) >= max(P_k[k] + O_k[k] for k in K),
+                name=f"batch_nonzero_req[{k},{g}]"
+            )
+
+        # 8) All GPUs must be used
+        for n in N:
+            m.addConstr(
+                quicksum(g * x_ng[n,g] for g in G) == G_n[n],
+                name=f"all_gpu_used[{n}]"
+            )
+        
+        # --- Solve ---
+        m.update()
+        m.setParam("MIPGap", 0.01)
+        m.setParam("TimeLimit", 10)
+        m.optimize()
+
+        if m.SolCount == 0:
+            logger.info("No feasible solution found.")
+            for n in N:
+                for g in G:
+                    if g == 1:
+                        x_ng[n,g] = G_n[n]
+                    else:
+                        x_ng[n,g] = 0
+        else:
+            if m.status == GRB.OPTIMAL or m.status == GRB.TIME_LIMIT:
+                # logger.info(f"Objective value: {m.objVal:.3f}")
+                for i in range(m.NumObj):
+                    m.setParam('ObjNumber', i)
+                    logger.info(f"Objective {i}: value = {m.ObjNVal:.3f}")
+                for g in G:
+                    chosen_bin = [b for b in B[g] if z_gb[(g,b)].X > 0.5]
+                    logger.info(f"TP={g} batch={chosen_bin}")
+                    total_inst = sum(x_ng[n,g].X for n in N)
+                    logger.info(f"  total instances = {total_inst:.2f}")
+                
+                # pring s_kc
+                for k in K:
+                    logger.info(f"Class {k}:")
+                    for c in C:
+                        logger.info(f"  Confidence {c}: s_kc = {s_kc[k,c].X:.2f}")
+                
+                # print s_kg
+                for k in K:
+                    logger.info(f"Class {k}:")
+                    for g in G:
+                        logger.info(f"  TP {g}: s_kg = {s_kg[k,g].X:.2f}")
+
+                # Prepare new configuration
+            else:
+                raise RuntimeError(f"Reconfiguration MILP ended with status {m.status}")
+        new_config = self.get_minimum_movement_config(
+            x_ng, current_config, node_to_bundles)
+
+        # check new_config validity
+        # each bundle is assigned exactly once
+        assigned_bundles = [b for bundles in new_config.values() for b in bundles]
+        all_bundles = [b for bundles in node_to_bundles.values() for b in bundles]
+        assert sorted(assigned_bundles) == sorted(all_bundles), f"Bundle assignment mismatch: assigned {assigned_bundles}, all {all_bundles}"
+        assert len(assigned_bundles) == len(set(assigned_bundles)), f"Some bundles assigned multiple times {assigned_bundles}"
+        # if an old executor is kept, its bundles must match
+        for me_id, bundles in new_config.items():
+            if me_id in current_config:
+                old_bundles = current_config[me_id]
+                assert set(bundles) == set(old_bundles), f"Kept executor {me_id} has different bundles: old {old_bundles}, new {bundles}"
+        return new_config
+        
+                
+
+    # def get_new_config(self,
+    #                    x_ng: dict,
+    #                    old_config: dict[int, list[int]],
+    #                    ) -> dict[int, list[int]]:
+    #     # config is {me_id: [bundle_ids]}
+    #     # abstract_config is [(tp_degree, me_id)]
+    #     old_abstract_config = sorted(
+    #         [(len(bundle_ids), me_id) for me_id, bundle_ids in old_config.items()],
+    #         reverse=True
+    #     )
+    #     new_abstract_config = []
+    #     for (n, g), var in x_ng.items():
+    #         num_instances = int(var.X)
+    #         new_abstract_config.extend([(g, None)] * num_instances)
+    #     new_abstract_config = sorted(new_abstract_config, reverse=True)
+
+    #     # Map old me_id to new me_id
+            
+    
+    # def get_new_config(self,
+    #                    x_ng: dict,
+    #                    old_config: dict[int, list[int]],
+    #                    ) -> dict[int, list[int]]:
+    #     """
+    #     Build a new mapping: model_executor_id -> [bundle_ids]
+    #     using the solved counts x_ng[(node, g)] (number of TP=g instances on node).
+
+    #     Heuristic to minimize movement:
+    #       1) Keep executors that already match (node, g) exactly.
+    #       2) Reuse surplus executor IDs for new placements before creating new IDs.
+    #       3) Allocate bundles greedily on the requested node, largest g first.
+
+    #     Assumes:
+    #       - self.node_to_bundles: Dict[node_ip, List[bundle_id]]
+    #       - Each existing executor in old_config already uses bundles all on the same node.
+    #     """
+    #     # ---- Helpers / derived structures ----
+    #     # Map bundle -> node
+    #     bundle_to_node: dict[int, str] = {}
+    #     for node_ip, blist in self.node_to_bundles.items():
+    #         for b in blist:
+    #             bundle_to_node[b] = node_ip
+
+    #     # Group current executors by (node, g) and validate single-node placement
+    #     current_by_node_g: dict[tuple[int, int], list[tuple[int, list[int]]]] = {}
+    #     for me_id, bundles in old_config.items():
+    #         if not bundles:
+    #             continue
+    #         nodes = {bundle_to_node[b] for b in bundles}
+    #         if len(nodes) != 1:
+    #             raise ValueError(
+    #                 f"Executor {me_id} spans multiple nodes: {nodes}. "
+    #                 "This planner requires per-executor single-node bundles."
+    #             )
+    #         node = next(iter(nodes))
+    #         g = len(bundles)
+    #         current_by_node_g.setdefault((node, g), []).append((me_id, bundles))
+
+    #     # Requested counts per (node, g) from solution
+    #     req_counts: dict[tuple[str, int], int] = {}
+    #     for (n, g), var in x_ng.items():
+    #         count = int(round(getattr(var, "X", var)))  # support gurobi Var or plain int for testing
+    #         if count > 0:
+    #             req_counts[(n, g)] = req_counts.get((n, g), 0) + count
+
+    #     # Available bundles per node (we will subtract kept allocations)
+    #     available_by_node: dict[str, list[int]] = {
+    #         n: list(self.node_to_bundles.get(n, [])) for n in self.node_to_bundles
+    #     }
+
+    #     # New config we are constructing
+    #     new_config: dict[int, list[int]] = {}
+
+    #     # Pool of executor IDs we can reuse (surplus after keeps)
+    #     surplus_ids: list[int] = []
+
+    #     # Keep track of max id to create new ones if needed
+    #     next_id = (max(old_config.keys()) + 1) if old_config else 0
+
+    #     # ---- Phase 1: KEEP matching executors (node, g) ----
+    #     # Sort by larger g first to reduce fragmentation
+    #     for (node, g) in sorted(req_counts.keys(), key=lambda t: (-t[1], str(t[0]))):
+    #         needed = req_counts[(node, g)]
+    #         cur_execs = list(current_by_node_g.get((node, g), []))
+    #         keep_cnt = min(needed, len(cur_execs))
+
+    #         # Keep 'keep_cnt' executors unchanged
+    #         for me_id, bundles in cur_execs[:keep_cnt]:
+    #             new_config[me_id] = list(bundles)
+    #             # remove used bundles from availability
+    #             for b in bundles:
+    #                 if b in available_by_node[node]:
+    #                     available_by_node[node].remove(b)
+    #         # Update what's still needed
+    #         req_counts[(node, g)] = needed - keep_cnt
+
+    #         # Any leftover current executors of this (node, g) become surplus IDs
+    #         for me_id, _ in cur_execs[keep_cnt:]:
+    #             surplus_ids.append(me_id)
+
+    #     # Any executors that were in old_config but not kept belong in surplus
+    #     kept_ids = set(new_config.keys())
+    #     for me_id in old_config.keys():
+    #         if me_id not in kept_ids and me_id not in surplus_ids:
+    #             surplus_ids.append(me_id)
+
+    #     # ---- Phase 2: ASSIGN new placements for remaining needs ----
+    #     # Again, allocate larger g first per node
+    #     for (node, g) in sorted(req_counts.keys(), key=lambda t: (-t[1], -t[1] and t[1] or 0, -t[1])):
+    #         need = req_counts[(node, g)]
+    #         if need <= 0:
+    #             continue
+
+    #         # Greedily carve g bundles per executor from node's available pool
+    #         # Use stable order to be deterministic
+    #         available_by_node[node].sort()
+    #         idx = 0  # pointer into available list (we'll pop from front)
+
+    #         while need > 0:
+    #             if len(available_by_node[node]) < g:
+    #                 raise RuntimeError(
+    #                     f"Insufficient free bundles on node {node} to place TP={g} "
+    #                     f"executors (need {need}, available bundles={len(available_by_node[node])})."
+    #                 )
+    #             # take first g bundles
+    #             chosen = available_by_node[node][:g]
+    #             del available_by_node[node][:g]
+
+    #             # pick an executor id: reuse surplus if possible, else new id
+    #             if surplus_ids:
+    #                 me_id = surplus_ids.pop(0)
+    #             else:
+    #                 me_id = next_id
+    #                 next_id += 1
+
+    #             new_config[me_id] = chosen
+    #             need -= 1
+
+    #     # ---- Optional: clean up any remaining surplus IDs (they are "killed" implicitly by diff)
+    #     # They just won't appear in new_config; the diff engine will produce KillCommands.
+
+    #     return new_config
+  
+    # def get_new_config(self,
+    #                 x_ng: dict,
+    #                 old_config: dict[int, list[int]],
+    #                 ) -> dict[int, list[int]]:
+    #     """
+    #     Build a new mapping {model_executor_id: [bundle_ids]}.
+
+    #     - Only total counts of each TP degree matter (node placement flexible).
+    #     - Each executor must occupy all its bundles on one node.
+    #     - Minimize movement by keeping executors with the same TP degree if possible.
+    #     """
+
+    #     # ---- Step 1: derive required counts per TP degree ----
+    #     required_counts: dict[int, int] = {}
+    #     for (node, g), var in x_ng.items():
+    #         count = int(round(getattr(var, "X", var)))  # support Var or float
+    #         required_counts[g] = required_counts.get(g, 0) + count
+
+    #     # ---- Step 2: current executors by TP degree ----
+    #     bundle_to_node = {}
+    #     for node_id, bundles in self.node_to_bundles.items():
+    #         for b in bundles:
+    #             bundle_to_node[b] = node_id
+
+    #     current_by_g: dict[int, list[tuple[int, str, list[int]]]] = {}
+    #     for me_id, bundles in old_config.items():
+    #         if not bundles:
+    #             continue
+    #         node = bundle_to_node[bundles[0]]
+    #         g = len(bundles)
+    #         current_by_g.setdefault(g, []).append((me_id, node, bundles))
+
+    #     # ---- Step 3: initialize available bundles ----
+    #     available_by_node = {n: list(blist) for n, blist in self.node_to_bundles.items()}
+
+    #     new_config: dict[int, list[int]] = {}
+    #     surplus_ids: list[int] = []
+    #     next_id = (max(old_config.keys()) + 1) if old_config else 0
+
+    #     # ---- Step 4: keep existing executors with same g ----
+    #     for g, need in sorted(required_counts.items(), reverse=True):
+    #         current_execs = current_by_g.get(g, [])
+    #         keep_cnt = min(need, len(current_execs))
+    #         for me_id, node, bundles in current_execs[:keep_cnt]:
+    #             new_config[me_id] = list(bundles)
+    #             for b in bundles:
+    #                 if b in available_by_node[node]:
+    #                     available_by_node[node].remove(b)
+    #         required_counts[g] = need - keep_cnt
+    #         for me_id, _, _ in current_execs[keep_cnt:]:
+    #             surplus_ids.append(me_id)
+
+    #     # Add any others not reused
+    #     kept_ids = set(new_config.keys())
+    #     for me_id in old_config.keys():
+    #         if me_id not in kept_ids and me_id not in surplus_ids:
+    #             surplus_ids.append(me_id)
+
+    #     # ---- Step 5: assign new executors to nodes ----
+    #     for g, need in sorted(required_counts.items(), reverse=True):
+    #         if need <= 0:
+    #             continue
+    #         # Try to pack large g’s first on any node with enough bundles
+    #         for _ in range(need):
+    #             placed = False
+    #             for node_ip, blist in available_by_node.items():
+    #                 if len(blist) >= g:
+    #                     chosen = blist[:g]
+    #                     del blist[:g]
+    #                     if surplus_ids:
+    #                         me_id = surplus_ids.pop(0)
+    #                     else:
+    #                         me_id = next_id
+    #                         next_id += 1
+    #                     new_config[me_id] = chosen
+    #                     placed = True
+    #                     break
+    #             if not placed:
+    #                 raise RuntimeError(
+    #                     f"Cannot allocate {g} bundles for an executor; "
+    #                     f"not enough contiguous bundles across nodes."
+    #                 )
+
+    #     return new_config

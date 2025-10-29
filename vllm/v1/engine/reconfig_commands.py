@@ -6,6 +6,11 @@ from vllm.v1.executor.executors_manager import ExecutorsManager
 
 logger = init_logger(__name__)
 
+def print_command_tree(cmd: 'ReconfigCommand', level=0):
+    logger.debug("  " * level + str(cmd))
+    for child in cmd.children:
+        print_command_tree(child, level + 1)
+
 class ReconfigCommand:
     def __init__(self,
                  executor_id: int,
@@ -71,7 +76,10 @@ class LaunchCommand(ReconfigCommand):
         super().__init__(executor_id, parents, children)
         self.bundle_ids = bundle_ids
     
-    async def execute(self, 
+    def __str__(self):
+        return f"LaunchCommand(executor_id={self.executor_id}, bundle_ids={self.bundle_ids}, parents={len(self.parents)}, children={len(self.children)})"
+    
+    async def _execute(self, 
                       executors_manager: ExecutorsManager):
         logger.debug(f"Executing Launch command on executor {self.executor_id}")
         await executors_manager.launch_executor(

@@ -17,17 +17,20 @@ logger = logging.getLogger(__name__)
 # logger.setLevel(logging.INFO)
 app = FastAPI()
 
-def generate_request_arrival_times(num_requests, inter_arrival_time):
+def generate_request_arrival_times(
+        arrival_pattern,
+    ):
     random.seed(42)  # for reproducibility
     arrival_times = []
     current_time = 0.0
-    for _ in range(num_requests):
-        if inter_arrival_time > 0:
-            inter_arrival = random.expovariate(1.0 / inter_arrival_time)
-        else:
-            inter_arrival = 0
-        current_time += inter_arrival
-        arrival_times.append(current_time)
+    for (num_requests, inter_arrival_time) in arrival_pattern:
+        for _ in range(num_requests):
+            if inter_arrival_time > 0:
+                inter_arrival = random.expovariate(1.0 / inter_arrival_time)
+            else:
+                inter_arrival = 0
+            current_time += inter_arrival
+            arrival_times.append(current_time)
     return arrival_times
 
 def wait_until_up(url: str, 
@@ -124,11 +127,10 @@ def launch_proxy(upstream_url: str,
                  port: int = 12345, 
                  apply_chat_template: bool = False,
                  tokenizer_name: str = None,
-                 avg_inter_arrival_time: float = 0,
-                 num_requests: int = 100,
+                 arrival_pattern = (100, 0.0),
                  output_path: str = "eval_results.json"
                  ):
-    assert avg_inter_arrival_time >= 0, "inter_arrival_time must be non-negative"
+    # assert avg_inter_arrival_time >= 0, "inter_arrival_time must be non-negative"
     
     if apply_chat_template:
         assert tokenizer_name is not None, "tokenizer_name must be provided if apply_chat_template is True"
@@ -136,7 +138,8 @@ def launch_proxy(upstream_url: str,
     app.state.upstream_url = upstream_url
     app.state.apply_chat_template = apply_chat_template
     app.state.request_arrival_time = generate_request_arrival_times(
-        num_requests, avg_inter_arrival_time)
+        arrival_pattern
+    )
     logger.info(f"Generated request arrival times: {app.state.request_arrival_time}")
     app.state.first_request_arrival_time = None
 

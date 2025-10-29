@@ -101,7 +101,7 @@ class EngineCore:
 
         # Initialize Ray and resource manager
         self.resource_manager.initialize_placement_group()
-        reconfig_cmd = self.resource_manager.reconfig()
+        reconfig_cmd = asyncio.run(self.resource_manager.reconfig())
         asyncio.run(reconfig_cmd.execute(self.executors_manager))
             
         self.available_gpu_memory_for_kv_cache = -1
@@ -267,6 +267,7 @@ class EngineCore:
                            "Disabling KVTransfer for this request.")
 
         self.scheduler.add_request(req)
+        self.resource_manager.record_request_arrival(req)
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -730,10 +731,10 @@ class EngineCoreProc(EngineCore):
     async def run_reconfigure_loop(self):
         logger.debug("Starting EngineCore reconfiguration loop.")
         while True:
-            logger.debug(f"Reconfiguration loop sleeping for 1 minutes.")
-            await asyncio.sleep(0.5 * 60)
+            logger.debug(f"Reconfiguration loop sleeping for 20s...")
+            await asyncio.sleep(30)
             logger.debug(f"Reconfiguration loop woke up.")
-            reconfig_cmd = self.resource_manager.reconfig()
+            reconfig_cmd = await self.resource_manager.reconfig()
             await reconfig_cmd.execute(self.executors_manager)
             logger.debug(f"after reconfig, executors_manager: "
                          f"{self.executors_manager}")

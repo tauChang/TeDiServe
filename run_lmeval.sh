@@ -3,9 +3,9 @@
 # ----------------------
 # VLLM Args
 MODEL=GSAI-ML/LLaDA-8B-Instruct
-NUM_GPUS_PER_MODEL_EXECUTOR=2,1,1
+NUM_GPUS_PER_MODEL_EXECUTOR=4,2,1,1
 # SCHEDULER_CLASS=vllm.v1.core.sched.cluster_scheduler.ClusterScheduler
-# SCHEDULER_CLASS=vllm.v1.core.sched.dynamic_cofidence_scheduler.ClusterScheduler
+# SCHEDULER_CLASS=vllm.v1.core.sched.dynamic_confidence_scheduler.ClusterScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.urgent_scheduler.UrgentOpportunisticScheduler
 SCHEDULER_CLASS=vllm.v1.core.sched.urgent_opportunistic_scheduler.UrgentOpportunisticScheduler
 DEFAULT_CONFIDENCE_THRESHOLD=0.9
@@ -16,7 +16,7 @@ STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/model.bi
 STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/features.txt
 # CONF=599
 # STEP_DATA_DIR=./step_data_dynamic_${CONF}
-STEP_DATA_DIR=./step_data
+STEP_DATA_DIR=./step_data_1024_default_1.5
 
 DENOISE_BLOCK_SIZE=32
 CACHE_PREFIX=false
@@ -25,12 +25,14 @@ CACHE_SUFFIX=false
 # ----------------------
 # LMEval Args
 TASK=gsm8k
-LIMIT=10
+# LIMIT=100
+# AVG_INTER_ARRIVAL_TIME=0.5
+# ARRIVAL_PATTERN="100:3,100:1,100:2"
+ARRIVAL_PATTERN="200:1.5"
+NUM_CONCURRENT=200
 OUTPUT_LENGTH=256
-AVG_INTER_ARRIVAL_TIME=3
-NUM_CONCURRENT=10
 WRITE_RESULTS=true
-RESULTS_DIR=eval/results
+RESULTS_DIR=eval/results_1024_default_1.5
 
 # ----------------------
 # Output path name
@@ -77,13 +79,21 @@ fi
 EVAL_CMD="python eval/run_lmeval.py \
     --model $MODEL \
     --task $TASK \
-    --limit $LIMIT \
     --output-length $OUTPUT_LENGTH \
     --output-path $OUTPUT_PATH \
-    --num-concurrent $NUM_CONCURRENT \
-    --avg-inter-arrival-time $AVG_INTER_ARRIVAL_TIME\
-    "
+    --num-concurrent $NUM_CONCURRENT"
 
+# If ARRIVAL_PATTERN is set → use it and skip limit/avg-inter-arrival
+if [ -n "$ARRIVAL_PATTERN" ]; then
+    EVAL_CMD="$EVAL_CMD --arrival-pattern \"$ARRIVAL_PATTERN\""
+else
+    # Otherwise, fall back to simple arrival config
+    EVAL_CMD="$EVAL_CMD \
+        --limit $LIMIT \
+        --avg-inter-arrival-time $AVG_INTER_ARRIVAL_TIME"
+fi
+
+# Append optional flags
 if [ "$WRITE_RESULTS" = "true" ]; then
     EVAL_CMD="$EVAL_CMD --write-results"
 fi
