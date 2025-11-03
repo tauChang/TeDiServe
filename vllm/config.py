@@ -3900,6 +3900,12 @@ class KVTransferConfig:
     engine_id: Optional[str] = None
     """The engine id for KV transfers."""
 
+    nixl_side_channel_port: Optional[int] = None
+    """The port for Nixl side channel communication."""
+
+    tp_degree: Optional[int] = None
+    """The tensor parallelism degree of the model."""
+
     kv_buffer_device: Optional[str] = "cuda"
     """The device used by kv connector to buffer the KV cache.
     Currently only support 'cuda'."""

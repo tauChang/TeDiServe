@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 
 # Filenames
 model = "GSAI-ML_LLaDA-8B-Instruct"
-dir = f"../../latency_profiles/{model}/GH200"
+dir = f"../../latency_profiles/{model}/H100"
 files = ["TP1.json", "TP2.json", "TP4.json"
         #  , "TP1.bak.json", "TP2.bak.json", "TP4.bak.json"
          ]
@@ -31,4 +31,4 @@ plt.ylabel("Time (ms)")
 plt.title(f"Batch size vs Time across TP settings for {model}")
 plt.legend()
 plt.grid(True)
-plt.savefig(f"latency_profiles_{model}_new.png")
+plt.savefig(f"latency_profiles_{model}_H100.png")

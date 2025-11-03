@@ -256,17 +256,22 @@ class KVCacheManager:
 
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
+        logger.debug(f"request {request.request_id} num_new_tokens: {num_new_tokens}, "
+                     f"num_new_computed_tokens: {num_new_computed_tokens}")
+        logger.debug(f"num_computed_tokens: {request.num_computed_tokens}")
         num_computed_tokens = (request.num_computed_tokens +
                                num_new_computed_tokens)
         num_tokens_need_slot = min(
             num_computed_tokens + num_new_tokens + num_lookahead_tokens,
             self.max_model_len)
+        logger.debug(f"num_tokens_need_slot: {num_tokens_need_slot}")
 
         num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
         )
+        logger.debug(f"num_blocks_to_allocate: {num_blocks_to_allocate}")
 
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
             # Cannot allocate new blocks

@@ -3,24 +3,25 @@
 # ----------------------
 # VLLM Args
 MODEL=GSAI-ML/LLaDA-8B-Instruct
-NUM_GPUS_PER_MODEL_EXECUTOR=4,2,1,1
+NUM_GPUS_PER_MODEL_EXECUTOR=1,1
 # SCHEDULER_CLASS=vllm.v1.core.sched.cluster_scheduler.ClusterScheduler
-# SCHEDULER_CLASS=vllm.v1.core.sched.dynamic_confidence_scheduler.ClusterScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.urgent_scheduler.UrgentOpportunisticScheduler
-SCHEDULER_CLASS=vllm.v1.core.sched.urgent_opportunistic_scheduler.UrgentOpportunisticScheduler
+# SCHEDULER_CLASS=vllm.v1.core.sched.urgent_opportunistic_scheduler.UrgentOpportunisticScheduler
+SCHEDULER_CLASS=vllm.v1.core.sched.recompute_disaggregated_scheduler.RecomputeDisaggregatedScheduler
 DEFAULT_CONFIDENCE_THRESHOLD=0.9
 NUM_PROFILE_RUNS=8
 NUM_PROFILE_WARMUP_RUNS=3
 STEP_ESTIMATOR_MODEL_CLASS=vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine.LightGradientBoostMachine
 STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/model.bin
 STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/features.txt
+KV_TRANSFER_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
 # CONF=599
 # STEP_DATA_DIR=./step_data_dynamic_${CONF}
-STEP_DATA_DIR=./step_data_1024_default_1.5
+STEP_DATA_DIR=./step_data_1102
 
 DENOISE_BLOCK_SIZE=32
-CACHE_PREFIX=false
-CACHE_SUFFIX=false
+CACHE_PREFIX=true
+CACHE_SUFFIX=true
 
 # ----------------------
 # LMEval Args
@@ -28,11 +29,12 @@ TASK=gsm8k
 # LIMIT=100
 # AVG_INTER_ARRIVAL_TIME=0.5
 # ARRIVAL_PATTERN="100:3,100:1,100:2"
-ARRIVAL_PATTERN="200:1.5"
-NUM_CONCURRENT=200
+# ARRIVAL_PATTERN="200:1.5"
+ARRIVAL_PATTERN="10:0"
+NUM_CONCURRENT=10
 OUTPUT_LENGTH=256
 WRITE_RESULTS=true
-RESULTS_DIR=eval/results_1024_default_1.5
+RESULTS_DIR=eval/results_1103
 
 # ----------------------
 # Output path name
@@ -75,6 +77,9 @@ fi
 if [ "$DENOISE_BLOCK_SIZE" -gt -1 ]; then
     VLLM_CMD="$VLLM_CMD --denoise-block-size ${DENOISE_BLOCK_SIZE}"
 fi
+if [ -n "$KV_TRANSFER_CONFIG" ]; then
+    VLLM_CMD="$VLLM_CMD --kv-transfer-config '${KV_TRANSFER_CONFIG}'"
+fi
 
 EVAL_CMD="python eval/run_lmeval.py \
     --model $MODEL \
@@ -114,7 +119,7 @@ tmux split-window -h -t $SESSION
 tmux send-keys -t $SESSION.1 "$EVAL_CMD 2>&1 | tee eval.log" C-m
 
 # Pane 3: nvidia-smi monitor
-tmux send-keys -t $SESSION.2 "watch -n 0.5 nvidia-smi" C-m
+tmux send-keys -t $SESSION.2 "watch -n 0.1 nvidia-smi" C-m
 
 # Balance layout into 3 equal vertical columns
 tmux select-layout -t $SESSION even-horizontal

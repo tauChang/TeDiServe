@@ -500,6 +500,8 @@ class NixlConnectorWorker:
         # path = make_zmq_path("tcp", host, port)
         path = make_zmq_path("tcp", host, base_port + tp_rank)
         logger.debug("Starting listening on path: %s", path)
+        logger.debug(f"tp_rank: {tp_rank}, base_port: {base_port}")
+        logger.debug(f"metadata: {metadata}")
         with zmq_ctx(zmq.ROUTER, path) as sock:
             ready_event.set()
             while True:
@@ -535,6 +537,57 @@ class NixlConnectorWorker:
         #         f"starting from base port {base_port + tp_rank}"
         #     )
 
+    # def _nixl_handshake(
+    #     self,
+    #     host: str,
+    #     port: int,
+    #     remote_tp_size: int,
+    #     expected_engine_id: str,
+    # ) -> dict[int, str]:
+    #     """Do a NIXL handshake with a remote instance."""
+
+    #     start_time = time.perf_counter()
+
+    #     # NOTE(rob): we need each rank to have a unique port. This is
+    #     # a hack to keep us moving. We will switch when moving to etcd
+    #     # or where we have a single ZMQ socket in the scheduler.
+
+    #     # Handshake only with the remote TP rank that current local rank will
+    #     # pull from. With homogeneous TP it happens to be the same rank_i.
+    #     logger.debug(f"_tp_size: {self._tp_size}, remote_tp_size: {remote_tp_size}")
+    #     tp_ratio = self._tp_size[self.engine_id] // remote_tp_size
+    #     p_remote_rank = self.tp_rank // tp_ratio
+    #     logger.debug(f"tp_ratio: {tp_ratio}, p_remote_rank: {p_remote_rank}")
+    #     path = make_zmq_path("tcp", host, port + p_remote_rank)
+    #     logger.debug("Querying metadata on path: %s at remote rank %s", path,
+    #                  p_remote_rank)
+
+    #     # Send query for the request.
+    #     with zmq_ctx(zmq.REQ, path) as sock:
+    #         sock.send(GET_META_MSG)
+    #         metadata_bytes = sock.recv()
+    #         decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
+    #         metadata = decoder.decode(metadata_bytes)
+    #         got_metadata_time = time.perf_counter()
+    #         logger.debug("NIXL handshake: get metadata took: %s",
+    #                      got_metadata_time - start_time)
+
+    #         # Ensure engine id matches.
+    #         if metadata.engine_id != expected_engine_id:
+    #             raise RuntimeError(f"Remote NIXL agent engine ID mismatch. "
+    #                                f"Expected {expected_engine_id},"
+    #                                f"received {metadata.engine_id}.")
+
+    #         # Register Remote agent.
+    #         remote_agent_name = self.add_remote_agent(metadata, p_remote_rank,
+    #                                                   remote_tp_size)
+    #         setup_agent_time = time.perf_counter()
+    #         logger.debug("NIXL handshake: add agent took: %s",
+    #                      setup_agent_time - got_metadata_time)
+
+    #     # Remote rank -> agent name.
+    #     return {p_remote_rank: remote_agent_name}
+
     def _nixl_handshake(
         self,
         host: str,
@@ -542,49 +595,52 @@ class NixlConnectorWorker:
         remote_tp_size: int,
         expected_engine_id: str,
     ) -> dict[int, str]:
-        """Do a NIXL handshake with a remote instance."""
+        """Do a NIXL handshake with a remote instance (supports P>D and P<D)."""
 
         start_time = time.perf_counter()
+        local_tp = self._tp_size[self.engine_id]
+        logger.debug(f"Handshake: local_tp={local_tp}, remote_tp={remote_tp_size}")
 
-        # NOTE(rob): we need each rank to have a unique port. This is
-        # a hack to keep us moving. We will switch when moving to etcd
-        # or where we have a single ZMQ socket in the scheduler.
+        remote_ranks: list[int] = []
+        if local_tp == remote_tp_size:
+            # one-to-one
+            remote_ranks = [self.tp_rank]
+        elif local_tp > remote_tp_size:
+            # D > P → each remote rank serves multiple local ranks
+            ratio = local_tp // remote_tp_size
+            remote_ranks = [self.tp_rank // ratio]
+        else:
+            # P > D → each local rank fetches from multiple remote ranks
+            ratio = remote_tp_size // local_tp
+            start = self.tp_rank * ratio
+            remote_ranks = list(range(start, start + ratio))
 
-        # Handshake only with the remote TP rank that current local rank will
-        # pull from. With homogeneous TP it happens to be the same rank_i.
-        logger.debug(f"_tp_size: {self._tp_size}, remote_tp_size: {remote_tp_size}")
-        tp_ratio = self._tp_size[self.engine_id] // remote_tp_size
-        p_remote_rank = self.tp_rank // tp_ratio
-        logger.debug(f"tp_ratio: {tp_ratio}, p_remote_rank: {p_remote_rank}")
-        path = make_zmq_path("tcp", host, port + p_remote_rank)
-        logger.debug("Querying metadata on path: %s at remote rank %s", path,
-                     p_remote_rank)
+        remote_map: dict[int, str] = {}
+        logger.debug(f"remote_ranks to handshake: {remote_ranks}")
 
-        # Send query for the request.
-        with zmq_ctx(zmq.REQ, path) as sock:
-            sock.send(GET_META_MSG)
-            metadata_bytes = sock.recv()
-            decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
-            metadata = decoder.decode(metadata_bytes)
-            got_metadata_time = time.perf_counter()
-            logger.debug("NIXL handshake: get metadata took: %s",
-                         got_metadata_time - start_time)
+        for p_remote_rank in remote_ranks:
+            path = make_zmq_path("tcp", host, port + p_remote_rank)
+            logger.debug(f"Connecting to remote rank {p_remote_rank} at {path}")
+            with zmq_ctx(zmq.REQ, path) as sock:
+                sock.send(GET_META_MSG)
+                metadata_bytes = sock.recv()
+                metadata = msgspec.msgpack.Decoder(NixlAgentMetadata).decode(
+                    metadata_bytes)
+                got_metadata_time = time.perf_counter()
+                logger.debug("NIXL handshake: get metadata took: %s",
+                            got_metadata_time - start_time)
 
-            # Ensure engine id matches.
             if metadata.engine_id != expected_engine_id:
-                raise RuntimeError(f"Remote NIXL agent engine ID mismatch. "
-                                   f"Expected {expected_engine_id},"
-                                   f"received {metadata.engine_id}.")
+                raise RuntimeError(
+                    f"Remote engine ID mismatch. Expected {expected_engine_id}, "
+                    f"got {metadata.engine_id}.")
 
-            # Register Remote agent.
-            remote_agent_name = self.add_remote_agent(metadata, p_remote_rank,
-                                                      remote_tp_size)
-            setup_agent_time = time.perf_counter()
-            logger.debug("NIXL handshake: add agent took: %s",
-                         setup_agent_time - got_metadata_time)
+            remote_agent_name = self.add_remote_agent(metadata, p_remote_rank, remote_tp_size)
+            remote_map[p_remote_rank] = remote_agent_name
 
-        # Remote rank -> agent name.
-        return {p_remote_rank: remote_agent_name}
+        logger.debug(f"Handshake complete with {len(remote_map)} remote ranks.")
+        return remote_map
+
 
     def _background_nixl_handshake(self, req_id: str,
                                    remote_engine_id: EngineId, meta: ReqMeta):
@@ -706,7 +762,6 @@ class NixlConnectorWorker:
             assert len(self.block_window_per_layer) == self.num_layers
 
         descs = self.nixl_wrapper.get_reg_descs(caches_data, "VRAM")
-        logger.debug("Registering descs: %s", caches_data)
         self.nixl_wrapper.register_memory(descs)
         logger.debug("Done registering descs")
         self._registered_descs.append(descs)
@@ -728,6 +783,7 @@ class NixlConnectorWorker:
                      len(blocks_data), self.engine_id, self.tp_rank)
 
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
+        logger.debug(f"descs: {blocks_data[:5]} ...")
         # NIXL_INIT_AGENT to be used for preparations of local descs.
         self.src_xfer_side_handle = self.nixl_wrapper.prep_xfer_dlist(
             "NIXL_INIT_AGENT", descs)
@@ -749,137 +805,229 @@ class NixlConnectorWorker:
         self._nixl_handshake_listener_t.start()
         ready_event.wait()  # Wait for listener ZMQ socket to be ready.
 
-    def add_remote_agent(self,
-                         nixl_agent_meta: NixlAgentMetadata,
-                         remote_tp_rank: int = 0,
-                         remote_tp_size: int = 1) -> str:
-        """
-        Add the remote NIXL agent and prepare the descriptors for reading cache
-        blocks from remote.
+    # def add_remote_agent(self,
+    #                      nixl_agent_meta: NixlAgentMetadata,
+    #                      remote_tp_rank: int = 0,
+    #                      remote_tp_size: int = 1) -> str:
+    #     """
+    #     Add the remote NIXL agent and prepare the descriptors for reading cache
+    #     blocks from remote.
 
-        In particular, handle both homogeneous and heterogeneous TP. The former
-        requires local rank_i to read from remote rank_i. 
-        The latter, assuming D.world_size > P.world_size, requires that two or 
-        more local TP worker share the xfer from a single TP worker.
+    #     In particular, handle both homogeneous and heterogeneous TP. The former
+    #     requires local rank_i to read from remote rank_i. 
+    #     The latter, assuming D.world_size > P.world_size, requires that two or 
+    #     more local TP worker share the xfer from a single TP worker.
 
-        Here's an example:
+    #     Here's an example:
 
-        rank_offset     p_remote_tp_rank
-        (kv split no)    
-        --------------------------------
-            0                 0      Worker0  ---- 1st half of KV ----> Worker0  [ KV Cache ]
-                                                                        /
-            1                 0      Worker1  ---- 2nd half of KV -----/
+    #     rank_offset     p_remote_tp_rank
+    #     (kv split no)    
+    #     --------------------------------
+    #         0                 0      Worker0  ---- 1st half of KV ----> Worker0  [ KV Cache ]
+    #                                                                     /
+    #         1                 0      Worker1  ---- 2nd half of KV -----/
 
-            0                 1      Worker2  ---- 1st half of KV ----> Worker1  [ KV Cache ]
-                                                                        /
-            1                 1      Worker3  ---- 2nd half of KV -----/
+    #         0                 1      Worker2  ---- 1st half of KV ----> Worker1  [ KV Cache ]
+    #                                                                     /
+    #         1                 1      Worker3  ---- 2nd half of KV -----/
 
 
-                                Decoder TP workers                     Prefix TP workers
-                                  (world_size=4)                         (world_size=2)
-                                                 tp_ratio = 4 // 2 = 2                  
+    #                             Decoder TP workers                     Prefix TP workers
+    #                               (world_size=4)                         (world_size=2)
+    #                                              tp_ratio = 4 // 2 = 2                  
                                 
-        Considering the KV Caches, if P-Worker_i has cache size [2, num_blocksP, kv_heads, block_size, head_dim]  
-        then D-Worker_j has [2, num_blocksD, kv_heads//tp_ratio, block_size, head_dim]. Mind the "HND" layout format.
-        Assuming num_blocksD >= num_blocksP, D-Worker0 reads from P-Worker0 by preparing the kv_heads//tp_ratio 
-        first heads from all the slots of all the blocks. D-Worker1 will do the same, but reading the second split
-        along the kv_heads dimension, and so forth until "tp_ratio" D TP workers have pulled from P-Worker0.   
+    #     Considering the KV Caches, if P-Worker_i has cache size [2, num_blocksP, kv_heads, block_size, head_dim]  
+    #     then D-Worker_j has [2, num_blocksD, kv_heads//tp_ratio, block_size, head_dim]. Mind the "HND" layout format.
+    #     Assuming num_blocksD >= num_blocksP, D-Worker0 reads from P-Worker0 by preparing the kv_heads//tp_ratio 
+    #     first heads from all the slots of all the blocks. D-Worker1 will do the same, but reading the second split
+    #     along the kv_heads dimension, and so forth until "tp_ratio" D TP workers have pulled from P-Worker0.   
         
-        Note that the above will also hold true for the homogeneous TP case, where tp_ratio evaluates to 1.
+    #     Note that the above will also hold true for the homogeneous TP case, where tp_ratio evaluates to 1.
 
-        Regarding MLA case, the cache is replicated across TP workers so the rank_offset will just always be 0
-        so that the whole cache is shared by "tp_ratio" D TP workers.
-        """ # noqa: E501
-        logger.debug(f"Adding remote agent for engine {nixl_agent_meta.engine_id} "
-                     f"from remote rank {remote_tp_rank} with tp_size "
-                     f"{remote_tp_size}")
-                     
+    #     Regarding MLA case, the cache is replicated across TP workers so the rank_offset will just always be 0
+    #     so that the whole cache is shared by "tp_ratio" D TP workers.
+    #     """ # noqa: E501
+    #     logger.debug(f"Adding remote agent for engine {nixl_agent_meta.engine_id} "
+    #                  f"from remote rank {remote_tp_rank} with tp_size "
+    #                  f"{remote_tp_size}")
+
+    #     engine_id = nixl_agent_meta.engine_id
+    #     # TODO re-evaluate refreshing for scaling/recovery
+    #     if remote_tp_rank in self._remote_agents.get(engine_id, {}):
+    #         return self._remote_agents[engine_id][remote_tp_rank]
+
+    #     if engine_id not in self._tp_size:
+    #         self._tp_size[engine_id] = remote_tp_size
+    #     else:
+    #         assert self._tp_size[engine_id] == remote_tp_size
+    #     # We may eventually enable this after asserting equality in cache
+    #     # layout and close outputs.
+    #     assert nixl_agent_meta.attn_backend_name == self.backend_name
+
+    #     remote_agent_name = self.nixl_wrapper.add_remote_agent(
+    #         nixl_agent_meta.agent_metadata)
+
+    #     # Number of D TP workers reading from a single P TP worker. This is
+    #     # 1 when P and D `--tensor-parallel-size` match.
+    #     tp_ratio = divide(self._tp_size[self.engine_id],
+    #                       self._tp_size[engine_id])
+    #     assert tp_ratio > 0, "Decode TP cannot be smaller than prefill TP"
+
+    #     # Handle tp_size>num_kv_heads: replicate KV cache.
+    #     total_num_kv_heads = self.model_config.get_total_num_kv_heads()
+    #     is_kv_replicated = self._tp_size[engine_id] // total_num_kv_heads >= 1
+
+    #     if self.use_mla or is_kv_replicated:
+    #         # With MLA the only difference is in the number of blocks.
+    #         remote_block_size = nixl_agent_meta.block_len // (
+    #             self.slot_size_bytes)
+    #         assert self.block_len == nixl_agent_meta.block_len
+    #     else:
+    #         remote_block_size = nixl_agent_meta.block_len // (
+    #             self.slot_size_bytes * tp_ratio)
+    #         if self._use_flashinfer:
+    #             # Account for joint KV in FlashInfer.
+    #             remote_block_size //= 2
+
+    #         assert nixl_agent_meta.block_len == self.block_len * tp_ratio, (
+    #             "Remote P worker KV layer cache must be of shape [2, N, "
+    #             "local_kv_heads*tp_ratio, block_size, head_dim] and same dtype."
+    #         )
+
+    #     assert self.block_size == remote_block_size, (
+    #         "Remote P worker with different block size is not supported "
+    #         f"{self.block_size=} {remote_block_size=}")
+
+    #     # Create dst descs and xfer side handles. TP workers have same #blocks.
+    #     if engine_id in self.dst_num_blocks:
+    #         assert self.dst_num_blocks[engine_id] == nixl_agent_meta.num_blocks
+    #     else:
+    #         self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
+
+    #     blocks_data = []
+    #     # With homogeneous TP, D pulls the whole kv cache from corresponding
+    #     # rank. With heterogeneous TP, prepare the descriptors by splitting the
+    #     # P KV cache along kv_head dim, of D worker's kv_head size (D>P).
+    #     # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
+    #     # Only register the remote's descriptors if current rank pulls from it.
+    #     self.kv_caches_base_addr[
+    #         engine_id] = nixl_agent_meta.kv_caches_base_addr
+    #     rank_offset = self.tp_rank % tp_ratio * self.block_len \
+    #         if not (self.use_mla or is_kv_replicated) else 0
+    #     # Register all remote blocks, but only the corresponding kv heads.
+    #     for base_addr in nixl_agent_meta.kv_caches_base_addr:
+    #         for block_id in range(nixl_agent_meta.num_blocks):
+    #             block_offset = block_id * nixl_agent_meta.block_len
+    #             # For each block, grab the heads chunk belonging to rank_i
+    #             # of size remote_nheads // tp_ratio, which correspond to
+    #             # self.block_len == remote_block_len//tp_ratio bytes.
+    #             addr = base_addr + block_offset + rank_offset
+    #             # (addr, len, device id)
+    #             blocks_data.append((addr, self.block_len, remote_tp_rank))
+    #     logger.debug(
+    #         "Created %s blocks for dst engine %s with remote rank %s and "
+    #         "local rank %s", len(blocks_data), engine_id, remote_tp_rank,
+    #         self.tp_rank)
+
+    #     # Register with NIXL.
+    #     descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
+    #     self.dst_xfer_side_handles[
+    #         engine_id] = self.nixl_wrapper.prep_xfer_dlist(
+    #             remote_agent_name, descs)
+
+    #     return remote_agent_name
+    
+    def add_remote_agent(
+        self,
+        nixl_agent_meta: NixlAgentMetadata,
+        remote_tp_rank: int = 0,
+        remote_tp_size: int = 1,
+    ) -> str:
+        """Add remote NIXL agent and prepare descriptors (supports both P>D and P<D)."""
+        logger.debug(f"nixl_agent_meta: {nixl_agent_meta}")
         engine_id = nixl_agent_meta.engine_id
-        # TODO re-evaluate refreshing for scaling/recovery
+        logger.debug(
+            f"Adding remote agent {engine_id} rank {remote_tp_rank} "
+            f"remote_tp={remote_tp_size}, local_tp={self._tp_size[self.engine_id]}"
+        )
+
         if remote_tp_rank in self._remote_agents.get(engine_id, {}):
             return self._remote_agents[engine_id][remote_tp_rank]
 
         if engine_id not in self._tp_size:
             self._tp_size[engine_id] = remote_tp_size
-        else:
-            assert self._tp_size[engine_id] == remote_tp_size
-        # We may eventually enable this after asserting equality in cache
-        # layout and close outputs.
         assert nixl_agent_meta.attn_backend_name == self.backend_name
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
             nixl_agent_meta.agent_metadata)
 
-        # Number of D TP workers reading from a single P TP worker. This is
-        # 1 when P and D `--tensor-parallel-size` match.
-        tp_ratio = divide(self._tp_size[self.engine_id],
-                          self._tp_size[engine_id])
-        assert tp_ratio > 0, "Decode TP cannot be smaller than prefill TP"
+        local_tp = self._tp_size[self.engine_id]
+        remote_tp = remote_tp_size
+        # tp_ratio = divide(local_tp, remote_tp)
 
-        # Handle tp_size>num_kv_heads: replicate KV cache.
         total_num_kv_heads = self.model_config.get_total_num_kv_heads()
-        is_kv_replicated = self._tp_size[engine_id] // total_num_kv_heads >= 1
+        is_kv_replicated = remote_tp // total_num_kv_heads >= 1
 
+        # Compute block size logic
         if self.use_mla or is_kv_replicated:
-            # With MLA the only difference is in the number of blocks.
-            remote_block_size = nixl_agent_meta.block_len // (
-                self.slot_size_bytes)
-            assert self.block_len == nixl_agent_meta.block_len
+            # remote_block_size = nixl_agent_meta.block_len // self.slot_size_bytes
+            rank_offset = 0
+        elif local_tp >= remote_tp:
+            # D > P: each P serves multiple D ranks
+            tp_ratio = local_tp // remote_tp
+            # remote_block_size = nixl_agent_meta.block_len // (self.slot_size_bytes * tp_ratio)
+            rank_offset = (self.tp_rank % tp_ratio) * self.block_len
         else:
-            remote_block_size = nixl_agent_meta.block_len // (
-                self.slot_size_bytes * tp_ratio)
-            if self._use_flashinfer:
-                # Account for joint KV in FlashInfer.
-                remote_block_size //= 2
+            # P > D: each D rank fetches from multiple P ranks
+            # remote_block_size = nixl_agent_meta.block_len // (self.slot_size_bytes // tp_ratio)
+            tp_ratio = remote_tp // local_tp
+            # remote_block_size = nixl_agent_meta.block_len // (self.slot_size_bytes * tp_ratio)
+            rank_offset = 0  # each remote slice is smaller; aggregate later
+        
+        # logger.debug(f"local_tp={local_tp}, remote_tp={remote_tp}, "
+        #              f"remote_block_size={remote_block_size}, rank_offset={rank_offset}")
 
-            assert nixl_agent_meta.block_len == self.block_len * tp_ratio, (
-                "Remote P worker KV layer cache must be of shape [2, N, "
-                "local_kv_heads*tp_ratio, block_size, head_dim] and same dtype."
-            )
+        # assert self.block_size == remote_block_size, (
+        #     f"Block size mismatch: local={self.block_size}, remote={remote_block_size}"
+        # )
 
-        assert self.block_size == remote_block_size, (
-            "Remote P worker with different block size is not supported "
-            f"{self.block_size=} {remote_block_size=}")
-
-        # Create dst descs and xfer side handles. TP workers have same #blocks.
-        if engine_id in self.dst_num_blocks:
-            assert self.dst_num_blocks[engine_id] == nixl_agent_meta.num_blocks
-        else:
+        # Register descriptors
+        self.kv_caches_base_addr[engine_id] = nixl_agent_meta.kv_caches_base_addr
+        if engine_id not in self.dst_num_blocks:
             self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
+        logger.debug(f"dst_num_blocks: {self.dst_num_blocks}")
+        logger.debug(f"meta num_blocks: {nixl_agent_meta.num_blocks}")
 
+        logger.debug(f"self.block_len: {self.block_len}")
+        logger.debug(f"meta block_len: {nixl_agent_meta.block_len}")
         blocks_data = []
-        # With homogeneous TP, D pulls the whole kv cache from corresponding
-        # rank. With heterogeneous TP, prepare the descriptors by splitting the
-        # P KV cache along kv_head dim, of D worker's kv_head size (D>P).
-        # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
-        # Only register the remote's descriptors if current rank pulls from it.
-        self.kv_caches_base_addr[
-            engine_id] = nixl_agent_meta.kv_caches_base_addr
-        rank_offset = self.tp_rank % tp_ratio * self.block_len \
-            if not (self.use_mla or is_kv_replicated) else 0
-        # Register all remote blocks, but only the corresponding kv heads.
         for base_addr in nixl_agent_meta.kv_caches_base_addr:
             for block_id in range(nixl_agent_meta.num_blocks):
                 block_offset = block_id * nixl_agent_meta.block_len
-                # For each block, grab the heads chunk belonging to rank_i
-                # of size remote_nheads // tp_ratio, which correspond to
-                # self.block_len == remote_block_len//tp_ratio bytes.
                 addr = base_addr + block_offset + rank_offset
-                # (addr, len, device id)
-                blocks_data.append((addr, self.block_len, remote_tp_rank))
+                # blocks_data.append((addr, self.block_len, remote_tp_rank))
+                blocks_data.append((addr, nixl_agent_meta.block_len, remote_tp_rank))
+
         logger.debug(
-            "Created %s blocks for dst engine %s with remote rank %s and "
-            "local rank %s", len(blocks_data), engine_id, remote_tp_rank,
-            self.tp_rank)
+            f"Created {len(blocks_data)} blocks for dst engine {engine_id} "
+            f"remote_rank={remote_tp_rank}, local_rank={self.tp_rank}"
+        )
+        logger.debug(f"remote_agent_name: {remote_agent_name}")
 
-        # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
-        self.dst_xfer_side_handles[
-            engine_id] = self.nixl_wrapper.prep_xfer_dlist(
-                remote_agent_name, descs)
+        logger.debug(f"descs: {blocks_data[:5]} ...")
+        logger.debug(f"")
+        # Support multiple remote ranks per engine_id
+        if engine_id not in self.dst_xfer_side_handles:
+            self.dst_xfer_side_handles[engine_id] = {}
+        self.dst_xfer_side_handles[engine_id][remote_tp_rank] = (
+            self.nixl_wrapper.prep_xfer_dlist(remote_agent_name, descs)
+        )
 
+        # Track agent
+        self._remote_agents[engine_id][remote_tp_rank] = remote_agent_name
         return remote_agent_name
+
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
@@ -994,103 +1142,166 @@ class NixlConnectorWorker:
             remote_block_ids=meta.remote_block_ids,
         )
 
-    def _read_blocks(self, local_block_ids: list[int],
-                     remote_block_ids: list[int], dst_engine_id: str,
-                     request_id: str):
-        # NOTE(rob): having the staging blocks be on the READER side is
-        # not going to work well (since we will have to call rearrange tensors).
-        # after we detect the txn is complete (which means we cannot make the
-        # read trxn async easily). If we want to make "READ" happen cleanly,
-        # then we will need to have the staging blocks on the remote side.
+    # def _read_blocks(self, local_block_ids: list[int],
+    #                  remote_block_ids: list[int], dst_engine_id: str,
+    #                  request_id: str):
+    #     # NOTE(rob): having the staging blocks be on the READER side is
+    #     # not going to work well (since we will have to call rearrange tensors).
+    #     # after we detect the txn is complete (which means we cannot make the
+    #     # read trxn async easily). If we want to make "READ" happen cleanly,
+    #     # then we will need to have the staging blocks on the remote side.
 
-        # NOTE(rob): according to nvidia the staging blocks are used to
-        # saturate IB with heterogeneous TP sizes. We should remove the staging
-        # blocks until we are ready.
+    #     # NOTE(rob): according to nvidia the staging blocks are used to
+    #     # saturate IB with heterogeneous TP sizes. We should remove the staging
+    #     # blocks until we are ready.
 
-        # Number of D TP workers that will read from dst P. Propagate tp_ratio
-        # on notification so that dst worker can wait before freeing blocks.
-        tp_ratio = self._tp_size[
-            self.engine_id] // self._tp_size[dst_engine_id]
+    #     # Number of D TP workers that will read from dst P. Propagate tp_ratio
+    #     # on notification so that dst worker can wait before freeing blocks.
+    #     tp_ratio = self._tp_size[
+    #         self.engine_id] // self._tp_size[dst_engine_id]
+    #     notif_id = f"{request_id}:{tp_ratio}".encode()
+
+    #     # Full prefix cache hit: do not need to read remote blocks,
+    #     # just notify P worker that we have the blocks we need.
+    #     num_local_blocks = len(local_block_ids)
+    #     if num_local_blocks == 0:
+    #         remote_rank = self.tp_rank // tp_ratio
+    #         agent_name = self._remote_agents[dst_engine_id][remote_rank]
+    #         self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
+    #         return
+
+    #     # Partial prefix cache hit: just read uncomputed blocks.
+    #     num_remote_blocks = len(remote_block_ids)
+    #     logger.debug(f"num_local_blocks: {num_local_blocks}, "
+    #                  f"num_remote_blocks: {num_remote_blocks}")
+    #     assert num_local_blocks <= num_remote_blocks
+    #     if num_local_blocks < num_remote_blocks:
+    #         remote_block_ids = remote_block_ids[-num_local_blocks:]
+
+    #     # Get side handles.
+    #     local_xfer_side_handle = self.src_xfer_side_handle
+    #     remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id]
+
+    #     # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
+    #     # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
+    #     # workers will issue xfers to parts of the P worker remote kv caches.
+
+    #     # Get descs ids.
+    #     local_block_descs_ids: list[int] = []
+    #     remote_block_descs_ids: list[int] = []
+    #     if not self.block_window_per_layer:
+    #         # Default case: assume global attention
+    #         remote_block_descs_ids = self._get_block_descs_ids(
+    #             dst_engine_id, remote_block_ids)
+    #         local_block_descs_ids = self._get_block_descs_ids(
+    #             self.engine_id, local_block_ids)
+    #     else:
+    #         # TODO(mgoin): remove this once we have hybrid memory allocator
+    #         # Optimization for models with local attention (Llama 4)
+    #         for layer_idx, block_window in enumerate(
+    #                 self.block_window_per_layer):
+    #             # For each layer:
+    #             if block_window is None:
+    #                 # If not chunked, we just use the
+    #                 # full block lists (global attention)
+    #                 layer_local_block_ids = local_block_ids
+    #                 layer_remote_block_ids = remote_block_ids
+    #             else:
+    #                 # If chunked, get the last block_window blocks
+    #                 layer_local_block_ids = local_block_ids[-block_window:]
+    #                 layer_remote_block_ids = remote_block_ids[-block_window:]
+
+    #             # Get descs ids for the layer.
+    #             layer_local_desc_ids = self._get_block_descs_ids(
+    #                 self.engine_id, layer_local_block_ids, layer_idx)
+    #             layer_remote_desc_ids = self._get_block_descs_ids(
+    #                 dst_engine_id, layer_remote_block_ids, layer_idx)
+
+    #             local_block_descs_ids.extend(layer_local_desc_ids)
+    #             remote_block_descs_ids.extend(layer_remote_desc_ids)
+
+    #     assert len(local_block_descs_ids) == len(remote_block_descs_ids)
+
+    #     # Prepare transfer with Nixl.
+    #     handle = self.nixl_wrapper.make_prepped_xfer(
+    #         "READ",
+    #         local_xfer_side_handle,
+    #         local_block_descs_ids,
+    #         remote_xfer_side_handle,
+    #         remote_block_descs_ids,
+    #         notif_msg=notif_id,
+    #     )
+
+    #     # Begin async xfer.
+    #     self.nixl_wrapper.transfer(handle)
+
+    #     # Use handle to check completion in future step().
+    #     # TODO (NickLucche) surface xfer elapsed time
+    #     self._recving_transfers[request_id].append(
+    #         (handle, time.perf_counter()))
+    def _read_blocks(
+        self,
+        local_block_ids: list[int],
+        remote_block_ids: list[int],
+        dst_engine_id: str,
+        request_id: str,
+    ):
+        """Start async read(s) of KV blocks. Supports both P>D and P<D TP."""
+        tp_ratio = self._tp_size[self.engine_id] // self._tp_size[dst_engine_id]
         notif_id = f"{request_id}:{tp_ratio}".encode()
 
-        # Full prefix cache hit: do not need to read remote blocks,
-        # just notify P worker that we have the blocks we need.
         num_local_blocks = len(local_block_ids)
         if num_local_blocks == 0:
-            remote_rank = self.tp_rank // tp_ratio
-            agent_name = self._remote_agents[dst_engine_id][remote_rank]
-            self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
+            # Full cache hit: just notify all remote agents
+            for remote_rank, agent_name in self._remote_agents[dst_engine_id].items():
+                self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
             return
 
-        # Partial prefix cache hit: just read uncomputed blocks.
         num_remote_blocks = len(remote_block_ids)
-        logger.debug(f"num_local_blocks: {num_local_blocks}, "
-                     f"num_remote_blocks: {num_remote_blocks}")
+        logger.debug(f"num_local_blocks={num_local_blocks}, num_remote_blocks={num_remote_blocks}")
         assert num_local_blocks <= num_remote_blocks
         if num_local_blocks < num_remote_blocks:
             remote_block_ids = remote_block_ids[-num_local_blocks:]
 
-        # Get side handles.
         local_xfer_side_handle = self.src_xfer_side_handle
-        remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id]
+        remote_handles = self.dst_xfer_side_handles[dst_engine_id]
 
-        # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
-        # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
-        # workers will issue xfers to parts of the P worker remote kv caches.
+        # Case 1: D > P — one remote rank per local rank
+        if isinstance(remote_handles, int):
+            remote_handles = {self.tp_rank // tp_ratio: remote_handles}
 
-        # Get descs ids.
-        local_block_descs_ids: list[int] = []
-        remote_block_descs_ids: list[int] = []
-        if not self.block_window_per_layer:
-            # Default case: assume global attention
-            remote_block_descs_ids = self._get_block_descs_ids(
-                dst_engine_id, remote_block_ids)
-            local_block_descs_ids = self._get_block_descs_ids(
-                self.engine_id, local_block_ids)
-        else:
-            # TODO(mgoin): remove this once we have hybrid memory allocator
-            # Optimization for models with local attention (Llama 4)
-            for layer_idx, block_window in enumerate(
-                    self.block_window_per_layer):
-                # For each layer:
-                if block_window is None:
-                    # If not chunked, we just use the
-                    # full block lists (global attention)
-                    layer_local_block_ids = local_block_ids
-                    layer_remote_block_ids = remote_block_ids
-                else:
-                    # If chunked, get the last block_window blocks
-                    layer_local_block_ids = local_block_ids[-block_window:]
-                    layer_remote_block_ids = remote_block_ids[-block_window:]
+        # Case 2: P > D — multiple remote ranks per local rank
+        for remote_rank, remote_xfer_side_handle in remote_handles.items():
+            remote_block_descs_ids = self._get_block_descs_ids(dst_engine_id, remote_block_ids)
+            local_block_descs_ids = self._get_block_descs_ids(self.engine_id, local_block_ids)
+            logger.debug(f"remote_rank={remote_rank}, "
+                         f"len(remote_block_descs_ids)={len(remote_block_descs_ids)}, "
+                         f"remote first 5={remote_block_descs_ids[:5]}, "
+                         f"len(local_block_descs_ids)={len(local_block_descs_ids)}, "
+                         f"local first 5={local_block_descs_ids[:5]}")
 
-                # Get descs ids for the layer.
-                layer_local_desc_ids = self._get_block_descs_ids(
-                    self.engine_id, layer_local_block_ids, layer_idx)
-                layer_remote_desc_ids = self._get_block_descs_ids(
-                    dst_engine_id, layer_remote_block_ids, layer_idx)
+            assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
-                local_block_descs_ids.extend(layer_local_desc_ids)
-                remote_block_descs_ids.extend(layer_remote_desc_ids)
+            logger.debug(f"local_xfer_side_handle: {local_xfer_side_handle}, "
+                         f"remote_xfer_side_handle: {remote_xfer_side_handle}")
+            logger.debug(f"notif_id: {notif_id}")
 
-        assert len(local_block_descs_ids) == len(remote_block_descs_ids)
+            handle = self.nixl_wrapper.make_prepped_xfer(
+                "READ",
+                local_xfer_side_handle,
+                local_block_descs_ids,
+                remote_xfer_side_handle,
+                remote_block_descs_ids,
+                notif_msg=notif_id,
+            )
+            self.nixl_wrapper.transfer(handle)
+            self._recving_transfers[request_id].append((handle, time.perf_counter()))
 
-        # Prepare transfer with Nixl.
-        handle = self.nixl_wrapper.make_prepped_xfer(
-            "READ",
-            local_xfer_side_handle,
-            local_block_descs_ids,
-            remote_xfer_side_handle,
-            remote_block_descs_ids,
-            notif_msg=notif_id,
+        logger.debug(
+            f"Started {len(remote_handles)} READ xfers for request {request_id}, "
+            f"engine {dst_engine_id}, tp_ratio={tp_ratio}"
         )
 
-        # Begin async xfer.
-        self.nixl_wrapper.transfer(handle)
-
-        # Use handle to check completion in future step().
-        # TODO (NickLucche) surface xfer elapsed time
-        self._recving_transfers[request_id].append(
-            (handle, time.perf_counter()))
 
     def _get_block_descs_ids(self,
                              engine_id: str,
