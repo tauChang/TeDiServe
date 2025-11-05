@@ -590,8 +590,15 @@ class ClusterScheduler(SchedulerInterface):
                     # idle_executors.sort(key=lambda eid: self.executor_states[eid].get_projected_token_budget(), reverse=True)
                     all_executors = sorted(
                         self.executor_states.keys(),
-                        key=lambda eid: self.executor_states[eid].get_projected_token_budget(), 
+                        key=lambda eid: (
+                            self.executor_states[eid].get_projected_token_budget(),
+                            self.executor_states[eid].tp_degree,
+                        ),
                         reverse=True)
+                    
+                    logger.debug(f"all executors sorted by projected token budget and tp degree: {all_executors}")
+                    logger.debug(f"token budgets: {{eid: self.executor_states[eid].get_projected_token_budget() for eid in all_executors}}")
+                    logger.debug(f"TP degrees: {{eid: self.executor_states[eid].tp_degree for eid in all_executors}}")
                     
                     for executor_id in all_executors:
                         # if executor_id in scheduled_running_reqs and \

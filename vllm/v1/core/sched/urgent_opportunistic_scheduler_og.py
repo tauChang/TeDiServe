@@ -6,7 +6,6 @@ from __future__ import annotations
 import bisect
 from collections import defaultdict, OrderedDict
 from collections.abc import Iterable
-import heapq
 import itertools
 import json
 import os
@@ -657,17 +656,6 @@ class UrgentOpportunisticScheduler(SchedulerInterface):
                     continue
             return True
         
-        def order_by_unmask_progress(req_ids: Iterable[str], decreasing=True) -> list[str]:
-            # decreasing
-            ordered_reqs = sorted(
-                req_ids,
-                key=lambda r_id: self.requests[r_id].unmask_progress,
-                reverse=decreasing
-            )
-            logger.debug(f"Ordered requests by unmask progress: {ordered_reqs}")
-            logger.debug(f"with unmask progresses: {[self.requests[r_id].unmask_progress for r_id in ordered_reqs]}")
-            return ordered_reqs
-        
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -764,9 +752,7 @@ class UrgentOpportunisticScheduler(SchedulerInterface):
             logger.debug(f"Processing executor {executor_id}")
             # loop from newest to oldest requests
             logger.debug(f"Checking running requests on executor {executor_id} for SLO compliance.")
-            # for req_id in reversed(self.executor_states[executor_id].sorted_req_ids(self.request_states)):
-            # kick out earlier progress first
-            for req_id in order_by_unmask_progress(self.executor_states[executor_id].req_ids, decreasing=False):
+            for req_id in reversed(self.executor_states[executor_id].sorted_req_ids(self.request_states)):
                 # check slo
                 assert self.request_states[req_id].is_running
                 if self.request_states[req_id].is_best_effort:
@@ -811,18 +797,15 @@ class UrgentOpportunisticScheduler(SchedulerInterface):
 
         # B
         logger.debug(f"Start B (schedule unscheduled normal & opportunistic requests)")
-        # unscheduled_requests = deque(order_by_unmask_progress(
-        #     [r_id for r_id in self.request_states if self.request_states[r_id].is_unscheduled and \
-        #         self.is_possible_to_meet_slo(r_id)]))
-        unscheduled_requests = [
-            (-self.requests[r_id].unmask_progress, r_id) for r_id in self.request_states if self.request_states[r_id].is_unscheduled and \
-            self.is_possible_to_meet_slo(r_id)]
-        heapq.heapify(unscheduled_requests)
+        unscheduled_requests = set(
+            [r_id for r_id in self.request_states if self.request_states[r_id].is_unscheduled and \
+                self.is_possible_to_meet_slo(r_id)]
+        )
         
         while len(unscheduled_requests) > 0:
             # maybe pick the request with the most progress?
-            # req_id = unscheduled_requests.popleft()
-            req_id = heapq.heappop(unscheduled_requests)[1]
+            req_id = next(iter(unscheduled_requests))
+            unscheduled_requests.remove(req_id)
             request = self.requests[req_id]
             logger.debug(f"Processing waiting unscheduled request {req_id}.")
             
@@ -850,16 +833,15 @@ class UrgentOpportunisticScheduler(SchedulerInterface):
                         continue
 
                     # check if all normal reqs can meet SLO
-                    requests_scheduled = [req_id] + self.executor_states[ex_id].get_normal_req_ids(self.request_states)
-
                     if not all_slos_met(
-                        requests_scheduled,
+                        [req_id] + self.executor_states[ex_id].get_normal_req_ids(self.request_states),
                         self.executor_states[ex_id].tp_degree,
                         batch_size,
                         {req_id: conf}):
                         logger.debug(f"Can't schedule due to SLO miss when considering all normal requests. Skipping executor.")
                         continue
                     
+                    requests_scheduled = [req_id] + self.executor_states[ex_id].get_normal_req_ids(self.request_states)
                     # scheduling this request to this executor
                     if ex_id in idle_executors:
                         # add now
@@ -907,9 +889,7 @@ class UrgentOpportunisticScheduler(SchedulerInterface):
                                 #     unscheduled_requests.add(r_id)
                                 assert self.request_states[r_id].is_unscheduled
                                 if self.is_possible_to_meet_slo(r_id):
-                                    # unscheduled_requests.add(r_id)
-                                    unscheduled_requests.append((-self.requests[r_id].unmask_progress, r_id))
-                                    heapq.heapify(unscheduled_requests)
+                                    unscheduled_requests.add(r_id)
                             else:
                                 logger.debug(f"Executor {ex_id} is not idle, so marking request {r_id} for pending removal.")
                                 self.executor_states[ex_id].mark_pending_request_removal(r_id)
@@ -944,7 +924,7 @@ class UrgentOpportunisticScheduler(SchedulerInterface):
             logger.debug(f"Looking at zero load executor {tgt_ex_id} with TP degree {self.executor_states[tgt_ex_id].tp_degree}")
             logger.debug(f"{self.executor_states[tgt_ex_id]}")
             # find a job to promote
-            # find the job with the least (priority, conf, slo_time_remaining - est_time_left)
+            # find the job with the least (priority, conf, estimated_time_left - slo_time_remaining)
             best_req_id = None
             best_metric = (RequestStatePriority.BEST_EFFORT + 1, 1.1, float('inf'))
             # only look at req on idle executors
@@ -970,8 +950,7 @@ class UrgentOpportunisticScheduler(SchedulerInterface):
                         metric = (
                             self.request_states[req_id].priority,
                             self.request_states[req_id].confidence_threshold,
-                            # est_time_left - slo_time_remaining
-                            slo_time_remaining - est_time_left
+                            est_time_left - slo_time_remaining
                         )
                         if metric < best_metric:
                             best_metric = metric
@@ -1007,10 +986,9 @@ class UrgentOpportunisticScheduler(SchedulerInterface):
                 self.request_states[best_req_id].remove_executor()
                 self.request_states[best_req_id].remove_pending_executor()
                 
-                priority = RequestStatePriority.OPPORTUNISTIC if not self.request_states[best_req_id].is_best_effort else RequestStatePriority.BEST_EFFORT
                 self.executor_states[tgt_ex_id].add_request(self.requests[best_req_id])
-                self.request_states[best_req_id].set_executor(tgt_ex_id, priority, new_conf)
-                self.request_states[best_req_id].set_pending_executor(tgt_ex_id, priority, new_conf)
+                self.request_states[best_req_id].set_executor(tgt_ex_id, RequestStatePriority.OPPORTUNISTIC, new_conf)
+                self.request_states[best_req_id].set_pending_executor(tgt_ex_id, RequestStatePriority.OPPORTUNISTIC, new_conf)
                 
                 promoted_req_ids.add(best_req_id)
                 requests_in_scheduler_output.add(best_req_id)

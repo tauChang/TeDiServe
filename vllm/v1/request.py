@@ -239,6 +239,10 @@ class Request:
         return len(self._unmasked_token_ids)
     
     @property
+    def unmask_progress(self) -> float:
+        return self.num_unmasked_tokens / self.output_length
+    
+    @property
     def is_in_execution(self) -> bool:
         return self._is_in_execution
     
