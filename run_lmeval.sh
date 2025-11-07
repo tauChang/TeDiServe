@@ -17,9 +17,9 @@ STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/featu
 KV_TRANSFER_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
 # CONF=599
 # STEP_DATA_DIR=./step_data_dynamic_${CONF}
-STEP_DATA_DIR=./step_data_1102
+STEP_DATA_DIR=./step_data_1104
 
-DENOISE_BLOCK_SIZE=32
+DENOISE_BLOCK_SIZE=8
 CACHE_PREFIX=true
 CACHE_SUFFIX=true
 
@@ -30,11 +30,11 @@ TASK=gsm8k
 # AVG_INTER_ARRIVAL_TIME=0.5
 # ARRIVAL_PATTERN="100:3,100:1,100:2"
 # ARRIVAL_PATTERN="200:1.5"
-ARRIVAL_PATTERN="10:0"
-NUM_CONCURRENT=10
+ARRIVAL_PATTERN="30:1"
+NUM_CONCURRENT=30
 OUTPUT_LENGTH=256
 WRITE_RESULTS=true
-RESULTS_DIR=eval/results_1103
+RESULTS_DIR=eval/results_1105
 
 # ----------------------
 # Output path name

@@ -67,7 +67,7 @@ class Sampler(nn.Module):
         # Sample the next token.
 
         # sampled = self.sample(logits, sampling_metadata) # [TODO (tau_chang)]: output should be List[List[Tuple[int, int]]]
-        unmasked = self.unmask(is_mask, logits, exec_start_pos, num_exec_tokens,
+        unmasked, avg_output_confidences = self.unmask(is_mask, logits, exec_start_pos, num_exec_tokens,
                                sampling_metadata, confidence_thresholds)
         logprobs_tensors = None
 
@@ -89,6 +89,7 @@ class Sampler(nn.Module):
         # These are GPU tensors.
         sampler_output = SamplerOutput(
             sampled_token_ids=unmasked,
+            avg_output_confidences=avg_output_confidences,
             logprobs_tensors=logprobs_tensors,
         )
         return sampler_output
@@ -123,11 +124,25 @@ class Sampler(nn.Module):
             logger.debug(f"Request {i}:"
                          f"block_start={block_start}, block_end={block_end}, "
                          )
+            unmask_range = (req_start + block_start - exec_start,
+                            req_start + block_end - exec_start)
+
+            is_recompute = sampling_metadata.num_tokens[i] == num_exec_tokens[i] 
+            if is_recompute:
+                output_confidence_range = (req_start + sampling_metadata.num_prompt_tokens[i],
+                                           req_start + sampling_metadata.num_tokens[i])
+            else:
+                output_confidence_range = (req_start,
+                                           req_start + num_exec_tokens[i].item())
+            
             ranges.append(
-                (req_start + block_start - exec_start,
-                 req_start + block_end - exec_start,
-                 block_start)
+                {
+                    "unmask_range": unmask_range,
+                    "output_confidence_range": output_confidence_range,
+                    "block_start": block_start
+                }
             )
+            logger.debug(f"ranges: {ranges[-1]}")
             req_start += num_exec_tokens[i].item()
         return ranges
 
@@ -169,8 +184,16 @@ class Sampler(nn.Module):
         x_0 = x_0.cpu()
         
         unmasked_tokens = []
-        for i, (start, end, block_start) in \
+        avg_output_confidences = []
+        # avg_masked_confidence = []
+        # for i, (start, end, block_start) in \
+        #     enumerate(self.get_output_range(sampling_metadata, exec_start_pos, num_exec_tokens)):
+        for i, ranges in \
             enumerate(self.get_output_range(sampling_metadata, exec_start_pos, num_exec_tokens)):
+            start, end = ranges["unmask_range"]
+            block_start = ranges["block_start"]
+            output_start, output_end = ranges["output_confidence_range"]
+
             logger.debug(
                 f"Processing range {start}:{end}, block_start={block_start}")
             x_0_slice = x_0[start:end]
@@ -216,11 +239,19 @@ class Sampler(nn.Module):
                 for index, token in zip(selected_indices, selected_tokens)
             ])
 
+            avg_output_confidences.append(
+                confidence[output_start:output_end].mean().item()
+            )
+            logger.debug(
+                f"Avg output confidence for range {output_start}:{output_end}: "
+                f"{avg_output_confidences[-1]}"
+            )
+
             # logger.debug(
             #     f"Unmasked tokens for range {start}:{end}: {unmasked_tokens[-1]}"
             # )
         
-        return unmasked_tokens
+        return unmasked_tokens, avg_output_confidences
 
     def sample(
         self,

@@ -142,8 +142,10 @@ class Request:
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0
 
+        self.last_recompute_avg_output_confidence = None
         # TODO: fix SLO
-        self.latency_slo = 5
+        self.latency_slo = 8
+
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest,
@@ -175,10 +177,17 @@ class Request:
             denoise_block_size=denoise_block_size,
         )
 
-    def append_unmasked_token_ids(
+    def update_from_output(
         self,
-        token_ids: list[tuple[int, int]]
+        token_ids: list[tuple[int, int]],
+        confidence_threshold: float,
+        avg_output_confidence: float,
     ) -> StepStats:
+    
+        no_cache = self.num_exec_tokens == len(self._all_token_ids)
+        if no_cache or self.is_start_of_new_block:
+            self.last_recompute_avg_output_confidence = avg_output_confidence
+
         self.num_last_unmasked_tokens = len(token_ids)
         self._unmasked_token_ids.extend(token_ids)
         self.cur_block_num_unmasked_tokens += len(token_ids)
@@ -186,6 +195,7 @@ class Request:
         logger.debug(f"Request {self.request_id} has unmasked {self.cur_block_num_unmasked_tokens} tokens in the current block (block {self.cur_block}).")
         logger.debug(f"get {len(token_ids)} token_ids: {token_ids}")
         assert self.cur_block_num_unmasked_tokens <= self.denoise_block_size
+
         
         stats = StepStats(
             id=self.request_id,
@@ -196,7 +206,10 @@ class Request:
             block=self.cur_block,
             block_num_denoise_ran=self.cur_block_denoise_ran,
             block_num_unmasked_tokens=self.cur_block_num_unmasked_tokens,
-            block_size=self.denoise_block_size
+            block_size=self.denoise_block_size,
+            confidence_threshold=confidence_threshold,
+            last_recompute_avg_output_confidence=self.last_recompute_avg_output_confidence,
+            cur_avg_output_confidence=avg_output_confidence,
         )
 
         self.num_denoise_ran += 1
@@ -246,6 +259,12 @@ class Request:
     def is_in_execution(self) -> bool:
         return self._is_in_execution
     
+    @property
+    def num_recompute_steps_left(self) -> int:
+        total_blocks = self.output_length // self.denoise_block_size
+        num_remaining_blocks = total_blocks - self.cur_block
+        return num_remaining_blocks - (not self.is_start_of_new_block)
+    
     def set_in_execution(self, in_execution: bool) -> None:
         """Set the execution state of the request."""
         self._is_in_execution = in_execution
@@ -261,8 +280,10 @@ class Request:
         num_tokens = self.mm_positions[input_id].length
         return num_tokens
     
+    
     @property
     def is_start_of_new_block(self) -> bool:
+        logger.debug(f"self.cur_block_num_unmasked_tokens: {self.cur_block_num_unmasked_tokens}")
         return self.cur_block_num_unmasked_tokens == 0
 
     @property

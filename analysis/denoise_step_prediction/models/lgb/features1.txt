@@ -1,0 +1,7 @@
+confidence_threshold
+full_progress
+full_unmask_progress
+block_progress
+block_unmask_progress
+masked_conf_avg
+output_conf_avg

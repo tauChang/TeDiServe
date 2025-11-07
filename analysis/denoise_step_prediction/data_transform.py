@@ -22,6 +22,83 @@ def plot_final_denoise_histogram(path: list[str]) -> None:
     plt.tight_layout()
     plt.savefig("final_denoise_histogram.png", dpi=300)
     
+import pandas as pd
+import numpy as np
+from collections import defaultdict
+
+def compute_masked_confidence(df: pd.DataFrame):
+    # store results in parallel to df rows
+    masked_conf_avgs = []
+
+    # group by request id
+    for rid, group in df.groupby("id"):
+        # sort by denoise step
+        group = group.sort_values("num_denoise_ran")
+
+        # track cumulative unmasked tokens for this request
+        cumulative_unmasked = set()
+
+        for _, row in group.iterrows():
+            output_len = row["output_length"]
+            conf = row["confidences"][-output_len:]  # non-prompt confidences
+            prompt_len = len(row["confidences"]) - output_len
+
+            # update cumulative unmask set
+            newly = row["cur_tokens_unmasked"]
+            cumulative_unmasked |= set(newly)
+
+            # compute masked positions
+            masked_positions = [i for i in range(output_len) if prompt_len+i not in cumulative_unmasked]
+            # print(masked_positions)
+
+            # compute masked confidence average
+            if len(masked_positions) == 0:
+                # masked_conf_avgs.append(np.nan)
+                masked_conf_avgs.append(1)
+            else:
+                vals = [conf[i] for i in masked_positions]
+                # vals = conf
+                # print(len(vals))
+                # print(vals)
+                # masked_conf_avgs.append(float(np.mean(vals)))
+                masked_conf_avgs.append(float(np.mean(vals)))
+            # print(masked_conf_avgs[-1])
+        # 3/0
+
+    df["masked_conf_avg"] = masked_conf_avgs
+    return df
+
+
+def compute_output_confidence(df: pd.DataFrame):
+    # store results in parallel to df rows
+    masked_conf_avgs = []
+
+    # group by request id
+    for rid, group in df.groupby("id"):
+        # sort by denoise step
+        group = group.sort_values("num_denoise_ran")
+
+        # track cumulative unmasked tokens for this request
+        cumulative_unmasked = set()
+
+        for _, row in group.iterrows():
+            output_len = row["output_length"]
+            conf = row["confidences"][-output_len:]  # non-prompt confidences
+            # conf = row["confidences"]
+            # conf = row["confidences"]
+            prompt_len = len(row["confidences"]) - output_len
+
+            # update cumulative unmask set
+            newly = row["cur_tokens_unmasked"]
+            cumulative_unmasked |= set(newly)
+
+            # print(vals)
+            masked_conf_avgs.append(float(np.mean(conf)))
+            # print(masked_conf_avgs[-1])
+        # 3/0
+
+    df["output_conf_avg"] = masked_conf_avgs
+    return df
 
 def load_and_transform(path: str) -> pd.DataFrame:
     """Load a stats.json file and compute derived fields."""
@@ -37,6 +114,9 @@ def load_and_transform(path: str) -> pd.DataFrame:
     # Difference in unmasked tokens between consecutive denoise steps
     df["num_cur_unmasked_tokens"] = df.groupby("id")["num_unmasked_tokens"].diff().fillna(df["num_unmasked_tokens"])
     df["full_cur_unmask_progress"] = df["num_cur_unmasked_tokens"] / df["output_length"]
+    
+    compute_masked_confidence(df)
+    compute_output_confidence(df)
     
     return df[[
         "id",
@@ -54,7 +134,9 @@ def load_and_transform(path: str) -> pd.DataFrame:
         "full_cur_unmask_progress",
         "block_progress",
         "block_unmask_progress",
-        "denoise_ratio"
+        "denoise_ratio",
+        "masked_conf_avg",
+        "output_conf_avg",
     ]]
 
 def train_and_evaluate(train_path: Union[str, list[str]],
@@ -75,7 +157,9 @@ def train_and_evaluate(train_path: Union[str, list[str]],
         "full_unmask_progress",
         "block_progress",
         "block_unmask_progress",
-        "full_cur_unmask_progress",
+        # "full_cur_unmask_progress",
+        "masked_conf_avg",
+        "output_conf_avg",
         # "denoise_ratio"
         # "num_cur_unmasked_tokens",
     ]
@@ -160,19 +244,19 @@ def train_and_evaluate(train_path: Union[str, list[str]],
     
     
     # # zip features and importances
-    feature_importances = sorted(zip(X_train.columns, model.feature_importance()), key=lambda x: x[1], reverse=True)
-    print("Feature importances:")
-    for feature, importance in feature_importances:
-        print(f"  {feature}: {importance}")
+    # feature_importances = sorted(zip(X_train.columns, model.feature_importance()), key=lambda x: x[1], reverse=True)
+    # print("Feature importances:")
+    # for feature, importance in feature_importances:
+    #     print(f"  {feature}: {importance}")
     # # model.save_model("denoise_ratio_model.txt")
 
     # save the model and features used to ./models
-    model_path = "models/lgb/model.bin"
-    features_path = "models/lgb/features.txt"
+    model_path = "models/lgb/model1.bin"
+    features_path = "models/lgb/features1.txt"
     import os
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     os.makedirs(os.path.dirname(features_path), exist_ok=True)
-    model.save_model(model_path)
+    # model.save_model(model_path)
     with open(features_path, "w") as f:
         for feature in included_features:
             f.write(f"{feature}\n")
@@ -202,6 +286,8 @@ def train_and_evaluate(train_path: Union[str, list[str]],
         results_df["y_test_steps"] = y_test
         results_df["y_pred_ratio"] = (y_pred / test_set["output_length"])
         results_df["y_test_ratio"] = (y_test / test_set["output_length"])
+    
+    print(results_df.head())
 
     rmse_steps = root_mean_squared_error(results_df["y_test_steps"], results_df["y_pred_steps"])
     rmse_ratio = root_mean_squared_error(results_df["y_test_ratio"], results_df["y_pred_ratio"])
@@ -214,7 +300,9 @@ def train_and_evaluate(train_path: Union[str, list[str]],
 
     # plot error vs. full_unmask_progress
     results_df["full_unmask_progress_rounded"] = results_df["full_unmask_progress"].round(1)
-    results_df["error"] = (results_df["y_test_steps"] - results_df["y_pred_steps"]) / results_df["y_pred_steps"]
+    results_df["masked_tokens_left"] = results_df["output_length"] - results_df["num_unmasked_tokens"]
+    results_df["error"] = (results_df["y_test_steps"] - results_df["y_pred_steps"]) / results_df["masked_tokens_left"]
+    results_df["error"] = (results_df["y_test_steps"] - results_df["y_pred_steps"])
     plt.figure(figsize=(10,5))
     results_df.boxplot(column="error", by="full_unmask_progress_rounded",
                           grid=False, showfliers=False)
@@ -266,11 +354,19 @@ def train_and_evaluate(train_path: Union[str, list[str]],
 train_and_evaluate(
     # "GSAI-ML_LLaDA-8B-Base_prefix_step_estimator.json",
     [
-        "../../step_data/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
-        "../../step_data/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
-        "../../step_data/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
-        "../../step_data/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
-        "../../step_data/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
+        # "../../step_data_1106/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
+        # "../../step_data_1106/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block8_conf0.9.json",
+        # "../../step_data_1106/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block32_conf0.9.json",
+        # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
+        # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
+        # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
+        # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
+        # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
+        "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
+        "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
+        "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
+        "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
+        "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
         # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block16_conf0.8_out256.json",
         # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block16_conf0.8_out512.json",
         # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block16_conf0.9_out256.json",
@@ -281,7 +377,19 @@ train_and_evaluate(
         # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block32_conf0.9_out512.json",
     ],
     # [
-    #     "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block16_conf0.8_out512.json",
+    #     # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
+    #     # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
+    #     # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
+    #     # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
+    #     # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
+    #     # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
+    #     # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
+    #     # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
+    #     # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
+    #     # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
+    #     # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
+    #     # "../../step_data_1106/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block32_conf0.9.json",
+    #     # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block16_conf0.8_out512.json",
     # ]
 )
 

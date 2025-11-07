@@ -22,7 +22,9 @@ class StepStats:
     block_num_unmasked_tokens: int
     block_size: int
 
-    confidence_threshold: Optional[float] = None # to be updated by scheduler
+    confidence_threshold: float
+    last_recompute_avg_output_confidence: float
+    cur_avg_output_confidence: float
     
 
 class StepEstimator:

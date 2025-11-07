@@ -595,8 +595,10 @@ class Scheduler(SchedulerInterface):
 
             # Check for stop and update request status.
             if new_token_ids:
-                new_token_ids, stopped = self._update_request_with_output(
-                    request, new_token_ids)
+                stats, new_token_ids, stopped = self._update_request_with_output(
+                    request, new_token_ids, 
+                    scheduler_output.confidence_thresholds[req_id], 
+                    model_runner_output.avg_output_confidences[req_index])
 
             # Stop checking for pooler models.
             pooler_output = None
@@ -708,12 +710,18 @@ class Scheduler(SchedulerInterface):
         self,
         request: Request,
         new_token_ids: list[tuple[int, int]],
+        confidence_threshold: float,
+        avg_output_confidence: float,
     ) -> tuple[list[tuple[int, int]], bool]:
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.
         stopped = False
-        request.append_unmasked_token_ids(new_token_ids)
+        stats = request.update_from_output(
+            new_token_ids,
+            confidence_threshold,
+            avg_output_confidence,
+        )
         stopped = check_stop(request, self.max_model_len)
         # for num_new, output_token_id in enumerate(new_token_ids, 1):
         #     request.append_output_token_ids(output_token_id)
