@@ -1051,6 +1051,10 @@ class UrgentOpportunisticScheduler(SchedulerInterface):
                 for req_id in self.executor_states[src_ex_id].req_ids:
                     if req_id in promoted_req_ids:
                         continue
+                    if not can_migrate(self.requests[req_id]):
+                        logger.debug(f"Request {req_id} cannot migrate since not at block boundary.")
+                        requests_in_scheduler_output.add(req_id)
+                        continue
                     logger.debug(f"Considering request {req_id} on executor {src_ex_id} for promotion to executor {tgt_ex_id}")
                     num_tokens = self.requests[req_id].num_tokens
                     _, src_step_latency = self.get_profile_latency(
@@ -1101,6 +1105,7 @@ class UrgentOpportunisticScheduler(SchedulerInterface):
                             {best_req_id: conf}):
                             new_conf = conf
                             break
+                logger.debug(f"new_conf: {new_conf}. Old conf: {self.request_states[best_req_id].confidence_threshold}")
                 assert new_conf is not None
                 assert new_conf >= self.request_states[best_req_id].confidence_threshold
 
