@@ -22,9 +22,9 @@ class StepStats:
     block_num_unmasked_tokens: int
     block_size: int
 
-    confidence_threshold: float
-    last_recompute_avg_output_confidence: float
-    cur_avg_output_confidence: float
+    confidence_threshold: Optional[float] = None
+    last_recompute_avg_output_confidence: Optional[float] = None
+    cur_avg_output_confidence: Optional[float] = None
     
 
 class StepEstimator:
@@ -110,5 +110,6 @@ class StepEstimator:
         self._new_rows += 1
         
     def predict(self, stats: Union[StepStats, list[StepStats]]) -> Union[float, list[float]]:
+        logger.debug(f"stats for prediction: {stats}")
         assert self.estimator_model is not None, "Estimator model is not initialized."
         return self.estimator_model.predict(stats)

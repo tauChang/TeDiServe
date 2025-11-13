@@ -288,7 +288,7 @@ class EngineCore:
             end_time = time.time()
             # write to a file for profiling
             try:
-                with open(f"executor_profiles/{executor_id}_{TIMESTAMP}.txt", "a") as f:
+                with open(f"{self.vllm_config.experiment_config.experiment_dir}/executor_{executor_id}.txt", "a") as f:
                     # write input_ids size and time
                     f.write(f"{scheduler_output.total_num_scheduled_tokens},"
                             f"{end_time - start_time}\n")
@@ -544,6 +544,9 @@ class EngineCoreProc(EngineCore):
         self.output_thread.start()
 
         self.background_tasks = {} # executor_id -> asyncio.Task
+
+        # for experiment
+        self.num_requests_processed = 0
 
     @contextmanager
     def _perform_handshakes(
@@ -804,7 +807,7 @@ class EngineCoreProc(EngineCore):
         scheduler_outputs = await self.scheduler.schedule()
         end_time = time.time()
         # write to a file
-        with open(f"scheduler_profiles/{TIMESTAMP}.txt", "a") as f:
+        with open(f"{self.vllm_config.experiment_config.experiment_dir}/scheduler_profile.txt", "a") as f:
             f.write(f"{len(self.executors_manager.executors)}, {self.scheduler.get_num_unfinished_requests()}, {end_time - start_time}\n")
 
         logger.debug(f"Scheduler outputs: {scheduler_outputs}")

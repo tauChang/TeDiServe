@@ -26,7 +26,8 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType,
                          CompilationConfig,
                          ConfigFormat, ConfigType, DecodingConfig,
                          DetailedTraceModules, Device, DeviceConfig,
-                         DistributedExecutorBackend, GuidedDecodingBackend,
+                         DistributedExecutorBackend, ExperimentConfig,
+                         GuidedDecodingBackend,
                          GuidedDecodingBackendV1, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelDType, ModelImpl, MultiModalConfig,
@@ -458,6 +459,9 @@ class EngineArgs:
     latency_profile_dir: Optional[str] = ProfileConfig.latency_profile_dir
     num_profile_runs: int = ProfileConfig.num_profile_runs
     num_profile_warmup_runs: int = ProfileConfig.num_profile_warmup_runs
+
+    experiment_dir: Optional[str] = ExperimentConfig.experiment_dir
+    total_num_requests: Optional[int] = ExperimentConfig.total_num_requests
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -910,6 +914,18 @@ class EngineArgs:
                                      **scheduler_kwargs["eval_task"])
         scheduler_group.add_argument("--gen-len",
                                      **scheduler_kwargs["gen_len"])
+        # Experiment arguments
+        experiment_kwargs = get_kwargs(ExperimentConfig)
+        experiment_group = parser.add_argument_group(
+            title="ExperimentConfig",
+            description=ExperimentConfig.__doc__,
+        )
+        experiment_group.add_argument(
+            "--experiment-dir",
+            **experiment_kwargs["experiment_dir"])
+        experiment_group.add_argument(
+            "--total-num-requests",
+            **experiment_kwargs["total_num_requests"])
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1363,6 +1379,11 @@ class EngineArgs:
             latency_profile_dir=self.latency_profile_dir,
             num_profile_runs=self.num_profile_runs,
             num_profile_warmup_runs=self.num_profile_warmup_runs,)
+        
+        experiment_config = ExperimentConfig(
+            experiment_dir=self.experiment_dir,
+            total_num_requests=self.total_num_requests,
+        )
 
         config = VllmConfig(
             model_config=model_config,
@@ -1382,6 +1403,7 @@ class EngineArgs:
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
             additional_config=self.additional_config,
+            experiment_config=experiment_config,
         )
 
         return config

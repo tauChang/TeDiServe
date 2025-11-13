@@ -1,5 +1,6 @@
 from vllm.logger import init_logger
 from vllm.v1.request import Request
+from vllm.config import VllmConfig
 from typing import Dict
 from dataclasses import dataclass
 from collections import deque
@@ -39,11 +40,12 @@ class WorkloadClass:
 
 
 class WorkloadMonitor:
-    def __init__(self, time_window: float = 30.0):
+    def __init__(self, vllm_config: VllmConfig,
+                 time_window: float = 30.0):
         self.request_stats_queue: deque[RequestStats] = deque()
         self.time_window = time_window
         self.start_time = time.time()
-        self.workload_history_path = f"./workload_history_{TIMESTAMP}.json"
+        self.workload_history_path = f"{vllm_config.experiment_config.experiment_dir}/workload_history.json"
         
     
     def record_request_arrival(self, request: Request):

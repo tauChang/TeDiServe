@@ -19,6 +19,7 @@ from importlib.util import find_spec
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
                     Protocol, TypeVar, Union, cast, get_args)
 
+import time
 import regex as re
 import torch
 from pydantic import (ConfigDict, SkipValidation, TypeAdapter, field_validator,
@@ -4436,6 +4437,19 @@ class CompilationConfig:
                 "vllm.mamba_mixer2",
             ]
 
+@config
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
+class ExperimentConfig:
+    """Configuration for experiment-related settings."""
+
+    experiment_dir: str = f"experiments/{time.strftime('%Y%m%d_%H%M%S')}"
+    """The directory of the experiment. All logs will be saved under this."""
+
+    total_num_requests: Optional[int] = None
+    """Total number of requests to process in the experiment. 
+    Shuts down the server after processing this many requests.
+    If None, runs indefinitely."""
+    
 
 @config
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
@@ -4501,6 +4515,9 @@ class VllmConfig:
     """Additional config for specified platform. Different platforms may
     support different configs. Make sure the configs are valid for the platform
     you are using. Contents must be hashable."""
+    experiment_config: ExperimentConfig = field(
+        default_factory=ExperimentConfig)
+    """Experiment related configuration."""
     instance_id: str = ""
     """The ID of the vLLM instance."""
 

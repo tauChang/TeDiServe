@@ -144,7 +144,7 @@ class Request:
 
         self.last_recompute_avg_output_confidence = None
         # TODO: fix SLO
-        self.latency_slo = 8
+        self.latency_slo = 3.2
 
 
     @classmethod
@@ -283,7 +283,7 @@ class Request:
     
     @property
     def is_start_of_new_block(self) -> bool:
-        logger.debug(f"self.cur_block_num_unmasked_tokens: {self.cur_block_num_unmasked_tokens}")
+        # logger.debug(f"self.cur_block_num_unmasked_tokens: {self.cur_block_num_unmasked_tokens}")
         return self.cur_block_num_unmasked_tokens == 0
 
     @property

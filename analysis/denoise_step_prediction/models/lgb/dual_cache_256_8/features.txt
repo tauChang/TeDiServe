@@ -3,3 +3,5 @@ full_progress
 full_unmask_progress
 block_progress
 block_unmask_progress
+last_recompute_avg_output_confidence
+cur_avg_output_confidence

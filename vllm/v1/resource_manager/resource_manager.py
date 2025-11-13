@@ -300,12 +300,12 @@ class ResourceManager:
         self.bundle_to_node: Dict[int, str] = {}
         self.config: Dict[int, List[int]] = {}
 
-        self.workload_monitor = WorkloadMonitor(time_window=30.0)
+        self.workload_monitor = WorkloadMonitor(vllm_config, time_window=30.0)
         # delay until first time reconfig planner is called to create, since reconfig planner needs latency profile,
         # which requires vllm_config.cluster_config.placement_group.bundle_specs to be initialized
         self.reconfig_planner = None 
         self.config_history: List[ConfigRecord] = []
-        self.config_history_path = f"./config_history_{TIMESTAMP}.json"
+        self.config_history_path = f"{self.vllm_config.experiment_config.experiment_dir}/config_history.json"
     
     def write_config_history(self):
         """Write config history to JSON file on disk."""

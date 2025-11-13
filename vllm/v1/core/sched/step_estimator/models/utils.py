@@ -20,6 +20,8 @@ def transform_features(step_stats: Union[StepStats, list[StepStats]],
         "block_num_unmasked_tokens": lambda s: s.block_num_unmasked_tokens,
         "block_size": lambda s: s.block_size,
         "confidence_threshold": lambda s: s.confidence_threshold,
+        "last_recompute_avg_output_confidence": lambda s: s.last_recompute_avg_output_confidence,
+        "cur_avg_output_confidence": lambda s: s.cur_avg_output_confidence,
     }
 
     derived_attrs = {

@@ -13,8 +13,20 @@ class MILPReconfigPlanner:
     def __init__(self,
                  vllm_config: VllmConfig = None,
                  latency_profile_paths: dict[int, str] = None,
+                 cache_prefix: bool = None, # for simulation
+                 cache_suffix: bool = None, # for simulation
+                 denoise_block_size: int = None, # for simulation
                  ):
         self.vllm_config = vllm_config
+        if vllm_config is not None:
+            self.cache_prefix = vllm_config.model_config.cache_prefix
+            self.cache_suffix = vllm_config.model_config.cache_suffix
+            self.denoise_block_size = vllm_config.model_config.denoise_block_size
+        else:
+            self.cache_prefix = cache_prefix
+            self.cache_suffix = cache_suffix
+            self.denoise_block_size = denoise_block_size
+
         # TODO
         self.candidate_confidence_thresholds = [.9, .8, .7, .6, .5]
         self.confidence_unmasked_tokens_per_step = {.9: 3.18, .8: 4.12, .7: 5.14, .6: 6.25, .5: 7.14}
@@ -283,6 +295,15 @@ class MILPReconfigPlanner:
 
         G_n = {node: len(node_to_bundles[node]) for node in N}
 
+        DB_k = {}
+        for k in K:
+            if self.cache_prefix and self.cache_suffix:
+                DB_k[k] = self.denoise_block_size
+            elif self.cache_prefix and not self.cache_suffix:
+                DB_k[k] = O_k[k] // 2
+            else:
+                DB_k[k] = 0
+
         # Create model
         m = Model("reconfig_planner")
         
@@ -294,13 +315,17 @@ class MILPReconfigPlanner:
         # ------ Auxiliary decision variables ------
         # Steps per class k at confidence c
         s_kc = m.addVars(K, C, lb=0.0, vtype=GRB.CONTINUOUS, name="s_kc")
+        sp_kc = m.addVars(K, C, lb=0.0, vtype=GRB.CONTINUOUS, name="sp_kc")
 
         # Steps per class k executed on TP degree g
         s_kg = m.addVars(K, G, lb=0.0, vtype=GRB.CONTINUOUS, name="s_kg")
+        sp_kg = m.addVars(K, G, lb=0.0, vtype=GRB.CONTINUOUS, name="sp_kg")
 
         # Binary batch-bin choice per TP degree g
         z_gb = {(g,b): m.addVar(vtype=GRB.BINARY, name=f"z[{g},{b}]")
                 for g in G for b in B[g]}
+        zp_gb = {(g,b): m.addVar(vtype=GRB.BINARY, name=f"zp[{g},{b}]")
+                    for g in G for b in B[g]}
         
         # SLO slack per class k
         r_k = m.addVars(K, lb=0.0, vtype=GRB.CONTINUOUS, name="r_k")
@@ -325,29 +350,53 @@ class MILPReconfigPlanner:
         m.setObjectiveN(executor_count_obj, index=2, priority=0, name="min_executors")
         
         # --- Constraints ---
+        # 0) If no caching, enforce sp_kc, sp_kg to be zero (all steps are recomputes)
+        if not self.cache_prefix and not self.cache_suffix:
+            for k in K:
+                for c in C:
+                    m.addConstr(sp_kc[k,c] == 0, name=f"no_cache_spkc[{k},{c}]")
+                for g in G:
+                    m.addConstr(sp_kg[k,g] == 0, name=f"no_cache_spkg[{k},{g}]")
+        else:
+            # If caching enabled, ensure sp_kc and sp_kg are consistent
+            for k in K:
+                m.addConstr(
+                    quicksum(sp_kc[k,c] for c in C) == O_k[k] // DB_k[k],
+                    name=f"cache_step_consistency[{k}]"
+                )
+        
         # 1) Token completion
         for k in K:
-            m.addConstr(quicksum(T_c[c] * s_kc[k, c] for c in C) == O_k[k],
+            m.addConstr(quicksum(T_c[c] * (s_kc[k, c] + sp_kc[k, c]) for c in C) == O_k[k],
                         name=f"token_completion[{k}]")
             
         # 2) Step accounting
         for k in K:
+            # m.addConstr(quicksum((s_kc[k, c] + sp_kc[k, c]) for c in C)
+            #             == quicksum((s_kg[k, g] + sp_kg[k, g]) for g in G),
+            #             name=f"step_accounting[{k}]")
             m.addConstr(quicksum(s_kc[k, c] for c in C)
                         == quicksum(s_kg[k, g] for g in G),
                         name=f"step_accounting[{k}]")
+            m.addConstr(quicksum(sp_kc[k, c] for c in C)
+                        == quicksum(sp_kg[k, g] for g in G),
+                        name=f"step_accounting_p[{k}]")
         
         # 3) SLO
         for k in K:
             lhs = quicksum(
-                s_kg[k, g] * quicksum(L_gb[(g,b)] * z_gb[(g,b)] for b in B[g])
+                s_kg[k, g] * quicksum(L_gb[(g,b)] * z_gb[(g,b)] for b in B[g]) + \
+                sp_kg[k, g] * quicksum(L_gb[(g,b)] * zp_gb[(g,b)] for b in B[g])
                 for g in G
             )
-            m.addConstr(lhs + r_k[k] <= SLO_k[k], name=f"SLO[{k}]")
+            m.addConstr(lhs + r_k[k] == SLO_k[k], name=f"SLO[{k}]")
         
         # 4) Batch size selection
         for g in G:
             m.addConstr(quicksum(z_gb[(g,b)] for b in B[g]) == 1,
                         name=f"one_bin[{g}]")
+            m.addConstr(quicksum(zp_gb[(g,b)] for b in B[g]) == 1,
+                        name=f"one_binp[{g}]")
         
         # 5) Node capacity
         for n in N:
@@ -357,13 +406,49 @@ class MILPReconfigPlanner:
             )
 
         # 6) Aggregate Token Throughput
-        M_big = 1e6  # Big-M constant
         for g in G:
-            for b in B[g]:
-                lhs = quicksum(RPS_k[k] * s_kg[k,g] * (P_k[k] + O_k[k]) for k in K)
-                rhs = (b / L_gb[(g,b)]) * quicksum(x_ng[n,g] for n in N)
-                m.addConstr(lhs <= rhs + M_big * (1 - z_gb[(g,b)]),
-                            name=f"token_throughput_{g}_{b}")
+            # sec per request-step for recompute, linear via z
+            rec_sec_per_reqstep = quicksum(z_gb[(g,b)]  * (L_gb[(g,b)] / b) for b in B[g])
+            # sec per request-step for cache, linear via zp
+            cache_sec_per_reqstep = quicksum(zp_gb[(g,b)] * (L_gb[(g,b)] / b) for b in B[g])
+
+            lhs = quicksum(
+                RPS_k[k] * (
+                    s_kg[k,g]  * (P_k[k] + O_k[k]) * rec_sec_per_reqstep +
+                    sp_kg[k,g] * DB_k[k]           * cache_sec_per_reqstep
+                )
+                for k in K
+            )
+            rhs = quicksum(x_ng[n,g] for n in N)  # executor-seconds per second
+            m.addConstr(lhs <= rhs, name=f"time_budget_g{g}")
+        # M_big = 1e9  # Big-M constant
+        # for g in G:
+        #     for b in B[g]:
+        #         lhs = quicksum(RPS_k[k] * (s_kg[k,g] * (P_k[k] + O_k[k]) + (sp_kg[k,g] * DB_k[k])) for k in K)
+        #         rhs = (b / L_gb[(g,b)]) * quicksum(x_ng[n,g] for n in N)
+        #         m.addConstr(lhs <= rhs + M_big * (1 - z_gb[(g,b)]),
+        #                     name=f"token_throughput_{g}_{b}")
+
+        
+        # for g in G:
+        #     lhs = quicksum(RPS_k[k] * s_kg[k,g] * (P_k[k] + O_k[k]) for k in K)
+        #     # rhs = (b / L_gb[(g,b)]) * quicksum(x_ng[n,g] for n in N)
+        #     rhs = quicksum(z_gb[g,b] * (b / L_gb[g,b]) for b in B[g]) \
+        #         * quicksum(x_ng[n,g] for n in N)
+        #     m.addConstr(lhs <= rhs,
+        #                 name=f"token_throughput_{g}")
+        
+        # lhs = quicksum(
+        #     RPS_k[k] * quicksum(s_kg[k, g] * (P_k[k] + O_k[k]) for g in G) / SLO_k[k]
+        #     for k in K
+        # )
+        # rhs = quicksum(
+        #     z_gb[(g, b)] * b * (1 / L_gb[(g, b)]) *
+        #     quicksum(x_ng[n, g] for n in N)
+        #     for g in G
+        #     for b in B[g]
+        # )
+        # m.addConstr(lhs <= rhs, name="global_token_throughput")
         
         # 7) Each batch must have at least one request
         for g in G:
@@ -383,6 +468,8 @@ class MILPReconfigPlanner:
         m.update()
         m.setParam("MIPGap", 0.01)
         m.setParam("TimeLimit", 10)
+        m.ObjNAbsTol = 0.0
+        m.ObjNRelTol = 0.0
         m.optimize()
 
         if m.SolCount == 0:
@@ -400,8 +487,9 @@ class MILPReconfigPlanner:
                     m.setParam('ObjNumber', i)
                     logger.info(f"Objective {i}: value = {m.ObjNVal:.3f}")
                 for g in G:
-                    chosen_bin = [b for b in B[g] if z_gb[(g,b)].X > 0.5]
-                    logger.info(f"TP={g} batch={chosen_bin}")
+                    recompute_chosen_bin = [b for b in B[g] if z_gb[(g,b)].X > 0.5]
+                    cache_chosen_bin = [b for b in B[g] if zp_gb[(g,b)].X > 0.5]
+                    logger.info(f"TP={g} recompute batch={recompute_chosen_bin} cache batch={cache_chosen_bin}")
                     total_inst = sum(x_ng[n,g].X for n in N)
                     logger.info(f"  total instances = {total_inst:.2f}")
                 
@@ -410,12 +498,18 @@ class MILPReconfigPlanner:
                     logger.info(f"Class {k}:")
                     for c in C:
                         logger.info(f"  Confidence {c}: s_kc = {s_kc[k,c].X:.2f}")
+                        logger.info(f"  Confidence {c}: sp_kc = {sp_kc[k,c].X:.2f}")
+                    
+                for k in K:
+                    logger.info(f"Class {k}: r_k = {r_k[k].X:.2f}")
                 
                 # print s_kg
                 for k in K:
                     logger.info(f"Class {k}:")
                     for g in G:
                         logger.info(f"  TP {g}: s_kg = {s_kg[k,g].X:.2f}")
+                        logger.info(f"  TP {g}: sp_kg = {sp_kg[k,g].X:.2f}")
+                
 
                 # Prepare new configuration
             else:
@@ -643,7 +737,7 @@ class MILPReconfigPlanner:
     #     for g, need in sorted(required_counts.items(), reverse=True):
     #         if need <= 0:
     #             continue
-    #         # Try to pack large g’s first on any node with enough bundles
+    #         # Try to pack large g's first on any node with enough bundles
     #         for _ in range(need):
     #             placed = False
     #             for node_ip, blist in available_by_node.items():

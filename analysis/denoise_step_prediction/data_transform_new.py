@@ -103,6 +103,7 @@ def compute_output_confidence(df: pd.DataFrame):
 def load_and_transform(path: str) -> pd.DataFrame:
     """Load a stats.json file and compute derived fields."""
     df = pd.read_json(path, lines=True)
+    df["source_file"] = path
     df["full_progress"] = (df["num_denoise_ran"]+1) / df["output_length"]
     df["full_unmask_progress"] = df["num_unmasked_tokens"] / df["output_length"]
     df["block_progress"] = df["block"] / (df["output_length"] / df["block_size"])
@@ -114,11 +115,12 @@ def load_and_transform(path: str) -> pd.DataFrame:
     # Difference in unmasked tokens between consecutive denoise steps
     df["num_cur_unmasked_tokens"] = df.groupby("id")["num_unmasked_tokens"].diff().fillna(df["num_unmasked_tokens"])
     df["full_cur_unmask_progress"] = df["num_cur_unmasked_tokens"] / df["output_length"]
-    
-    compute_masked_confidence(df)
-    compute_output_confidence(df)
-    
+
+    # compute_masked_confidence(df)
+    # compute_output_confidence(df)
+
     return df[[
+        "source_file",
         "id",
         "confidence_threshold",
         "num_unmasked_tokens",
@@ -135,9 +137,27 @@ def load_and_transform(path: str) -> pd.DataFrame:
         "block_progress",
         "block_unmask_progress",
         "denoise_ratio",
-        "masked_conf_avg",
-        "output_conf_avg",
+        # "masked_conf_avg",
+        # "output_conf_avg",
+        "last_recompute_avg_output_confidence",
+        "cur_avg_output_confidence"
     ]]
+    
+def mape_objective(y_pred, dataset):
+    """Custom MAPE objective for LightGBM."""
+    y_true = dataset.get_label()
+    eps = 1e-6  # avoid div by zero
+    grad = np.sign(y_pred - y_true) / (np.abs(y_true) + eps)
+    hess = np.ones_like(y_true) / (np.abs(y_true) + eps)
+    return grad, hess
+
+def mape_metric(y_pred, dataset):
+    """MAPE metric for LightGBM."""
+    y_true = dataset.get_label()
+    eps = 1e-6
+    mape = np.mean(np.abs((y_true - y_pred) / (y_true + eps)))
+    return "mape", mape, False  # lower is better
+
 
 def train_and_evaluate(train_path: Union[str, list[str]],
                        test_path: Optional[Union[str, list[str]]] = None) -> None:
@@ -158,8 +178,10 @@ def train_and_evaluate(train_path: Union[str, list[str]],
         "block_progress",
         "block_unmask_progress",
         # "full_cur_unmask_progress",
-        "masked_conf_avg",
-        "output_conf_avg",
+        # "masked_conf_avg",
+        # "output_conf_avg",
+        # "last_recompute_avg_output_confidence",
+        # "cur_avg_output_confidence",
         # "denoise_ratio"
         # "num_cur_unmasked_tokens",
     ]
@@ -173,6 +195,8 @@ def train_and_evaluate(train_path: Union[str, list[str]],
     df = pd.concat([load_and_transform(p) \
         for p in [*train_path, *(test_path if test_path else [])]], 
                    ignore_index=True)
+    df["id"] = df["source_file"] + "_" + df["id"].astype(str)
+    print(df)
     if test_path is None:
         unique_ids = df["id"].unique()
         train_ids, test_ids = train_test_split(
@@ -180,8 +204,10 @@ def train_and_evaluate(train_path: Union[str, list[str]],
         )
         title_suffix = " (80/20 split)"
     else:
-        train_ids = pd.concat([pd.read_json(p, lines=True)["id"] for p in train_path], ignore_index=True).unique()
-        test_ids  = pd.concat([pd.read_json(p, lines=True)["id"] for p in test_path], ignore_index=True).unique()
+        # train_ids = pd.concat([pd.read_json(p, lines=True)["id"] for p in train_path], ignore_index=True).unique()
+        # test_ids  = pd.concat([pd.read_json(p, lines=True)["id"] for p in test_path], ignore_index=True).unique()
+        train_ids = df[df["source_file"].isin(train_path)]["id"].unique()
+        test_ids  = df[df["source_file"].isin(test_path)]["id"].unique()
         title_suffix = f" (Train on {', '.join(train_path)}, Test on {', '.join(test_path)})"
     
     train_set = df[df["id"].isin(train_ids)]
@@ -191,8 +217,8 @@ def train_and_evaluate(train_path: Union[str, list[str]],
     y_train = train_set[objective]
     y_test  = test_set[objective]
     
-    # print(f"X_test: {X_test}")
     print(f"X_train: {X_train}")
+    print(f"X_test: {X_test}")
     # Train model
 
     # use a model that just predicts the mean based on confidence threshold
@@ -222,12 +248,21 @@ def train_and_evaluate(train_path: Union[str, list[str]],
             # 'metric': 'quantile',
             # 'alpha': 0.5,  # for quantile regression
             # 'learning_rate': 0.2,
-            # 'num_leaves': 255,
+            # 'num_leaves': 800,
             # 'max_depth': 16,
             'verbose': -1
         },
         train_data,
     )
+    # model = lgb.train(
+    #     {
+    #         'objective': mape_objective,
+    #         'metric': 'None',
+    #         'verbose': -1
+    #     },
+    #     train_data,
+    #     feval=mape_metric
+    # )
 
     # import xgboost as xgb
     # model = xgb.XGBRegressor(
@@ -243,20 +278,22 @@ def train_and_evaluate(train_path: Union[str, list[str]],
     # model.fit(X_train, y_train)
     
     
-    # # zip features and importances
-    # feature_importances = sorted(zip(X_train.columns, model.feature_importance()), key=lambda x: x[1], reverse=True)
-    # print("Feature importances:")
-    # for feature, importance in feature_importances:
-    #     print(f"  {feature}: {importance}")
-    # # model.save_model("denoise_ratio_model.txt")
+    # zip features and importances
+    feature_importances = sorted(zip(X_train.columns, model.feature_importance()), key=lambda x: x[1], reverse=True)
+    print("Feature importances:")
+    for feature, importance in feature_importances:
+        print(f"  {feature}: {importance}")
+    # model.save_model("denoise_ratio_model.txt")
 
     # save the model and features used to ./models
-    model_path = "models/lgb/model1.bin"
-    features_path = "models/lgb/features1.txt"
+    name = "dual_cache_256_8"
+    name = "tmp"
+    model_path = f"models/lgb/{name}/model.bin"
+    features_path = f"models/lgb/{name}/features.txt"
     import os
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     os.makedirs(os.path.dirname(features_path), exist_ok=True)
-    # model.save_model(model_path)
+    model.save_model(model_path)
     with open(features_path, "w") as f:
         for feature in included_features:
             f.write(f"{feature}\n")
@@ -265,9 +302,9 @@ def train_and_evaluate(train_path: Union[str, list[str]],
     import time
     # predict one by one 
     pred_time = []
-    for i in range(len(X_test)):
+    for i in range(min(500, len(X_test))):
         start_time = time.time()
-        _ = model.predict(X_test.iloc[i:i+1])
+        _ = model.predict(X_test.iloc[i:i+5])
         pred_time.append(time.time() - start_time)
     print(f"Average prediction time per sample (single): {sum(pred_time) / len(pred_time):.6f} seconds")
     
@@ -291,6 +328,16 @@ def train_and_evaluate(train_path: Union[str, list[str]],
 
     rmse_steps = root_mean_squared_error(results_df["y_test_steps"], results_df["y_pred_steps"])
     rmse_ratio = root_mean_squared_error(results_df["y_test_ratio"], results_df["y_pred_ratio"])
+    # absolute percentage error of step
+    # exclude those with y_test_steps = 0
+    # results_df = results_df[results_df["y_test_steps"] > 0]
+    # abs_percentage_error = np.abs(results_df["y_test_steps"] - results_df["y_pred_steps"]) / results_df["y_test_steps"]
+    # mean_abs_percentage_error = abs_percentage_error.mean()
+    # print(f"Mean Absolute Percentage Error (steps): {mean_abs_percentage_error:.4f}")
+    numerator = np.abs(results_df["y_test_steps"] - results_df["y_pred_steps"]).sum()
+    denominator = np.abs(results_df["y_test_steps"]).sum()
+    wmape = numerator / denominator
+    print(f"WMAPE (steps): {wmape:.4f}")
     print(f"RMSE (ratio): {rmse_ratio:.4f}")
     print(f"RMSE (steps): {rmse_steps:.4f}")
     r2_steps  = r2_score(results_df["y_test_steps"], results_df["y_pred_steps"])
@@ -350,10 +397,39 @@ def train_and_evaluate(train_path: Union[str, list[str]],
 # train_and_evaluate("GSAI-ML_LLaDA-8B-Base_prefix_step_estimator.json")
 # train_and_evaluate("../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_128_step_estimator.json")
 # train_and_evaluate("../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block32_conf0.8_out256.json")
-
+cross_test = False
 train_and_evaluate(
     # "GSAI-ML_LLaDA-8B-Base_prefix_step_estimator.json",
     [
+        "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
+        "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
+        "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
+        "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
+        "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block32_conf0.9.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block32_conf0.8.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block32_conf0.7.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block32_conf0.6.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block32_conf0.5.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block32_conf0.9.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block32_conf0.8.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block32_conf0.7.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block32_conf0.6.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block32_conf0.5.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block8_conf0.9.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block8_conf0.8.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block8_conf0.7.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block8_conf0.6.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block8_conf0.5.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block8_conf0.9.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block8_conf0.8.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block8_conf0.7.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block8_conf0.6.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block8_conf0.5.json",
+        # "../../step_data_1107_combined/gsm8k_/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
+        # "../../step_data_1107_combined/gsm8k_/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
+        # "../../step_data_1107_combined/gsm8k_/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
+        # "../../step_data_1107_combined/gsm8k_/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
         # "../../step_data_1106/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
         # "../../step_data_1106/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block8_conf0.9.json",
         # "../../step_data_1106/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block32_conf0.9.json",
@@ -362,11 +438,11 @@ train_and_evaluate(
         # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
         # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
         # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
-        "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
-        "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
-        "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
-        "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
-        "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
+        # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
+        # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
+        # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
+        # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
+        # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
         # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block16_conf0.8_out256.json",
         # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block16_conf0.8_out512.json",
         # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block16_conf0.9_out256.json",
@@ -376,21 +452,32 @@ train_and_evaluate(
         # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block32_conf0.9_out256.json",
         # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block32_conf0.9_out512.json",
     ],
-    # [
-    #     # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
-    #     # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
-    #     # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
-    #     # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
-    #     # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
-    #     # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
-    #     # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
-    #     # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
-    #     # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
-    #     # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
-    #     # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
-    #     # "../../step_data_1106/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block32_conf0.9.json",
-    #     # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block16_conf0.8_out512.json",
-    # ]
+    [
+        "../../step_data_1107_combined/gsm8k_/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
+        # "../../step_data_1107_combined/gsm8k_/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
+        # "../../step_data_1107_combined/gsm8k_/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
+        # "../../step_data_1107_combined/gsm8k_/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block32_conf0.9.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block32_conf0.8.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block32_conf0.7.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block32_conf0.6.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block32_conf0.5.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block32_conf0.9.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block32_conf0.8.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block32_conf0.7.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block32_conf0.6.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block32_conf0.5.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block8_conf0.9.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block8_conf0.8.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block8_conf0.7.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block8_conf0.6.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block8_conf0.5.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block8_conf0.9.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block8_conf0.8.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block8_conf0.7.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block8_conf0.6.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block8_conf0.5.json",
+    ] if cross_test else None
 )
 
 # 2) Train on one file, test on another

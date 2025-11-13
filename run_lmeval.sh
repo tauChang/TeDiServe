@@ -1,27 +1,38 @@
 #!/bin/bash
 
 # ----------------------
+EXPERIMENT_DIR=./experiment_dir/$(date +"%Y%m%d_%H%M%S")
+mkdir -p $EXPERIMENT_DIR
+# copy this file to experiment dir for record keeping
+cp run_lmeval.sh $EXPERIMENT_DIR/
 # VLLM Args
 MODEL=GSAI-ML/LLaDA-8B-Instruct
-NUM_GPUS_PER_MODEL_EXECUTOR=1,1
+NUM_GPUS_PER_MODEL_EXECUTOR=1,1,1,1
 # SCHEDULER_CLASS=vllm.v1.core.sched.cluster_scheduler.ClusterScheduler
-# SCHEDULER_CLASS=vllm.v1.core.sched.urgent_scheduler.UrgentOpportunisticScheduler
-# SCHEDULER_CLASS=vllm.v1.core.sched.urgent_opportunistic_scheduler.UrgentOpportunisticScheduler
-SCHEDULER_CLASS=vllm.v1.core.sched.recompute_disaggregated_scheduler.RecomputeDisaggregatedScheduler
+SCHEDULER_CLASS=vllm.v1.core.sched.urgent_opportunistic_scheduler.UrgentOpportunisticScheduler
+# SCHEDULER_CLASS=vllm.v1.core.sched.uos.UrgentOpportunisticScheduler
+# SCHEDULER_CLASS=vllm.v1.core.sched.tedi_scheduler.TediScheduler
+# SCHEDULER_CLASS=vllm.v1.core.sched.recompute_disaggregated_scheduler.RecomputeDisaggregatedScheduler
 DEFAULT_CONFIDENCE_THRESHOLD=0.9
 NUM_PROFILE_RUNS=8
 NUM_PROFILE_WARMUP_RUNS=3
 STEP_ESTIMATOR_MODEL_CLASS=vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine.LightGradientBoostMachine
-STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/model.bin
-STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/features.txt
-KV_TRANSFER_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+# STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/model.bin
+# STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/features.txt
+# STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/no_cache_256_32/model.bin
+# STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/no_cache_256_32/features.txt
+STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_256_32/model.bin
+STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_256_32/features.txt
+# KV_TRANSFER_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
 # CONF=599
 # STEP_DATA_DIR=./step_data_dynamic_${CONF}
-STEP_DATA_DIR=./step_data_1104
+STEP_DATA_DIR=$EXPERIMENT_DIR/step_data
 
-DENOISE_BLOCK_SIZE=8
+DENOISE_BLOCK_SIZE=32
 CACHE_PREFIX=true
 CACHE_SUFFIX=true
+
+SLO=3.2
 
 # ----------------------
 # LMEval Args
@@ -30,11 +41,19 @@ TASK=gsm8k
 # AVG_INTER_ARRIVAL_TIME=0.5
 # ARRIVAL_PATTERN="100:3,100:1,100:2"
 # ARRIVAL_PATTERN="200:1.5"
-ARRIVAL_PATTERN="30:1"
-NUM_CONCURRENT=30
+ARRIVAL_PATTERN="100:3"
+# Calculate TOTAL_NUM_REQUESTS based on ARRIVAL_PATTERN
+if [ -n "$ARRIVAL_PATTERN" ]; then
+    TOTAL_NUM_REQUESTS=$(echo "$ARRIVAL_PATTERN" | awk -F, '{sum=0; for (i=1; i<=NF; i++) {split($i, a, ":"); sum+=a[1]} print sum}')
+else
+    TOTAL_NUM_REQUESTS=$LIMIT
+fi
+NUM_CONCURRENT=$TOTAL_NUM_REQUESTS
 OUTPUT_LENGTH=256
 WRITE_RESULTS=true
-RESULTS_DIR=eval/results_1105
+RESULTS_DIR=$EXPERIMENT_DIR/results
+# make results_dir prefix with confidence
+# RESULTS_DIR="${RESULTS_DIR}_conf${DEFAULT_CONFIDENCE_THRESHOLD}"
 
 # ----------------------
 # Output path name
@@ -66,6 +85,8 @@ VLLM_CMD="vllm serve --trust-remote-code ${MODEL} \
     --step-estimator-model-path ${STEP_ESTIMATOR_MODEL_PATH} \
     --step-estimator-features-path ${STEP_ESTIMATOR_FEATURES_PATH} \
     --step-data-dir ${STEP_DATA_DIR} \
+    --experiment-dir ${EXPERIMENT_DIR} \
+    --total-num-requests ${TOTAL_NUM_REQUESTS} \
     "
 
 if [ "$CACHE_PREFIX" = "true" ]; then
@@ -109,14 +130,14 @@ SESSION=eval_session
 tmux new-session -d -s $SESSION
 
 # Pane 1: vllm serve
-tmux send-keys -t $SESSION "$VLLM_CMD 2>&1 | tee dllm_serve_multi.log" C-m
+tmux send-keys -t $SESSION "$VLLM_CMD 2>&1 | tee $EXPERIMENT_DIR/vllm_serve.log dllm_serve_multi.log" C-m
 
 # Split into 3 vertical panes
 tmux split-window -h -t $SESSION
 tmux split-window -h -t $SESSION
 
 # Pane 2: eval script
-tmux send-keys -t $SESSION.1 "$EVAL_CMD 2>&1 | tee eval.log" C-m
+tmux send-keys -t $SESSION.1 "$EVAL_CMD 2>&1 | tee $EXPERIMENT_DIR/lmeval_run.log && python analysis/slo_attainment_and_good_accuracy/run.py --path $OUTPUT_PATH --slo $SLO 2>&1 | tee $EXPERIMENT_DIR/result_summary.log" C-m
 
 # Pane 3: nvidia-smi monitor
 tmux send-keys -t $SESSION.2 "watch -n 0.1 nvidia-smi" C-m

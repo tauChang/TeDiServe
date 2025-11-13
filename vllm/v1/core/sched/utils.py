@@ -61,6 +61,7 @@ class LatencyProfile:
         self.latencies = [profile[k] for k in self.batch_sizes]
 
         self.cached_lookup = {}
+        self.cached_lookup_max_batch_size = {}
 
     def lookup(self, num_tokens: int) -> tuple[int, float]:
         """Find the closest batch size >= num_tokens and return (batch_size, latency)."""
@@ -73,6 +74,16 @@ class LatencyProfile:
 
         self.cached_lookup[num_tokens] = (self.batch_sizes[idx], self.latencies[idx])
         return self.batch_sizes[idx], self.latencies[idx]
+    
+    def lookup_max_batch_size(self, max_latency: float) -> int:
+        """Find the maximum batch size that can be processed within max_latency."""
+        # max_latency to 4 decimal places
+        max_latency = round(max_latency, 4)
+        idx = bisect.bisect_right(self.latencies, max_latency)
+        if idx == 0:
+            return 0
+        self.cached_lookup_max_batch_size[max_latency] = self.batch_sizes[idx - 1]
+        return self.batch_sizes[idx - 1]
     
 
 def get_cur_timestamp(include_ms: bool = True) -> str:
@@ -113,8 +124,9 @@ class SystemSnapshot:
 class SystemLogger:
     def __init__(self, log_dir: str, scheduler: object):
         self.scheduler = scheduler
-        self.log_dir = log_dir
-        os.makedirs(log_dir, exist_ok=True)
+        # self.log_dir = log_dir
+        self.log_file = os.path.join(scheduler.vllm_config.experiment_config.experiment_dir, "system_log.log")
+        # os.makedirs(log_dir, exist_ok=True)
         self.log_file = os.path.join(log_dir, f"system_log_{get_cur_timestamp(include_ms=False)}.log")
         with open(self.log_file, "w") as f:
             f.write("")  # Create or clear the log file

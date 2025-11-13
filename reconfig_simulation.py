@@ -1,4 +1,5 @@
 import time
+# from vllm.v1.resource_manager.reconfig_planner.milp_reconfig_planner_bak import MILPReconfigPlanner
 from vllm.v1.resource_manager.reconfig_planner.milp_reconfig_planner import MILPReconfigPlanner
 from vllm.v1.resource_manager.workload_monitor import WorkloadClass
 
@@ -115,7 +116,7 @@ def plot_reconfig_timeline(df, rps_trace, title="Reconfiguration Timeline"):
     # --- Formatting ---
     plt.xticks(time_steps)
     plt.tight_layout()
-    plt.savefig("reconfig_timeline_subplots.png", dpi=200)
+    plt.savefig("reconfig_timeline_subplots_prefix.png", dpi=200)
 
 
 def simulate_reconfiguration(planner, node_to_bundles, current_config, rps_trace, P_k, O_k, SLO_k):
@@ -173,6 +174,7 @@ if __name__ == "__main__":
 
     num_instances = 2
     K = ["1024_256", "1280_256", "1536_256"]
+    # K = ["1536_256"]
     P_k = {"1024_256": 1536, "1280_256": 2048, "1536_256": 2560}
     O_k = {"1024_256": 256, "1280_256": 256, "1536_256": 256}
     SLO_k = {"1024_256": 5.0, "1280_256": 5.0, "1536_256": 5.0}
@@ -197,20 +199,26 @@ if __name__ == "__main__":
     #     {"1024_256": 2, "1280_256": 0, "1536_256": 0},
     #     # {"1024_256": .4, "1280_256": .4, "1536_256": 0.2},
     # ]
-    rps_trace = [
-        {"1024_256": 1.6},
-        {"1280_256": 1.6},
-        {"1536_256": 1.6},
-        # {"1024_256": .4, "1280_256": .4, "1536_256": 0.2},
-    ]
+    # rps_trace = [
+    #     {"1024_256": 2.3},
+    #     # {"1280_256": 1.6*5},
+    #     # {"1536_256": 1.6*5},
+    #     # {"1024_256": .4, "1280_256": .4, "1536_256": 0.2},
+    # ]
 
     # rps_classless_trace = [.4, .8, 1.2, 1.6, 2.0, 2.4, 2.8, 3.2, 3.6, 4.0]
     # rps_classless_trace += rps_classless_trace[-2::-1]  # ramp down
-    # rps_trace = []
-    # for rps in rps_classless_trace:
-    #     rps_trace.append({k: rps / len(K) for k in K})
+    # rps_classless_trace = [6.0]
+    rps_classless_trace = [0.1 * i for i in range(1, 60)]  # 0.1 to 2.0
+    rps_trace = []
+    for rps in rps_classless_trace:
+        rps_trace.append({k: rps / len(K) for k in K})
 
-    planner = MILPReconfigPlanner(latency_profile_paths=latency_profile_paths)
+    planner = MILPReconfigPlanner(
+        latency_profile_paths=latency_profile_paths,
+        cache_prefix=True,
+        cache_suffix=False,
+        denoise_block_size=32)
 
     configs_over_time = simulate_reconfiguration(
         planner,
