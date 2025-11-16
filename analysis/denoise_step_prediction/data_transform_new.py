@@ -100,6 +100,32 @@ def compute_output_confidence(df: pd.DataFrame):
     df["output_conf_avg"] = masked_conf_avgs
     return df
 
+def compute_all_confidence_stats(df: pd.DataFrame):
+    min_confidences = []
+    max_confidences = []
+    lower_quartile_confidences = []
+    upper_quartile_confidences = []
+    mean_confidences = []
+    median_confidences = []
+    
+    for _, row in df.iterrows():
+        output_len = row["output_length"]
+        conf = row["confidences"][-output_len:]  # non-prompt confidences
+        
+        min_confidences.append(float(np.min(conf)))
+        max_confidences.append(float(np.max(conf)))
+        lower_quartile_confidences.append(float(np.percentile(conf, 25)))
+        upper_quartile_confidences.append(float(np.percentile(conf, 75)))
+        mean_confidences.append(float(np.mean(conf)))
+        median_confidences.append(float(np.median(conf)))
+    df["min_all_confidence"] = min_confidences
+    df["max_all_confidence"] = max_confidences
+    df["lower_quartile_all_confidence"] = lower_quartile_confidences
+    df["upper_quartile_all_confidence"] = upper_quartile_confidences
+    df["mean_all_confidence"] = mean_confidences
+    df["median_all_confidence"] = median_confidences
+    return df
+
 def load_and_transform(path: str) -> pd.DataFrame:
     """Load a stats.json file and compute derived fields."""
     df = pd.read_json(path, lines=True)
@@ -116,8 +142,9 @@ def load_and_transform(path: str) -> pd.DataFrame:
     df["num_cur_unmasked_tokens"] = df.groupby("id")["num_unmasked_tokens"].diff().fillna(df["num_unmasked_tokens"])
     df["full_cur_unmask_progress"] = df["num_cur_unmasked_tokens"] / df["output_length"]
 
-    # compute_masked_confidence(df)
-    # compute_output_confidence(df)
+    compute_masked_confidence(df)
+    compute_output_confidence(df)
+    compute_all_confidence_stats(df)
 
     return df[[
         "source_file",
@@ -137,10 +164,16 @@ def load_and_transform(path: str) -> pd.DataFrame:
         "block_progress",
         "block_unmask_progress",
         "denoise_ratio",
-        # "masked_conf_avg",
-        # "output_conf_avg",
-        "last_recompute_avg_output_confidence",
-        "cur_avg_output_confidence"
+        "masked_conf_avg",
+        "output_conf_avg",
+        # "last_recompute_avg_output_confidence",
+        # "cur_avg_output_confidence",
+        "min_all_confidence",
+        "max_all_confidence",
+        "lower_quartile_all_confidence",
+        "upper_quartile_all_confidence",
+        "mean_all_confidence",
+        "median_all_confidence",
     ]]
     
 def mape_objective(y_pred, dataset):
@@ -166,11 +199,11 @@ def train_and_evaluate(train_path: Union[str, list[str]],
     included_features = [
         # "id",
         "confidence_threshold",
-        # "num_unmasked_tokens",
-        # "output_length",
-        # "block_size",
-        # "block",
-        # "block_num_unmasked_tokens",
+        "num_unmasked_tokens",
+        "output_length",
+        "block_size",
+        "block",
+        "block_num_unmasked_tokens",
         # "num_denoise_ran",
         # "num_denoise_left",
         "full_progress",
@@ -178,12 +211,18 @@ def train_and_evaluate(train_path: Union[str, list[str]],
         "block_progress",
         "block_unmask_progress",
         # "full_cur_unmask_progress",
-        # "masked_conf_avg",
-        # "output_conf_avg",
+        "masked_conf_avg",
+        "output_conf_avg",
         # "last_recompute_avg_output_confidence",
         # "cur_avg_output_confidence",
         # "denoise_ratio"
         # "num_cur_unmasked_tokens",
+        "min_all_confidence",
+        "max_all_confidence",
+        "lower_quartile_all_confidence",
+        "upper_quartile_all_confidence",
+        "mean_all_confidence",
+        "median_all_confidence",
     ]
 
     if type(train_path) == str:
@@ -401,11 +440,11 @@ cross_test = False
 train_and_evaluate(
     # "GSAI-ML_LLaDA-8B-Base_prefix_step_estimator.json",
     [
-        "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
-        "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
-        "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
-        "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
-        "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
+        # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
         # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block32_conf0.9.json",
         # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block32_conf0.8.json",
         # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_block32_conf0.7.json",
@@ -433,11 +472,11 @@ train_and_evaluate(
         # "../../step_data_1106/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
         # "../../step_data_1106/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block8_conf0.9.json",
         # "../../step_data_1106/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block32_conf0.9.json",
-        # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
-        # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
-        # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
-        # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
-        # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
+        "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
+        "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
+        "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
+        "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
+        "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
         # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
         # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
         # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",

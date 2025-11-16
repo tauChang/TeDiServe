@@ -51,10 +51,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--path",
         type=str,
-        default="/u/tchang85/dllm/experiment_dir/20251113_093505/results/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32.json",
+        default="/u/tchang85/dllm/experiment_dir/20251114_190446/results/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block32.json",
         help="Path to the JSON results file.",
     )
-    parser.add_argument("--slo", type=float, default=8.0, help="SLO in seconds.")
+    parser.add_argument("--slo", type=float, default=3.0, help="SLO in seconds.")
     args = parser.parse_args()
 
     analyze_eval_results(args.path, slo=args.slo)

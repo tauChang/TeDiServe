@@ -832,6 +832,7 @@ class EngineCoreProc(EngineCore):
             logger.debug("Block waiting for executor output...")
             executor_id, model_output = await self.executor_output_queue.get()
             logger.debug(f"Got model output for executor {executor_id}: {model_output}")
+            # dict of client_id -> EngineCoreOutputs
             outputs = await self.scheduler.update_from_output(
                 executor_id, self.scheduler_outputs[executor_id], model_output
             )
@@ -839,10 +840,15 @@ class EngineCoreProc(EngineCore):
             # outputs = self.scheduler.update_from_output(
             #     self.scheduler_outputs[executor_id], model_output
             # )
-            logger.debug(f"Scheduler outputs after update: {outputs}")
+            # logger.debug(f"Scheduler outputs after update: {outputs}")
+            logger.info(f"scheduler_outputs after update for executor {executor_id}: {outputs}")
             received_non_empty_output |= len(outputs) > 0
             for output in (outputs.items() if outputs else ()):
+                # output is EngineCoreOutputs
                 self.output_queue.put_nowait(output)
+                for eco in output[1].outputs:
+                    if eco.finished:
+                        self.resource_manager.record_request_completion(eco.request_id)
 
             self.scheduler_outputs[executor_id] = None
             del self.background_tasks[executor_id]
@@ -857,8 +863,15 @@ class EngineCoreProc(EngineCore):
             )
             logger.debug(f"Got model output for executor {executor_id}: {model_output}")
             received_non_empty_output |= len(outputs) > 0
+            # for output in (outputs.items() if outputs else ()):
+            #     self.output_queue.put_nowait(output)
+            logger.info(f"scheduler_outputs after update for executor {executor_id}: {outputs}")
             for output in (outputs.items() if outputs else ()):
+                # output is EngineCoreOutputs
                 self.output_queue.put_nowait(output)
+                for eco in output[1].outputs:
+                    if eco.finished:
+                        self.resource_manager.record_request_completion(eco.request_id)
 
             self.scheduler_outputs[executor_id] = None
             del self.background_tasks[executor_id]

@@ -2,31 +2,39 @@ from vllm.logger import init_logger
 from vllm.v1.request import Request
 from vllm.config import VllmConfig
 from typing import Dict
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from collections import deque
 import time
 import math
 import os
+# import datetime
+from datetime import datetime
+import json
 
 logger = init_logger(__name__)
 TIMESTAMP = time.strftime("%Y-%m-%d_%H:%M:%S")
 
 @dataclass
-class RequestStats:
+class RequestArrivalStats:
     request_id: str
     arrival_time: float
     prompt_length: int
     output_length: int
     latency_slo: float
 
-    def from_request(request: Request) -> "RequestStats":
-        return RequestStats(
+    def from_request(request: Request) -> "RequestArrivalStats":
+        return RequestArrivalStats(
             request_id=request.request_id,
-            arrival_time=request.arrival_time,
+            arrival_time=datetime.fromtimestamp(request.arrival_time).strftime("%Y-%m-%d %H:%M:%S.%f"),
             prompt_length=len(request.prompt_token_ids),
             output_length=request.output_length,
             latency_slo=request.latency_slo,
         )
+
+@dataclass
+class RequestCompletionStats:
+    request_id: str
+    completion_time: float
 
 @dataclass
 class WorkloadClass:
@@ -42,21 +50,33 @@ class WorkloadClass:
 class WorkloadMonitor:
     def __init__(self, vllm_config: VllmConfig,
                  time_window: float = 30.0):
-        self.request_stats_queue: deque[RequestStats] = deque()
+        self.request_arrival_stats_queue: deque[RequestArrivalStats] = deque()
         self.time_window = time_window
         self.start_time = time.time()
         self.workload_history_path = f"{vllm_config.experiment_config.experiment_dir}/workload_history.json"
+        os.makedirs(os.path.dirname(self.workload_history_path), exist_ok=True)
         
     
     def record_request_arrival(self, request: Request):
-        stats = RequestStats.from_request(request)
-        self.request_stats_queue.append(stats)
+        stats = RequestArrivalStats.from_request(request)
+        self.request_arrival_stats_queue.append(stats)
         logger.info(f"Logged arrival of request {stats.request_id} at time {stats.arrival_time} "
                     f"with prompt length {stats.prompt_length} and output length {stats.output_length}.")
         
-        os.makedirs(os.path.dirname(self.workload_history_path), exist_ok=True)
         with open(self.workload_history_path, "a") as f:
-            f.write(f"{stats}\n")
+            json.dump(asdict(stats), f)
+            f.write("\n")
+    
+    def record_request_completion(self, request_id: str):
+        logger.info(f"Request {request_id} has completed processing.")
+        stats = RequestCompletionStats(
+            request_id=request_id,
+            completion_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+        )
+        
+        with open(self.workload_history_path, "a") as f:
+            json.dump(asdict(stats), f)
+            f.write("\n")
 
     def _purge_old_requests(self):
         """Drop outdated requests (arrival_time < now - time_window)."""
@@ -64,8 +84,8 @@ class WorkloadMonitor:
         cutoff = now - self.time_window
 
         # Pop from left until we reach a recent one
-        while self.request_stats_queue and self.request_stats_queue[0].arrival_time < cutoff:
-            old = self.request_stats_queue.popleft()
+        while self.request_arrival_stats_queue and self.request_arrival_stats_queue[0].arrival_time < cutoff:
+            old = self.request_arrival_stats_queue.popleft()
             logger.debug(f"Dropped expired request {old.request_id} (age={now - old.arrival_time:.1f}s)")
     
     def get_workload_classes(self) -> Dict[str, WorkloadClass]:
@@ -77,8 +97,8 @@ class WorkloadMonitor:
         binsize = 256
 
         # group requests by ceiling-binned (prompt_len, output_len)
-        grouped: Dict[tuple[int, int], list[RequestStats]] = {}
-        for req in self.request_stats_queue:
+        grouped: Dict[tuple[int, int], list[RequestArrivalStats]] = {}
+        for req in self.request_arrival_stats_queue:
             p_bin = math.ceil(req.prompt_length / binsize) * binsize
             o_bin = math.ceil(req.output_length / binsize) * binsize
             grouped.setdefault((p_bin, o_bin), []).append(req)

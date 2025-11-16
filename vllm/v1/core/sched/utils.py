@@ -59,9 +59,11 @@ class LatencyProfile:
         # Pre-sort batch sizes and latencies for fast lookup
         self.batch_sizes = sorted(profile.keys())
         self.latencies = [profile[k] for k in self.batch_sizes]
+        self.max_throughput = self._get_max_throughput() # for backward compatibility
 
         self.cached_lookup = {}
         self.cached_lookup_max_batch_size = {}
+        self.cached_lookup_cache_throughput = {}
 
     def lookup(self, num_tokens: int) -> tuple[int, float]:
         """Find the closest batch size >= num_tokens and return (batch_size, latency)."""
@@ -84,6 +86,46 @@ class LatencyProfile:
             return 0
         self.cached_lookup_max_batch_size[max_latency] = self.batch_sizes[idx - 1]
         return self.batch_sizes[idx - 1]
+    
+    def get_throughput(self, cache_prefix: bool, cache_suffix: bool, 
+                       num_token_per_block: int, num_token_per_req: int,
+                       max_num_batched_tokens: int) -> float:
+        if not cache_prefix and not cache_suffix:
+            return self.max_throughput
+        
+        return self._get_cache_throughput(num_token_per_block, num_token_per_req,
+                                            max_num_batched_tokens)
+    
+    def _get_max_throughput(self) -> float:
+        """Get the maximum throughput (tokens per second) from the profile."""
+        max_throughput = 0.0
+        for batch_size, latency in zip(self.batch_sizes, self.latencies):
+            throughput = batch_size / latency
+            if throughput > max_throughput:
+                max_throughput = throughput
+        logger.debug(f"max throughput: {max_throughput}")
+        return max_throughput
+
+    def _get_cache_throughput(self, num_token_per_block, num_token_per_req,
+                              max_num_batched_tokens) -> float:
+        key = (num_token_per_block, num_token_per_req, max_num_batched_tokens)
+        if key in self.cached_lookup_cache_throughput:
+            return self.cached_lookup_cache_throughput[key]
+        
+        max_num_req_per_batch = max_num_batched_tokens // num_token_per_req
+        max_cache_step_per_block = num_token_per_block - 1
+        
+        num_token_per_cache_step = max_num_req_per_batch * num_token_per_block
+        num_token_per_recompute_step = max_num_req_per_batch * num_token_per_req
+        throughput = ((num_token_per_cache_step * max_cache_step_per_block) + num_token_per_recompute_step) / \
+                        (self.lookup(num_token_per_cache_step)[1] * max_cache_step_per_block + self.lookup(num_token_per_recompute_step)[1])
+        logger.debug(f"num_token_per_block: {num_token_per_block}," 
+                        f" num_token_per_req: {num_token_per_req},"
+                        f" max_num_req_per_batch: {max_num_req_per_batch},"
+                        f" max_cache_step_per_block: {max_cache_step_per_block}")
+        logger.debug(f"cache throughput: {throughput}")
+        self.cached_lookup_cache_throughput[key] = throughput
+        return throughput
     
 
 def get_cur_timestamp(include_ms: bool = True) -> str:

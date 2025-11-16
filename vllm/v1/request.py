@@ -3,6 +3,7 @@
 
 import enum
 import time
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 from vllm.logger import init_logger
@@ -15,6 +16,8 @@ from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
+
+from dataclasses import dataclass, asdict
 
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
@@ -144,7 +147,7 @@ class Request:
 
         self.last_recompute_avg_output_confidence = None
         # TODO: fix SLO
-        self.latency_slo = 3.2
+        self.latency_slo = 5.0
 
 
     @classmethod
@@ -182,6 +185,7 @@ class Request:
         token_ids: list[tuple[int, int]],
         confidence_threshold: float,
         avg_output_confidence: float,
+        max_confidence_threshold: Optional[float] = None,
     ) -> StepStats:
     
         no_cache = self.num_exec_tokens == len(self._all_token_ids)
@@ -199,6 +203,7 @@ class Request:
         
         stats = StepStats(
             id=self.request_id,
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
             num_denoise_ran=self.num_denoise_ran,
             num_unmasked_tokens=len(self._unmasked_token_ids),
             num_cur_unmasked_tokens=self.num_last_unmasked_tokens,
@@ -208,6 +213,7 @@ class Request:
             block_num_unmasked_tokens=self.cur_block_num_unmasked_tokens,
             block_size=self.denoise_block_size,
             confidence_threshold=confidence_threshold,
+            max_confidence_threshold=max_confidence_threshold,
             last_recompute_avg_output_confidence=self.last_recompute_avg_output_confidence,
             cur_avg_output_confidence=avg_output_confidence,
         )
@@ -310,8 +316,7 @@ class Request:
             return float("inf")
         elapsed = time.time() - self.arrival_time
         return self.latency_slo - elapsed
-
-
+    
 class RequestStatus(enum.IntEnum):
     """Status of a request."""
     WAITING = enum.auto()

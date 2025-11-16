@@ -9,6 +9,7 @@ import threading
 import uvicorn
 import atexit
 import os
+import numpy as np
 
 from fastapi import FastAPI, Request
 from transformers import AutoTokenizer
@@ -17,21 +18,62 @@ logger = logging.getLogger(__name__)
 # logger.setLevel(logging.INFO)
 app = FastAPI()
 
-def generate_request_arrival_times(
-        arrival_pattern,
-    ):
-    random.seed(42)  # for reproducibility
+import random
+
+def generate_request_arrival_times(arrival_pattern, default_cv=1.0):
+    """Generate arrival times. Each tuple may be:
+       (num_requests, mean_interarrival)
+       (num_requests, mean_interarrival, cv)
+       If cv is omitted, Poisson arrivals (cv=1) are used.
+    """
+    random.seed(42)
     arrival_times = []
     current_time = 0.0
-    for (num_requests, inter_arrival_time) in arrival_pattern:
-        for _ in range(num_requests):
-            if inter_arrival_time > 0:
-                inter_arrival = random.expovariate(1.0 / inter_arrival_time)
-            else:
-                inter_arrival = 0
-            current_time += inter_arrival
-            arrival_times.append(current_time)
+
+    for item in arrival_pattern:
+        # Parse tuple (allow 2 or 3 elements)
+        if len(item) == 2:
+            num_requests, mean_interarrival = item
+            cv = default_cv
+        elif len(item) == 3:
+            num_requests, mean_interarrival, cv = item
+        else:
+            raise ValueError("Each pattern element must be 2 or 3 values")
+        
+        if cv < 0:
+            raise ValueError("CV must be >= 0")
+        
+        if cv == 0:
+            # uniform
+            for _ in range(num_requests):
+                inter_arrival = mean_interarrival
+                current_time += inter_arrival
+                arrival_times.append(current_time)
+        else:
+            # Gamma parameters
+            k = 1.0 / (cv * cv)           # shape
+            theta = mean_interarrival / k # scale
+
+            for _ in range(num_requests):
+                if mean_interarrival > 0:
+                    inter_arrival = random.gammavariate(k, theta)
+                else:
+                    inter_arrival = 0
+
+                current_time += inter_arrival
+                arrival_times.append(current_time)
+    
+    t = np.array(arrival_times)
+    window = 1.0  # 2 second window
+    rates = [
+        np.sum((t >= ti - window) & (t <= ti)) / window
+        for ti in t
+    ]
+    logger.info(f"max RPS: {max(rates):.2f}, avg RPS: {len(t)/t[-1]:.2f}")
+
+
     return arrival_times
+
 
 def wait_until_up(url: str, 
                   timeout: float = 600, 

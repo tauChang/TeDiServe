@@ -31,18 +31,50 @@ SHOULD_APPLY_CHAT_TEMPLATE = {
     "GSAI-ML/LLaDA-8B-Base": False,
 }
 
-def parse_arrival_pattern(pattern_str: str):
+# def parse_arrival_pattern(pattern_str: str):
+#     """
+#     Parse a string like '50:1.0,50:3.0' into a list of (num_requests, inter_arrival_time) tuples.
+#     """
+#     phases = []
+#     for phase in pattern_str.split(","):
+#         if not phase.strip():
+#             continue
+#         num_str, interval_str = phase.split(":")
+#         phases.append((int(num_str.strip()), float(interval_str.strip())))
+#     return phases
+def parse_arrival_pattern(pattern_str: str, default_cv: float = 1.0):
     """
-    Parse a string like '50:1.0,50:3.0' into a list of (num_requests, inter_arrival_time) tuples.
+    Parse a string like:
+        '50:1.0, 50:3.0'
+        '50:1.0:2.0, 100:0.5'
+    
+    Returns a list of:
+        (num_requests, mean_interarrival, cv)
+    If cv is omitted, default_cv is used.
     """
     phases = []
     for phase in pattern_str.split(","):
-        if not phase.strip():
+        phase = phase.strip()
+        if not phase:
             continue
-        num_str, interval_str = phase.split(":")
-        phases.append((int(num_str.strip()), float(interval_str.strip())))
-    return phases
 
+        parts = phase.split(":")
+        if len(parts) == 2:
+            # Format: num:mean
+            num, mean = parts
+            cv = default_cv
+        elif len(parts) == 3:
+            # Format: num:mean:cv
+            num, mean, cv = parts
+        else:
+            raise ValueError(
+                f"Invalid arrival pattern segment '{phase}'. "
+                f"Expected num:mean or num:mean:cv"
+            )
+
+        phases.append((int(num), float(mean), float(cv)))
+
+    return phases
 
 def run_test(args):
     """Run the end to end accuracy test."""
@@ -53,7 +85,8 @@ def run_test(args):
 
     if args.arrival_pattern:
         arrival_pattern = parse_arrival_pattern(args.arrival_pattern)
-        args.limit = sum(num for num, _ in arrival_pattern)
+        # args.limit = sum(num for num, _ in arrival_pattern)
+        args.limit = sum(num for num, _, _ in arrival_pattern)
     else:
         arrival_pattern = [(args.limit, args.avg_inter_arrival_time)]
     logger.info(f"Using arrival pattern: {arrival_pattern}")

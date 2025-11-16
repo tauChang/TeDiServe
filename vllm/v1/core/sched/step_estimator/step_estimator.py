@@ -13,6 +13,7 @@ logger = init_logger(__name__)
 @dataclass
 class StepStats:
     id: str
+    timestamp: str
     num_denoise_ran: int
     num_unmasked_tokens: int # cumulative
     num_cur_unmasked_tokens: int # in current step
@@ -23,8 +24,10 @@ class StepStats:
     block_size: int
 
     confidence_threshold: Optional[float] = None
+    max_confidence_threshold: Optional[float] = None
     last_recompute_avg_output_confidence: Optional[float] = None
     cur_avg_output_confidence: Optional[float] = None
+
     
 
 class StepEstimator:
@@ -57,14 +60,15 @@ class StepEstimator:
         self._new_rows = 0
     
     def _get_file_path(self):
-        safe_model_name = self.llm_model.replace("/", "_")
-        cache_prefix = "_prefix" if self.cache_prefix else ""
-        cache_suffix = "_suffix" if self.cache_suffix else ""
-        block_size = f"_block{self.vllm_config.model_config.denoise_block_size}"
-        confidence = f"_conf{self.vllm_config.scheduler_config.default_confidence_threshold}"
-        timestamp = time.strftime("%Y-%m-%d_%H:%M:%S")
+        # safe_model_name = self.llm_model.replace("/", "_")
+        # cache_prefix = "_prefix" if self.cache_prefix else ""
+        # cache_suffix = "_suffix" if self.cache_suffix else ""
+        # block_size = f"_block{self.vllm_config.model_config.denoise_block_size}"
+        # confidence = f"_conf{self.vllm_config.scheduler_config.default_confidence_threshold}"
+        # timestamp = time.strftime("%Y-%m-%d_%H:%M:%S")
         
-        path = f"{self.step_data_dir}/{self.eval_task}/{self.gen_len}/{safe_model_name}{cache_prefix}{cache_suffix}{block_size}{confidence}.json"
+        # path = f"{self.step_data_dir}/{self.eval_task}/{self.gen_len}/{safe_model_name}{cache_prefix}{cache_suffix}{block_size}{confidence}.json"
+        path = f"{self.step_data_dir}/step_data.json"
         dir_path = os.path.dirname(path)
         if not os.path.exists(dir_path):
             os.makedirs(dir_path)

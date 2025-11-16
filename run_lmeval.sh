@@ -7,10 +7,12 @@ mkdir -p $EXPERIMENT_DIR
 cp run_lmeval.sh $EXPERIMENT_DIR/
 # VLLM Args
 MODEL=GSAI-ML/LLaDA-8B-Instruct
-NUM_GPUS_PER_MODEL_EXECUTOR=1,1,1,1
+NUM_GPUS_PER_MODEL_EXECUTOR=1,
 # SCHEDULER_CLASS=vllm.v1.core.sched.cluster_scheduler.ClusterScheduler
-SCHEDULER_CLASS=vllm.v1.core.sched.urgent_opportunistic_scheduler.UrgentOpportunisticScheduler
-# SCHEDULER_CLASS=vllm.v1.core.sched.uos.UrgentOpportunisticScheduler
+# SCHEDULER_CLASS=vllm.v1.core.sched.urgent_opportunistic_scheduler_max_best_effort.UrgentOpportunisticScheduler
+# SCHEDULER_CLASS=vllm.v1.core.sched.urgent_opportunistic_scheduler_min_best_effort.UrgentOpportunisticScheduler
+SCHEDULER_CLASS=vllm.v1.core.sched.urgent_opportunistic_with_budget_scheduler.UrgentOpportunisticWithBudgetScheduler
+# SCHEDULER_CLASS=vllm.v1.core.sched.uos_og.UrgentOpportunisticScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.tedi_scheduler.TediScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.recompute_disaggregated_scheduler.RecomputeDisaggregatedScheduler
 DEFAULT_CONFIDENCE_THRESHOLD=0.9
@@ -21,18 +23,37 @@ STEP_ESTIMATOR_MODEL_CLASS=vllm.v1.core.sched.step_estimator.models.light_gradie
 # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/features.txt
 # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/no_cache_256_32/model.bin
 # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/no_cache_256_32/features.txt
-STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_256_32/model.bin
-STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_256_32/features.txt
+# STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_256_32/model.bin
+# STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_256_32/features.txt
 # KV_TRANSFER_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
 # CONF=599
 # STEP_DATA_DIR=./step_data_dynamic_${CONF}
-STEP_DATA_DIR=$EXPERIMENT_DIR/step_data
+STEP_DATA_DIR=$EXPERIMENT_DIR
 
 DENOISE_BLOCK_SIZE=32
+# CACHE_PREFIX=false
+# CACHE_SUFFIX=false
 CACHE_PREFIX=true
 CACHE_SUFFIX=true
 
-SLO=3.2
+if [ "$CACHE_PREFIX" = true ] && [ "$CACHE_SUFFIX" = true ]; then
+    # use dual_cache_256_32 model
+    STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_256_32/model.bin
+    STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_256_32/features.txt
+elif [ "$CACHE_PREFIX" = true ] && [ "$CACHE_SUFFIX" = false ]; then
+    STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/prefix_cache_256_32/model.bin
+    STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/prefix_cache_256_32/features.txt
+elif [ "$CACHE_PREFIX" = false ] && [ "$CACHE_SUFFIX" = false ]; then
+    STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/no_cache_256_32/model.bin
+    STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/no_cache_256_32/features.txt
+fi
+
+SLO=5.0  # seconds
+
+# ----------------------
+STEP_DATA_FILE=${STEP_DATA_DIR}/step_data.json
+WORKLOAD_FILE=${EXPERIMENT_DIR}/workload_history.json
+REQUEST_PLOTS_DIR=${EXPERIMENT_DIR}/request_plots
 
 # ----------------------
 # LMEval Args
@@ -40,8 +61,9 @@ TASK=gsm8k
 # LIMIT=100
 # AVG_INTER_ARRIVAL_TIME=0.5
 # ARRIVAL_PATTERN="100:3,100:1,100:2"
-# ARRIVAL_PATTERN="200:1.5"
-ARRIVAL_PATTERN="100:3"
+# ARRIVAL_PATTERN="30:3:8"
+# ARRIVAL_PATTERN="100:0.8:1"
+ARRIVAL_PATTERN="10:2:0"
 # Calculate TOTAL_NUM_REQUESTS based on ARRIVAL_PATTERN
 if [ -n "$ARRIVAL_PATTERN" ]; then
     TOTAL_NUM_REQUESTS=$(echo "$ARRIVAL_PATTERN" | awk -F, '{sum=0; for (i=1; i<=NF; i++) {split($i, a, ":"); sum+=a[1]} print sum}')
@@ -137,7 +159,11 @@ tmux split-window -h -t $SESSION
 tmux split-window -h -t $SESSION
 
 # Pane 2: eval script
-tmux send-keys -t $SESSION.1 "$EVAL_CMD 2>&1 | tee $EXPERIMENT_DIR/lmeval_run.log && python analysis/slo_attainment_and_good_accuracy/run.py --path $OUTPUT_PATH --slo $SLO 2>&1 | tee $EXPERIMENT_DIR/result_summary.log" C-m
+# tmux send-keys -t $SESSION.1 "$EVAL_CMD 2>&1 | tee $EXPERIMENT_DIR/lmeval_run.log && python analysis/confidence_over_time/plot.py --step-data $STEP_DATA_FILE --workload-history $WORKLOAD_FILE --output-dir $REQUEST_PLOTS_DIR &&
+# python analysis/slo_attainment_and_good_accuracy/run.py --path $OUTPUT_PATH --slo $SLO 2>&1 | tee $EXPERIMENT_DIR/result_summary.log" C-m
+tmux send-keys -t $SESSION.1 "$EVAL_CMD 2>&1 | tee \"$EXPERIMENT_DIR/lmeval_run.log\"" C-m
+tmux send-keys -t $SESSION.1 "python analysis/confidence_over_time/plot.py --step-data \"$STEP_DATA_FILE\" --workload-history \"$WORKLOAD_FILE\" --output-dir \"$REQUEST_PLOTS_DIR\"" C-m
+tmux send-keys -t $SESSION.1 "python analysis/slo_attainment_and_good_accuracy/run.py --path \"$OUTPUT_PATH\" --slo \"$SLO\" 2>&1 | tee \"$EXPERIMENT_DIR/result_summary.log\"" C-m
 
 # Pane 3: nvidia-smi monitor
 tmux send-keys -t $SESSION.2 "watch -n 0.1 nvidia-smi" C-m

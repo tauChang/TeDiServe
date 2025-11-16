@@ -629,3 +629,6 @@ class ResourceManager:
 
     def record_request_arrival(self, req: Request):
         self.workload_monitor.record_request_arrival(req)
+    
+    def record_request_completion(self, req_id: str):
+        self.workload_monitor.record_request_completion(req_id)
