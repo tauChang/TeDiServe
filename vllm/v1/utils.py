@@ -3,12 +3,18 @@
 import argparse
 import multiprocessing
 import time
+from datetime import datetime
+from collections import OrderedDict
+import json
 import weakref
 from collections.abc import Sequence
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Optional, TypeVar,
                     Union, overload)
+import threading
+import os
+
 
 import torch
 
@@ -327,3 +333,125 @@ def report_usage_stats(
             "disable_custom_all_reduce":
             vllm_config.parallel_config.disable_custom_all_reduce,
         })
+
+def get_cur_timestamp(include_ms: bool = True) -> str:
+    if not include_ms:
+        return datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+    return datetime.now().strftime("%Y-%m-%d_%H:%M:%S.%f")[:-3]
+
+class TimeProfiler:
+    def __init__(self, name: str, file_path: str, flush_interval: float = 10):
+        self.name = name
+        self.file_path = file_path
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        self.flush_interval = flush_interval
+
+        # Current entry (single-threaded, no lock needed)
+        self.sections = {}
+        self.info = {}
+        self.events = []
+
+        # Completed entries buffer (shared with flush thread)
+        self.buffer = []
+        self._buffer_lock = threading.Lock()   # only lock needed
+
+        # Background flushing thread
+        t = threading.Thread(target=self._periodic_flush, daemon=True)
+        t.start()
+
+    def section(self, name: str):
+        return _SectionTimer(self, name)
+
+    # Called only on single-thread context → no lock needed
+    def _add_section(self, name: str, duration: float):
+        self.sections[name] = round(duration * 1000, 3)
+
+    def event(self, name: str, **fields):
+        """Timed event inside loops. No aggregation, stored as events."""
+        return _EventTimer(self, name, fields)
+    
+    def _add_event(self, event: dict):
+        self.events.append(event)
+
+
+    # Called only on single-thread context → no lock needed
+    def add_info(self, key: str, value):
+        self.info[key] = value
+
+    def commit(self):
+        """Finalize current entry and queue it for periodic flush."""
+        if not self.sections and not self.info:
+            return
+
+        # Build structured entry (still single-threaded)
+        ordered_sections = OrderedDict()
+        if "total" in self.sections:
+            ordered_sections["total"] = self.sections["total"]
+        for k, v in self.sections.items():
+            if k != "total":
+                ordered_sections[k] = v
+
+        entry = {
+            "timestamp": get_cur_timestamp(),
+            "sections": ordered_sections,
+            "info": self.info,
+            "events": self.events,
+        }
+
+        # Push entry to the buffer (shared with flush thread)
+        with self._buffer_lock:
+            self.buffer.append(entry)
+
+        # Reset in-progress entry (still single-threaded)
+        self.sections = {}
+        self.info = {}
+        self.events = []
+
+    def _periodic_flush(self):
+        while True:
+            time.sleep(self.flush_interval)
+            self.flush()
+
+    def flush(self):
+        """Flush all completed entries to disk using atomic buffer swap."""
+        # Atomically take all entries from buffer
+        with self._buffer_lock:
+            if not self.buffer:
+                return
+            to_write = self.buffer
+            self.buffer = []  # atomic swap
+
+        logger.info(f"Profiler '{self.name}': flushing to {self.file_path} with {len(to_write)} entries")
+        # Write outside lock
+        with open(self.file_path, "a") as f:
+            for entry in to_write:
+                f.write(json.dumps(entry) + "\n")
+
+
+class _SectionTimer:
+    def __init__(self, profiler: TimeProfiler, name: str):
+        self.profiler = profiler
+        self.name = name
+
+    def __enter__(self):
+        self.start_time = time.perf_counter()
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        duration = time.perf_counter() - self.start_time
+        self.profiler._add_section(self.name, duration)
+
+class _EventTimer:
+    def __init__(self, profiler: TimeProfiler, name: str, fields: dict):
+        self.profiler = profiler
+        self.name = name
+        self.fields = fields
+
+    def __enter__(self):
+        self.start_time = time.perf_counter()
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        duration_ms = (time.perf_counter() - self.start_time) * 1000
+        event = {"name": self.name,
+                 "duration_ms": round(duration_ms, 3),
+                 **self.fields}
+        self.profiler._add_event(event)

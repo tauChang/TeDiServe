@@ -394,6 +394,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 vllm_config=vllm_config_copy,
                 local_rank=local_rank,
                 rank=rank,
+                executor_id=self.id,
                 distributed_init_method=distributed_init_method,
                 is_driver_worker=(not self.parallel_config)
                 or (rank % tp_size == 0)

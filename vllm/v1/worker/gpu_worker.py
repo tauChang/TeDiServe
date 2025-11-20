@@ -47,6 +47,7 @@ class Worker(WorkerBase):
         vllm_config: VllmConfig,
         local_rank: int,
         rank: int,
+        executor_id: int,
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
@@ -54,6 +55,7 @@ class Worker(WorkerBase):
         super().__init__(vllm_config=vllm_config,
                          local_rank=local_rank,
                          rank=rank,
+                         executor_id=executor_id,
                          distributed_init_method=distributed_init_method,
                          is_driver_worker=is_driver_worker)
 
@@ -172,7 +174,7 @@ class Worker(WorkerBase):
 
         # Construct the model runner
         self.model_runner: GPUModelRunner = GPUModelRunner(
-            self.vllm_config, self.device)
+            self.vllm_config, self.device, self.executor_id, self.rank)
 
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.

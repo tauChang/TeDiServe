@@ -6,6 +6,7 @@ import queue
 import signal
 import sys
 import threading
+from datetime import datetime
 import time
 from collections import deque
 from collections.abc import Generator
@@ -14,6 +15,7 @@ from contextlib import ExitStack, contextmanager
 from inspect import isclass, signature
 from logging import DEBUG
 from typing import Any, Callable, Optional, TypeVar, Union
+import psutil
 
 import msgspec
 import zmq
@@ -39,7 +41,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             ReconfigureDistributedRequest, ReconfigureRankType,
                             UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
-from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses
+from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses, get_slurm_assigned_cpus
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.executors_manager import ExecutorsManager
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -282,19 +284,20 @@ class EngineCore:
         try:
             logger.debug(f"Executor {executor_id} status transition: SCHEDULED -> EXECUTING")
             self.executors_manager.executors[executor_id].set_executing()
-            start_time = time.time()
-            model_output = await self.executors_manager.executors[executor_id].\
-                execute_model_async(scheduler_output)  # type: ignore
-            end_time = time.time()
+            with self.executors_manager.profilers[executor_id].section("execute_model"):
+                model_output = await self.executors_manager.executors[executor_id].\
+                    execute_model_async(scheduler_output)  # type: ignore
+            self.executors_manager.profilers[executor_id].add_info(f"num_tokens", scheduler_output.total_num_scheduled_tokens)
+            self.executors_manager.profilers[executor_id].commit()
             # write to a file for profiling
-            try:
-                with open(f"{self.vllm_config.experiment_config.experiment_dir}/executor_{executor_id}.txt", "a") as f:
-                    # write input_ids size and time
-                    f.write(f"{scheduler_output.total_num_scheduled_tokens},"
-                            f"{end_time - start_time}\n")
-            except Exception as e:
-                logger.error(f"Failed to write executor profile: {e}")
-                raise e
+            # try:
+            #     with open(f"{self.vllm_config.experiment_config.experiment_dir}/executor_{executor_id}.txt", "a") as f:
+            #         # write input_ids size and time
+            #         f.write(f"{scheduler_output.total_num_scheduled_tokens},"
+            #                 f"{end_time - start_time}\n")
+            # except Exception as e:
+            #     logger.error(f"Failed to write executor profile: {e}")
+            #     raise e
             logger.debug(f"Executor {executor_id} status transition: EXECUTING -> OUTPUT_READY")
             self.executors_manager.executors[executor_id].set_output_ready()
             logger.debug(f"Model output for executor {executor_id}: {model_output}")
@@ -721,6 +724,13 @@ class EngineCoreProc(EngineCore):
         pass
 
     async def run_all_loops(self):
+        # set affinity
+        p = psutil.Process()
+        all_cpus = get_slurm_assigned_cpus()
+        cpus_to_use = all_cpus[:len(all_cpus)//2]
+        p.cpu_affinity(cpus_to_use)
+        logger.info(f"EngineCore process pinned to CPUs: {cpus_to_use}")
+        
         await asyncio.gather(
             self.run_busy_loop(),
             self.process_input_sockets_async(
@@ -728,14 +738,14 @@ class EngineCoreProc(EngineCore):
                 self.addresses.coordinator_input,
                 self.identity
             ),
-            # self.run_reconfigure_loop(),
+            self.run_reconfigure_loop(),
         )
 
     async def run_reconfigure_loop(self):
         logger.debug("Starting EngineCore reconfiguration loop.")
         while True:
             logger.debug(f"Reconfiguration loop sleeping for 20s...")
-            await asyncio.sleep(30)
+            await asyncio.sleep(60)
             logger.debug(f"Reconfiguration loop woke up.")
             reconfig_cmd = await self.resource_manager.reconfig()
             await reconfig_cmd.execute(self.executors_manager)
@@ -795,10 +805,12 @@ class EngineCoreProc(EngineCore):
         # Handle any more client requests.
         logger.debug("Draining input queue...")
         while not self.input_queue.empty():
+            logger.debug(f"input queue is not empty.")
             req = self.input_queue.get_nowait()
             logger.debug(f"Handling request when draining: {req}")
             added_or_aborted |= self._handle_client_request(*req)
-        
+        logger.debug("Finished draining input queue.")
+        logger.debug(f"added_or_aborted: {added_or_aborted}")
         return added_or_aborted
         
     async def _process_engine_step(self) -> bool:
@@ -807,8 +819,11 @@ class EngineCoreProc(EngineCore):
         scheduler_outputs = await self.scheduler.schedule()
         end_time = time.time()
         # write to a file
-        with open(f"{self.vllm_config.experiment_config.experiment_dir}/scheduler_profile.txt", "a") as f:
-            f.write(f"{len(self.executors_manager.executors)}, {self.scheduler.get_num_unfinished_requests()}, {end_time - start_time}\n")
+        # with open(f"{self.vllm_config.experiment_config.experiment_dir}/scheduler_profile.txt", "a") as f:
+        #     start_time_timestamp = datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S.%f")
+        #     num_executors = len(self.executors_manager.executors)
+        #     num_requests = self.scheduler.get_num_unfinished_requests()
+        #     f.write(f"{start_time_timestamp}, {num_executors}, {num_requests}, {end_time - start_time}\n")
 
         logger.debug(f"Scheduler outputs: {scheduler_outputs}")
         for executor_id, scheduler_output in scheduler_outputs.items():

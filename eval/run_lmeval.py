@@ -14,6 +14,7 @@ import pytest
 import argparse
 import json
 import os
+import psutil
 
 from vllm.platforms import current_platform
 
@@ -30,6 +31,32 @@ SHOULD_APPLY_CHAT_TEMPLATE = {
     "GSAI-ML/LLaDA-8B-Instruct": True,
     "GSAI-ML/LLaDA-8B-Base": False,
 }
+
+def get_slurm_assigned_cpus():
+    job_id = os.environ.get("SLURM_JOB_ID")
+    if job_id is None:
+        return range(0, psutil.cpu_count(logical=True))
+        raise RuntimeError("Not running under SLURM")
+
+    uid = os.getuid()
+    path = f"/sys/fs/cgroup/cpuset/slurm/uid_{uid}/job_{job_id}/cpuset.cpus"
+
+    try:
+        with open(path, "r") as f:
+            cpus = f.read().strip()
+    except FileNotFoundError:
+        raise RuntimeError(f"SLURM cpuset file not found: {path}")
+
+    # expand ranges like 0-15,32-47 → [0,1,2,...15,32,...47]
+    cpu_list = []
+    for part in cpus.split(","):
+        if "-" in part:
+            start, end = map(int, part.split("-"))
+            cpu_list.extend(range(start, end + 1))
+        else:
+            cpu_list.append(int(part))
+
+    return cpu_list
 
 # def parse_arrival_pattern(pattern_str: str):
 #     """
@@ -174,4 +201,8 @@ def main():
     run_test(args)
     
 if __name__ == "__main__":
+    p = psutil.Process()
+    all_cpus = get_slurm_assigned_cpus()
+    cpus_to_use = all_cpus[len(all_cpus) * 3 // 4 :]
+    p.cpu_affinity(cpus_to_use)
     main()

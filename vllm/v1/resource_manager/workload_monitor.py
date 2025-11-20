@@ -10,9 +10,10 @@ import os
 # import datetime
 from datetime import datetime
 import json
+import threading
 
 logger = init_logger(__name__)
-TIMESTAMP = time.strftime("%Y-%m-%d_%H:%M:%S")
+TIME_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
 
 @dataclass
 class RequestArrivalStats:
@@ -25,16 +26,25 @@ class RequestArrivalStats:
     def from_request(request: Request) -> "RequestArrivalStats":
         return RequestArrivalStats(
             request_id=request.request_id,
-            arrival_time=datetime.fromtimestamp(request.arrival_time).strftime("%Y-%m-%d %H:%M:%S.%f"),
+            arrival_time=request.arrival_time,
             prompt_length=len(request.prompt_token_ids),
             output_length=request.output_length,
             latency_slo=request.latency_slo,
         )
+    
+    def asdict(self):
+        return {
+            "request_id": self.request_id,
+            "arrival_time": datetime.fromtimestamp(self.arrival_time).strftime(TIME_FORMAT),
+            "prompt_length": self.prompt_length,
+            "output_length": self.output_length,
+            "latency_slo": self.latency_slo,
+        }
 
 @dataclass
 class RequestCompletionStats:
     request_id: str
-    completion_time: float
+    completion_time: str
 
 @dataclass
 class WorkloadClass:
@@ -56,6 +66,13 @@ class WorkloadMonitor:
         self.workload_history_path = f"{vllm_config.experiment_config.experiment_dir}/workload_history.json"
         os.makedirs(os.path.dirname(self.workload_history_path), exist_ok=True)
         
+        self._log_buffer = []
+        self._flush_lock = threading.Lock()
+
+        self.flush_interval = 10
+
+        t = threading.Thread(target=self._periodic_flush, daemon=True)
+        t.start()
     
     def record_request_arrival(self, request: Request):
         stats = RequestArrivalStats.from_request(request)
@@ -63,20 +80,18 @@ class WorkloadMonitor:
         logger.info(f"Logged arrival of request {stats.request_id} at time {stats.arrival_time} "
                     f"with prompt length {stats.prompt_length} and output length {stats.output_length}.")
         
-        with open(self.workload_history_path, "a") as f:
-            json.dump(asdict(stats), f)
-            f.write("\n")
+        with self._flush_lock:
+            self._log_buffer.append(stats.asdict())
     
     def record_request_completion(self, request_id: str):
         logger.info(f"Request {request_id} has completed processing.")
         stats = RequestCompletionStats(
             request_id=request_id,
-            completion_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+            completion_time=datetime.now().strftime(TIME_FORMAT)
         )
         
-        with open(self.workload_history_path, "a") as f:
-            json.dump(asdict(stats), f)
-            f.write("\n")
+        with self._flush_lock:
+            self._log_buffer.append(asdict(stats))
 
     def _purge_old_requests(self):
         """Drop outdated requests (arrival_time < now - time_window)."""
@@ -125,3 +140,27 @@ class WorkloadMonitor:
                         f"prompt={wc.prompt_length}, output={wc.output_length}")
 
         return workload_classes
+
+    def _periodic_flush(self):
+        while True:
+            time.sleep(self.flush_interval)
+            self.flush()
+    
+    def flush(self):
+        """Atomically swap buffer and write to disk."""
+        with self._flush_lock:
+            if not self._log_buffer:
+                return
+            to_write = self._log_buffer
+            self._log_buffer = []
+
+        # Write outside the lock (fast I/O)
+        with open(self.workload_history_path, "a") as f:
+            for record in to_write:
+                json.dump(record, f)
+                f.write("\n")
+
+        logger.debug(
+            f"WorkloadMonitor: flushed {len(to_write)} entries to {self.workload_history_path}"
+        )
+    

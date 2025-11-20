@@ -7,6 +7,9 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import resolve_obj_by_qualname
 from typing import Union
+import threading
+import json
+from vllm.v1.utils import TimeProfiler
 
 logger = init_logger(__name__)
 
@@ -28,8 +31,6 @@ class StepStats:
     last_recompute_avg_output_confidence: Optional[float] = None
     cur_avg_output_confidence: Optional[float] = None
 
-    
-
 class StepEstimator:
     def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
@@ -41,8 +42,6 @@ class StepEstimator:
         self.cache_suffix = self.model_config.cache_suffix
 
         self.step_data_dir = self.scheduler_config.step_data_dir
-        self.eval_task = self.scheduler_config.eval_task # just for file naming
-        self.gen_len = self.scheduler_config.gen_len # just for file naming
 
         estimator_model_class_str = self.scheduler_config.step_estimator_model_class
         if estimator_model_class_str is not None:
@@ -55,65 +54,120 @@ class StepEstimator:
         else:
             self.estimator_model = None
         
-        # load from file if exists
+        # Load data (disabled in your version)
         self.df = self._load_data()
-        self._new_rows = 0
-    
+
+        # Single append-only buffer used by main thread
+        self._row_buffer: list[dict] = []
+
+        # One lock to protect buffer during atomic swap
+        self._lock = threading.Lock()
+
+        # Flush every N seconds (default 5s)
+        self.flush_interval = 10
+
+        # Start background flush thread
+        t = threading.Thread(target=self._periodic_flush, daemon=True)
+        t.start()
+
+        profiler_path = os.path.join(
+            self.vllm_config.experiment_config.experiment_dir,
+            "profiles/step_estimator/predict.jsonl")
+        self.predict_profiler = TimeProfiler(
+            name="step_estimator_predict",
+            file_path=profiler_path,
+            flush_interval=10,   # seconds
+        )
+
+    # ------------------------------------------------------------
+    # File utilities
+    # ------------------------------------------------------------
+
     def _get_file_path(self):
-        # safe_model_name = self.llm_model.replace("/", "_")
-        # cache_prefix = "_prefix" if self.cache_prefix else ""
-        # cache_suffix = "_suffix" if self.cache_suffix else ""
-        # block_size = f"_block{self.vllm_config.model_config.denoise_block_size}"
-        # confidence = f"_conf{self.vllm_config.scheduler_config.default_confidence_threshold}"
-        # timestamp = time.strftime("%Y-%m-%d_%H:%M:%S")
-        
-        # path = f"{self.step_data_dir}/{self.eval_task}/{self.gen_len}/{safe_model_name}{cache_prefix}{cache_suffix}{block_size}{confidence}.json"
         path = f"{self.step_data_dir}/step_data.json"
-        dir_path = os.path.dirname(path)
-        if not os.path.exists(dir_path):
-            os.makedirs(dir_path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         return path
     
     def _load_data(self):
-        file_path = self._get_file_path()
-        # if os.path.exists(file_path):
-        if False:
-            self.df = pd.read_json(file_path)
-            logger.info(f"Loaded step estimator data from {file_path}")
-        else:
-            self.df = pd.DataFrame(columns=[
-                "num_denoise_ran",
-                "num_unmasked_tokens",
-                "output_length",
-                "block",
-                "block_num_denoise_ran",
-                "block_num_unmasked_tokens",
-                "block_size"
-            ])
-            logger.info(f"No existing step estimator data found at {file_path}. Starting fresh.")
-    
-    def save_data(self):
-        file_path = self._get_file_path()
-        if self._new_rows > 0:
-            self.df.tail(self._new_rows).to_json(
-                file_path, 
-                orient="records", 
-                lines=True,
-                mode='a',
-                index=False
-            )
-            logger.info(f"Saved {self._new_rows} new rows to step estimator data at {file_path}")
-            self._new_rows = 0
-        else:
-            logger.info("No new data to save for step estimator.")
-    
+        # TODO: load existing data from file
+        return pd.DataFrame(columns=[
+            "num_denoise_ran",
+            "num_unmasked_tokens",
+            "output_length",
+            "block",
+            "block_num_denoise_ran",
+            "block_num_unmasked_tokens",
+            "block_size",
+            "confidence_threshold",
+        ])
+
+    # ------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------
+
     def add_data_point(self, stats: StepStats):
-        # Convert dataclass to dict and append as a single-row DataFrame
-        new_row = pd.DataFrame([asdict(stats)])
-        self.df = pd.concat([self.df, new_row], ignore_index=True)
-        self._new_rows += 1
-        
-    def predict(self, stats: Union[StepStats, list[StepStats]]) -> Union[float, list[float]]:
-        logger.debug(f"stats for prediction: {stats}")
-        assert self.estimator_model is not None, "Estimator model is not initialized."
-        return self.estimator_model.predict(stats)
+        """Fast, thread-safe append."""
+        row = asdict(stats)
+        with self._lock:
+            self._row_buffer.append(row)
+
+    def predict(self, stats):
+        # Ensure list-like for counting
+        if isinstance(stats, StepStats):
+            batch_size = 1
+        else:
+            batch_size = len(stats)
+
+        # ---------------------------
+        # Timed profiling section
+        # ---------------------------
+        with self.predict_profiler.section("predict"):
+            result = self.estimator_model.predict(stats)
+
+        # Extra metadata (optional)
+        self.predict_profiler.add_info("batch_size", batch_size)
+
+        # Commit this predict() entry
+        self.predict_profiler.commit()
+
+        return result
+
+    # ------------------------------------------------------------
+    # Background flush
+    # ------------------------------------------------------------
+
+    def _periodic_flush(self):
+        while True:
+            time.sleep(self.flush_interval)
+            self.flush()
+
+    def flush(self):
+        """
+        Thread-safe atomic swap flush:
+        - lock just long enough to steal row_buffer
+        - release lock immediately
+        - write & concat outside lock
+        """
+        # -------- atomic swap --------
+        with self._lock:
+            if not self._row_buffer:
+                return
+            to_write = self._row_buffer
+            self._row_buffer = []     # new empty buffer
+        # -------- lock released --------
+
+        # Convert to DataFrame (outside lock)
+        new_df = pd.DataFrame(to_write)
+
+        # Update in-memory df
+        self.df = pd.concat([self.df, new_df], ignore_index=True)
+
+        # Append to JSONL file
+        file_path = self._get_file_path()
+        with open(file_path, "a") as f:
+            for row in to_write:
+                f.write(json.dumps(row) + "\n")
+
+        logger.debug(
+            f"StepEstimator: flushed {len(to_write)} rows to {file_path}"
+        )

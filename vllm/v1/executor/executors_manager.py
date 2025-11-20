@@ -14,6 +14,7 @@ from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.utils import TimeProfiler
 
 import json
 import os
@@ -83,6 +84,7 @@ class ExecutorsManager:
 
         self.executors: dict[int, Executor] = {}
         self.cond: dict[int, asyncio.Condition] = {}
+        self.waiting_to_be_killed: dict[int, bool] = {}
 
         self.used_executor_ids = set()
 
@@ -91,6 +93,8 @@ class ExecutorsManager:
         self.scheduler_kv_cache_config = {}
         self.num_cpu_blocks = {}
         self.num_gpu_blocks = {}
+
+        self.profilers: dict[int, TimeProfiler] = {}
     
     def __repr__(self) -> str:
         return (
@@ -161,12 +165,18 @@ class ExecutorsManager:
         
         self.executors[executor_id] = executor
         self.cond[executor_id] = asyncio.Condition()
+        self.waiting_to_be_killed[executor_id] = False
         
         self.used_executor_ids.add(executor_id)
         self.num_gpu_blocks[executor_id] = num_gpu_blocks
         self.num_cpu_blocks[executor_id] = num_cpu_blocks
         self.scheduler_kv_cache_config[executor_id] = \
             scheduler_kv_cache_config
+        
+        profiler_path = os.path.join(
+            self.vllm_config.experiment_config.experiment_dir,
+            f"profiles/executors/{executor_id}.jsonl")
+        self.profilers[executor_id] = TimeProfiler(f"executor_{executor_id}", profiler_path)
 
         logger.debug(f"Executor {executor_id} launched.")
     
@@ -176,6 +186,7 @@ class ExecutorsManager:
 
         assert executor_id in self.used_executor_ids
         executor = self.executors[executor_id]
+        self.waiting_to_be_killed[executor_id] = True
         
         async with self.cond[executor_id]:
             logger.debug(f"waiting for executor {executor_id} to be idle")
@@ -187,6 +198,8 @@ class ExecutorsManager:
 
         del self.executors[executor_id]
         del self.cond[executor_id]
+        del self.waiting_to_be_killed[executor_id]
+        del self.profilers[executor_id]
             
         logger.debug(f"Executor {executor_id} killed.")
     

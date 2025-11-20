@@ -15,6 +15,11 @@ from fastapi import FastAPI, Request
 from transformers import AutoTokenizer
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d - %(message)s",
+)
+
 # logger.setLevel(logging.INFO)
 app = FastAPI()
 
@@ -87,15 +92,37 @@ def wait_until_up(url: str,
                 return
             logger.info(f"Server at {url} returned status {r.status_code}, retrying...")
         except Exception as e:
+            logger.info(f"Server at {url} not ready yet: {e}")
             pass  # connection refused, keep trying
 
         if time.monotonic() - start > timeout:
             raise TimeoutError(f"Server at {url} not ready after {timeout:.1f} seconds")
         time.sleep(interval)
+        
+async def wait_upstream_ready(url, timeout=120, interval=2.0):
+    start = time.monotonic()
+    async with httpx.AsyncClient() as client:
+        while True:
+            try:
+                r = await client.get(url, timeout=2.0)
+                if r.status_code in (200, 404, 405):
+                    return
+            except Exception:
+                logger.info(f"Upstream at {url} not ready yet, retrying...")
+                pass
+
+            if time.monotonic() - start > timeout:
+                raise RuntimeError(f"Upstream not ready after {timeout}s")
+
+            await asyncio.sleep(interval)
+
             
 @app.post("/v1/completions")
 async def proxy_completions(request: Request):
     data = await request.json()
+    
+    await wait_upstream_ready(app.state.upstream_url)
+    
     if app.state.first_request_arrival_time is None:
         app.state.first_request_arrival_time = time.monotonic()
 
@@ -190,6 +217,8 @@ def launch_proxy(upstream_url: str,
     else:
         app.state.tokenizer = None
 
+    logger.info(f"Tokenizer loaded")
+
     app.state.req_count = 0
     app.state.next_release_time = None
     app.state.resp_time = {}
@@ -199,7 +228,7 @@ def launch_proxy(upstream_url: str,
         logger.info(f"Starting proxy on port {port}, forwarding to {upstream_url}")
         uvicorn.run(app, host="0.0.0.0", port=port, log_level="error")
 
-    wait_until_up(upstream_url)
+    # wait_until_up(upstream_url)
         
     threading.Thread(target=_run, daemon=True).start()
     atexit.register(write_response_times, file_path=output_path)

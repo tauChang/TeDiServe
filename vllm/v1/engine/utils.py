@@ -766,3 +766,33 @@ def wait_for_engine_startup(
 
         logger.debug("%s from %s core engine process %s.", status,
                      "local" if local else "remote", eng_index)
+
+def get_slurm_assigned_cpus():
+    job_id = os.environ.get("SLURM_JOB_ID")
+    if job_id is None:
+        # raise RuntimeError("Not running under SLURM")
+        # just find all CPUs
+        cpus = os.cpu_count()
+        return [list(range(cpus))]
+
+    uid = os.getuid()
+    path = f"/sys/fs/cgroup/cpuset/slurm/uid_{uid}/job_{job_id}/cpuset.cpus"
+
+    try:
+        with open(path, "r") as f:
+            cpus = f.read().strip()
+    except FileNotFoundError:
+        # raise RuntimeError(f"SLURM cpuset file not found: {path}")
+        cpus = os.cpu_count()
+        cpus = f"0-{cpus-1}"
+
+    # expand ranges like 0-15,32-47 → [0,1,2,...15,32,...47]
+    cpu_list = []
+    for part in cpus.split(","):
+        if "-" in part:
+            start, end = map(int, part.split("-"))
+            cpu_list.extend(range(start, end + 1))
+        else:
+            cpu_list.append(int(part))
+
+    return cpu_list

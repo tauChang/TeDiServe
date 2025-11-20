@@ -34,6 +34,7 @@ from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
 from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
                                               create_request_queue)
 from vllm.v1.core.sched.utils import check_stop, LatencyProfile, SystemLogger
+from vllm.v1.utils import TimeProfiler
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.executor.abstract import Executor
@@ -188,6 +189,11 @@ class ExecutorState:
     
     def get_best_effort_req_ids(self, request_states: dict[str, RequestState]) -> list[str]:
         return [r_id for r_id in self.req_ids if request_states[r_id].is_best_effort]
+    
+    def is_drained(self) -> bool:
+        return len(self.req_ids) == 0 and \
+                len(self.pending_request_additions) == 0 and \
+                len(self.pending_request_removals) == 0
     
     # def is_urgent(self, request_states: dict[str, RequestState]) -> bool:
     #     for req_id in self.req_ids:
@@ -511,9 +517,17 @@ class UrgentOpportunisticWithBudgetScheduler(SchedulerInterface):
         self.system_logger = SystemLogger("system_logs", self)
         self.system_logger.log()
 
-        self.request_log_dir = os.path.join(
-            self.vllm_config.experiment_config.experiment_dir, "request_logs")
-        os.makedirs(self.request_log_dir, exist_ok=True)
+        profiler_path = os.path.join(
+            self.vllm_config.experiment_config.experiment_dir,
+            "profiles/scheduler/schedule.jsonl")
+        self.schedule_profiler = TimeProfiler("Schedule", profiler_path)
+        profiler_path = os.path.join(
+            self.vllm_config.experiment_config.experiment_dir,
+            "profiles/scheduler/update.jsonl")
+        self.update_profiler = TimeProfiler("Update", profiler_path)
+
+        self.request_added_or_removed = False
+        self.requests_need_update_step_estimates: list[str] = []
     
     def get_avg_num_tokens_per_req(self) -> float:
         if len(self.requests) == 0:
@@ -522,12 +536,13 @@ class UrgentOpportunisticWithBudgetScheduler(SchedulerInterface):
         return total_tokens / len(self.requests)
     
     def update_throughput_supply(self) -> None:
+        start_time = time.time()
         sum = 0
         max_tput_per_req = 0
         avg_num_tokens_per_req = self.get_avg_num_tokens_per_req()
 
-        for executor in self.executors_manager.executors.values():
-            tput = self.latency_profiles[self.executor_states[executor.id].tp_degree].get_throughput(
+        for executor_id in self.executor_states:
+            tput = self.latency_profiles[self.executor_states[executor_id].tp_degree].get_throughput(
                 self.cache_prefix, self.cache_suffix,  self.denoise_block_size, 
                 avg_num_tokens_per_req, self.max_num_scheduled_tokens)
 
@@ -539,6 +554,7 @@ class UrgentOpportunisticWithBudgetScheduler(SchedulerInterface):
         logger.debug(f"Updated throughput supply: {self.throughput_supply}")
         logger.debug(f"Updated max throughput demand per req: {self.max_throughput_demand_per_req}")
     
+        logger.debug(f"update_throughput_supply: {time.time() - start_time} seconds")
     # def update_max_throughput_demand_per_req(self) -> None:
     #     tp_degrees = set(
     #         exec_state.tp_degree for exec_state in self.executor_states.values())
@@ -550,6 +566,40 @@ class UrgentOpportunisticWithBudgetScheduler(SchedulerInterface):
     #                 self.cache_prefix, self.cache_suffix,  self.denoise_block_size, 
     #                 self.get_avg_num_tokens_per_req(), self.max_num_scheduled_tokens)
     #             for tp_degree in tp_degrees])
+    def update_step_estimates_batch(self, req_ids: list[str]) -> None:
+        all_stats = []
+        index_map = []   # (req_id, conf)
+
+        for req_id in req_ids:
+            req = self.request_states[req_id]
+            for conf in self.candidate_confidence_thresholds:
+                stats = StepStats(
+                    id=req_id,
+                    timestamp=req.last_stats.timestamp,
+                    num_denoise_ran=req.last_stats.num_denoise_ran,
+                    num_unmasked_tokens=req.last_stats.num_unmasked_tokens,
+                    num_cur_unmasked_tokens=req.last_stats.num_cur_unmasked_tokens,
+                    output_length=req.last_stats.output_length,
+                    block=req.last_stats.block,
+                    block_num_denoise_ran=req.last_stats.block_num_denoise_ran,
+                    block_num_unmasked_tokens=req.last_stats.block_num_unmasked_tokens,
+                    block_size=req.last_stats.block_size,
+                    confidence_threshold=conf,
+                    max_confidence_threshold=req.last_stats.max_confidence_threshold,
+                    last_recompute_avg_output_confidence=req.last_stats.last_recompute_avg_output_confidence,
+                    cur_avg_output_confidence=req.last_stats.cur_avg_output_confidence,
+                )
+                all_stats.append(stats)
+                index_map.append((req_id, conf))
+
+        # --- Single batched prediction ---
+        preds = self.step_estimator.predict(all_stats)
+
+        # --- Scatter the predictions back to their requests ---
+        for (req_id, conf), pred in zip(index_map, preds):
+            logger.debug(f"Batch updated step estimate for request {req_id} at confidence {conf}: {pred} steps left")
+            req = self.request_states[req_id]
+            req.pred_num_steps_left[conf] = pred
 
     def update_step_estimates(self, req_id: str) -> None:
         req = self.request_states[req_id]
@@ -922,599 +972,679 @@ class UrgentOpportunisticWithBudgetScheduler(SchedulerInterface):
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
 
-        # update executor states
-        self.update_executors()
+        with self.schedule_profiler.section("total"):
+            with self.schedule_profiler.section("update executors"):
+                # update executor states
+                self.update_executors()
 
-        old_request_states = copy.deepcopy(self.request_states)
+            with self.schedule_profiler.section("update_step_estimates"):
+                logger.debug(f"Updating step estimates for requests: {self.requests_need_update_step_estimates}")
+                if self.requests_need_update_step_estimates:
+                    self.update_step_estimates_batch(
+                        self.requests_need_update_step_estimates)
+                    self.requests_need_update_step_estimates = []
+            
+            with self.schedule_profiler.section("update requests"):
+                if self.request_added_or_removed:
+                    self.update_request_max_confidence_thresholds() # needs step estimates
+                    self.update_throughput_supply()
 
-        logger.debug(f"start of schedule, executors manager: {self.executors_manager}")
-        idle_executors = []
+                    self.request_added_or_removed = False
+            
 
-        for executor_id in self.executors_manager.executors:
-            if self.executors_manager.executors[executor_id].is_idle():
-                logger.debug(f"executor {executor_id} is idle. Status transition: IDLE -> CONSIDERED_FOR_SCHEDULING")
-                self.executors_manager.executors[executor_id].set_considered_for_scheduling()
-                idle_executors.append(executor_id)
-            else:
-                logger.debug(f"executor {executor_id} is not idle. Skip.")
+            with self.schedule_profiler.section("copy"):
+                old_request_states = copy.deepcopy(self.request_states)
 
-        # idle_executors are guranteed not killed from now on
-        logger.debug(f"idle executors: {idle_executors}")
-        # assert len(idle_executors) > 0
+            with self.schedule_profiler.section("init"):
+                logger.debug(f"start of schedule, executors manager: {self.executors_manager}")
+                idle_executors = []
+                idle_not_accepting_executors = []
 
-        scheduled_new_reqs: dict[int, list[Request]] = defaultdict(list)
-        scheduled_resumed_reqs: dict[int, list[Request]] = defaultdict(list)
-        scheduled_running_reqs: dict[int, list[Request]] = defaultdict(list)
-        # this guy is not used for now
-        preempted_reqs: dict[int, list[Request]] = {}
+                for executor_id in self.executors_manager.executors:
+                    if self.executors_manager.executors[executor_id].is_idle():
+                        logger.debug(f"executor {executor_id} is idle. Status transition: IDLE -> CONSIDERED_FOR_SCHEDULING")
+                        self.executors_manager.executors[executor_id].set_considered_for_scheduling()
+                        idle_executors.append(executor_id)
+                    elif self.executors_manager.executors[executor_id].is_idle_not_accepting_new_requests():
+                        logger.debug(f"executor {executor_id} is idle_not_accepting_new_requests. Status transition: IDLE_NOT_ACCEPTING_NEW_REQUESTS -> CONSIDERED_FOR_SCHEDULING")
+                        self.executors_manager.executors[executor_id].set_considered_for_scheduling()
+                        idle_not_accepting_executors.append(executor_id)
+                    else:
+                        logger.debug(f"executor {executor_id} is not idle. Skip.")
 
-        req_to_new_block_ids: dict[int, dict[str, tuple[list[int], ...]]] = \
-            defaultdict(dict) 
-        num_scheduled_tokens: dict[int, dict[str, int]] = defaultdict(dict)
+                # idle_executors are guranteed not killed from now on
+                logger.debug(f"idle executors: {idle_executors}")
+                logger.debug(f"idle not accepting executors: {idle_not_accepting_executors}")
+                # assert len(idle_executors) > 0
 
-        # requests_changed = set()
-        requests_in_scheduler_output = set()
+                scheduled_new_reqs: dict[int, list[Request]] = defaultdict(list)
+                scheduled_resumed_reqs: dict[int, list[Request]] = defaultdict(list)
+                scheduled_running_reqs: dict[int, list[Request]] = defaultdict(list)
+                # this guy is not used for now
+                preempted_reqs: dict[int, list[Request]] = {}
 
-        # Deal with all pending changes
-        logger.debug(f"Start pending remove changes")
-        for executor_id in idle_executors:
-            # note that req_ids_to_remove changes sizes during execution
-            for req_id in list(self.executor_states[executor_id].pending_request_removals):
-                logger.debug(f"Removing pending request {req_id} from its executor {executor_id}")
-                assert self.request_states[req_id].is_running
-                assert self.request_states[req_id].executor_id == executor_id
-                assert self.request_states[req_id].pending_executor_id is None
-                assert req_id in self.executor_states[executor_id].req_ids
-                
-                self.executor_states[executor_id].commit_pending_request_removal(req_id)
-                # self.request_states[req_id].commit_pending_executor()
-                self.request_states[req_id].remove_executor()
-                # requests_changed.add(req_id)
-                requests_in_scheduler_output.add(req_id)
+                req_to_new_block_ids: dict[int, dict[str, tuple[list[int], ...]]] = \
+                    defaultdict(dict) 
+                num_scheduled_tokens: dict[int, dict[str, int]] = defaultdict(dict)
 
-            logger.debug("\n")
-                    
-        logger.debug(f"Start pending add changes")
-        for executor_id in idle_executors:
-            # note that pending_request_additions changes sizes during execution
-            for req_id in list(self.executor_states[executor_id].pending_request_additions):
-                assert self.request_states[req_id].is_scheduled or \
-                    self.request_states[req_id].is_running
-                if self.request_states[req_id].is_scheduled:
-                    # the request is done being removed.
-                    logger.debug(f"Adding pending request {req_id} to its executor {executor_id}")
-                    self.executor_states[executor_id].commit_pending_request_addition(req_id)
-                    self.request_states[req_id].commit_pending_executor()
-                    # requests_changed.add(req_id)
-                    requests_in_scheduler_output.add(req_id)
-                elif self.request_states[req_id].is_running:
-                    3/0 # should not happen
-                    logger.debug(f"Request {req_id} still on executor {self.request_states[req_id].executor_id}. Cannot add to executor {executor_id} yet.")
-                    # remains in running_snapshot
-                else:
-                    raise Exception(f"Request {req_id} shouldn't be in unscheduled_snapshot.")
-            logger.debug("\n")
-        
-        # all pending changes should be done for the idle executors
-        assert all(
-            self.executor_states[executor_id].has_no_pending_changes()
-            for executor_id in idle_executors
-        )
-        logger.debug(f"End pending changes\n")
-        
-        # A (keep request on executor if possible)
-        logger.debug(f"Start A (keep request on executor if possible)")
-        start_time = time.time()
-        for executor_id in idle_executors:
-            logger.debug(f"Processing executor {executor_id}")
-            # loop from newest to oldest requests
-            logger.debug(f"Checking running requests on executor {executor_id} for SLO compliance.")
-            # for req_id in reversed(self.executor_states[executor_id].sorted_req_ids(self.request_states)):
-            # kick out earlier progress first
-            for req_id in order_by_unmask_progress(self.executor_states[executor_id].req_ids, decreasing=False):
-                logger.debug(f"Checking request {req_id} on executor {executor_id}.")
-                max_conf_idx = self.request_states[req_id].max_confidence_threshold_idx
-                logger.debug(f"max_conf_idx: {max_conf_idx}")
+                # requests_changed = set()
+                requests_in_scheduler_output = set()
 
-                # first update conf to min(old_conf, max_conf)
-                if self.request_states[req_id].confidence_threshold > self.candidate_confidence_thresholds[max_conf_idx]:
-                    old_conf = self.request_states[req_id].confidence_threshold
-                    self.request_states[req_id].confidence_threshold = self.candidate_confidence_thresholds[max_conf_idx]
-                    logger.debug(f"Lowered request {req_id} confidence threshold from {old_conf} to max allowed {self.request_states[req_id].confidence_threshold}")
+                if len(idle_executors) == 0 and len(idle_not_accepting_executors) == 0:
+                    logger.debug(f"No idle executors available for scheduling. Exiting schedule.")
+                    return {}
 
-                if not can_migrate(self.requests[req_id]):
-                    logger.debug(f"Request {req_id} cannot migrate since not at block boundary.")
-                    if self.request_states[req_id].is_best_effort or not self.is_possible_to_meet_slo(req_id):
-                        logger.debug(f"best effort or can't meet slo. set confidence to lowest.")
-                        self.request_states[req_id].confidence_threshold = self.candidate_confidence_thresholds[-1]
+            with self.schedule_profiler.section("stage 0"):
+                # Deal with all pending changes
+                logger.debug(f"Start pending remove changes")
+                for executor_id in idle_executors + idle_not_accepting_executors:
+                    # note that req_ids_to_remove changes sizes during execution
+                    for req_id in list(self.executor_states[executor_id].pending_request_removals):
+                        logger.debug(f"Removing pending request {req_id} from its executor {executor_id}")
+                        assert self.request_states[req_id].is_running
+                        assert self.request_states[req_id].executor_id == executor_id
+                        assert self.request_states[req_id].pending_executor_id is None
+                        assert req_id in self.executor_states[executor_id].req_ids
+                        
+                        self.executor_states[executor_id].commit_pending_request_removal(req_id)
+                        # self.request_states[req_id].commit_pending_executor()
+                        self.request_states[req_id].remove_executor()
+                        # requests_changed.add(req_id)
                         requests_in_scheduler_output.add(req_id)
-                        continue
-                    # can lower confidence threshold, but cannot move to another executor
-                    old_conf = self.request_states[req_id].confidence_threshold
-                    # for conf in [x for x in self.candidate_confidence_thresholds]:
-                    for conf in self.candidate_confidence_thresholds[max_conf_idx:]:
-                        logger.debug(f"Considering confidence threshold {conf} for request {req_id}")
-                        self.request_states[req_id].confidence_threshold = conf
-                        if all_slos_met(
-                            [req_id],
-                            self.executor_states[executor_id].tp_degree,
-                            # batch_size,
-                            self.executor_states[executor_id].get_projected_req_ids(),
-                            {req_id: conf}):
-                            logger.debug(f"Keeping request {req_id} on executor {executor_id} with conf {conf}")
-                            # no need to add_request, bc it's already on it
-                            # do need to add it to requests_changed to make scheduled_running_reqs
+
+                    logger.debug("\n")
+                            
+                logger.debug(f"Start pending add changes")
+                for executor_id in idle_executors + idle_not_accepting_executors:
+                    # note that pending_request_additions changes sizes during execution
+                    for req_id in list(self.executor_states[executor_id].pending_request_additions):
+                        assert self.request_states[req_id].is_scheduled or \
+                            self.request_states[req_id].is_running
+                        if self.request_states[req_id].is_scheduled:
+                            # the request is done being removed.
+                            logger.debug(f"Adding pending request {req_id} to its executor {executor_id}")
+                            self.executor_states[executor_id].commit_pending_request_addition(req_id)
+                            self.request_states[req_id].commit_pending_executor()
                             # requests_changed.add(req_id)
-                            break
-                    if old_conf != self.request_states[req_id].confidence_threshold:
-                        logger.debug(f"Updated confidence: {old_conf} ==> {self.request_states[req_id].confidence_threshold}")
-                    requests_in_scheduler_output.add(req_id)
-                    continue
-                else:
-                    # check slo
-                    assert self.request_states[req_id].is_running
-                    if self.request_states[req_id].is_best_effort:
-                        logger.debug(f"Request {req_id} is best-effort, so skip checking SLO.")
-                        requests_in_scheduler_output.add(req_id)
-                        continue
-                    # batch_size = self.executor_states[executor_id].get_projected_batch_size()
-                    # batch_size = self.executor_states[executor_id].get_batch_size() # don't include pending changes, bc they are already committed above
-                    # logger.debug(f"Checking request {req_id}. Batch size: {batch_size}")
+                            requests_in_scheduler_output.add(req_id)
+                        elif self.request_states[req_id].is_running:
+                            3/0 # should not happen
+                            logger.debug(f"Request {req_id} still on executor {self.request_states[req_id].executor_id}. Cannot add to executor {executor_id} yet.")
+                            # remains in running_snapshot
+                        else:
+                            raise Exception(f"Request {req_id} shouldn't be in unscheduled_snapshot.")
+                    logger.debug("\n")
+                
+                # all pending changes should be done for the idle executors
+                assert all(
+                    self.executor_states[executor_id].has_no_pending_changes()
+                    for executor_id in idle_executors + idle_not_accepting_executors
+                )
+                logger.debug(f"End pending changes\n")
+            
+            with self.schedule_profiler.section("stage 1"):
+                # A (keep request on executor if possible)
+                logger.debug(f"Start A (keep request on executor if possible)")
+                start_time = time.time()
+                for executor_id in idle_executors + idle_not_accepting_executors:
+                    logger.debug(f"Processing executor {executor_id}")
+                    # loop from newest to oldest requests
+                    logger.debug(f"Checking running requests on executor {executor_id} for SLO compliance.")
+                    # for req_id in reversed(self.executor_states[executor_id].sorted_req_ids(self.request_states)):
+                    # kick out earlier progress first
+                    for req_id in order_by_unmask_progress(self.executor_states[executor_id].req_ids, decreasing=False):
+                        logger.debug(f"Checking request {req_id} on executor {executor_id}.")
+                        max_conf_idx = self.request_states[req_id].max_confidence_threshold_idx
+                        logger.debug(f"max_conf_idx: {max_conf_idx}")
 
+                        # first update conf to min(old_conf, max_conf)
+                        if self.request_states[req_id].confidence_threshold > self.candidate_confidence_thresholds[max_conf_idx]:
+                            old_conf = self.request_states[req_id].confidence_threshold
+                            self.request_states[req_id].confidence_threshold = self.candidate_confidence_thresholds[max_conf_idx]
+                            logger.debug(f"Lowered request {req_id} confidence threshold from {old_conf} to max allowed {self.request_states[req_id].confidence_threshold}")
+
+                        if not can_migrate(self.requests[req_id]):
+                            logger.debug(f"Request {req_id} cannot migrate since not at block boundary.")
+                            if self.request_states[req_id].is_best_effort or not self.is_possible_to_meet_slo(req_id):
+                                logger.debug(f"best effort or can't meet slo. set confidence to lowest.")
+                                self.request_states[req_id].confidence_threshold = self.candidate_confidence_thresholds[-1]
+                                requests_in_scheduler_output.add(req_id)
+                                continue
+                            # can lower confidence threshold, but cannot move to another executor
+                            old_conf = self.request_states[req_id].confidence_threshold
+                            # for conf in [x for x in self.candidate_confidence_thresholds]:
+                            for conf in self.candidate_confidence_thresholds[max_conf_idx:]:
+                                logger.debug(f"Considering confidence threshold {conf} for request {req_id}")
+                                self.request_states[req_id].confidence_threshold = conf
+                                if all_slos_met(
+                                    [req_id],
+                                    self.executor_states[executor_id].tp_degree,
+                                    # batch_size,
+                                    self.executor_states[executor_id].get_projected_req_ids(),
+                                    {req_id: conf}):
+                                    logger.debug(f"Keeping request {req_id} on executor {executor_id} with conf {conf}")
+                                    # no need to add_request, bc it's already on it
+                                    # do need to add it to requests_changed to make scheduled_running_reqs
+                                    # requests_changed.add(req_id)
+                                    break
+                            if old_conf != self.request_states[req_id].confidence_threshold:
+                                logger.debug(f"Updated confidence: {old_conf} ==> {self.request_states[req_id].confidence_threshold}")
+                            requests_in_scheduler_output.add(req_id)
+                            continue
+                        else:
+                            if executor_id in idle_not_accepting_executors:
+                                logger.debug(f"Executor {executor_id} not accepting new requests. Removing request {req_id}.")
+                                self.executor_states[executor_id].remove_request(req_id)
+                                self.request_states[req_id].remove_executor()
+                                self.request_states[req_id].remove_pending_executor()
+                                requests_in_scheduler_output.add(req_id)
+                                continue
+                            # check slo
+                            assert self.request_states[req_id].is_running
+                            if self.request_states[req_id].is_best_effort:
+                                logger.debug(f"Request {req_id} is best-effort, so skip checking SLO.")
+                                requests_in_scheduler_output.add(req_id)
+                                continue
+                            # batch_size = self.executor_states[executor_id].get_projected_batch_size()
+                            # batch_size = self.executor_states[executor_id].get_batch_size() # don't include pending changes, bc they are already committed above
+                            # logger.debug(f"Checking request {req_id}. Batch size: {batch_size}")
+
+                            flag_scheduled = False
+                            # for conf in [x for x in self.candidate_confidence_thresholds if x >= self.request_states[req_id].confidence_threshold]:
+                            # try to see if we can up the confidence threshold 
+                            for conf in self.candidate_confidence_thresholds[max_conf_idx:]:
+                                if conf < self.request_states[req_id].confidence_threshold:
+                                    break
+                                logger.debug(f"Considering confidence threshold {conf} for request {req_id}")
+                                if not all_slos_met(
+                                    [req_id],
+                                    self.executor_states[executor_id].tp_degree,
+                                    # batch_size,
+                                    self.executor_states[executor_id].get_projected_req_ids(),
+                                    {req_id: conf}):
+                                    continue
+
+                                logger.debug(f"Keeping request {req_id} on executor {executor_id} with conf {conf}")
+                                # no need to add_request, bc it's already on it
+                                # do need to add it to requests_changed to make scheduled_running_reqs
+                                # requests_changed.add(req_id)
+                                requests_in_scheduler_output.add(req_id)
+                                self.request_states[req_id].confidence_threshold = conf
+                                # priority remains the same
+                                flag_scheduled = True
+                                break
+                            if not flag_scheduled:
+                                logger.debug(f"Removing request {req_id} from executor {executor_id} due to SLO miss")
+                                # remove_request(request, executor_id)
+                                # cluster_snapshot[executor_id].pop(req_id)
+                                self.executor_states[executor_id].remove_request(req_id)
+                                self.request_states[req_id].remove_executor()
+                                self.request_states[req_id].remove_pending_executor()
+                                # requests_changed.add(req_id)
+                                requests_in_scheduler_output.add(req_id)
+                                
+                        logger.debug("\n")
+                logger.debug(f"End A\n")
+                logger.debug(f"A took {time.time() - start_time} seconds")
+                # finished A for all executors
+
+            with self.schedule_profiler.section("stage 2"):
+                # B
+                start_time = time.time()
+                logger.debug(f"Start B (schedule unscheduled normal & opportunistic requests)")
+                # unscheduled_requests = deque(order_by_unmask_progress(
+                #     [r_id for r_id in self.request_states if self.request_states[r_id].is_unscheduled and \
+                #         self.is_possible_to_meet_slo(r_id)]))
+                unscheduled_requests = [
+                    (-self.requests[r_id].unmask_progress, r_id) for r_id in self.request_states if self.request_states[r_id].is_unscheduled and \
+                    self.is_possible_to_meet_slo(r_id)]
+                heapq.heapify(unscheduled_requests)
+                
+                while len(unscheduled_requests) > 0:
+                    # maybe pick the request with the most progress?
+                    # req_id = unscheduled_requests.popleft()
+                    req_id = heapq.heappop(unscheduled_requests)[1]
+                    request = self.requests[req_id]
+                    logger.debug(f"Processing waiting unscheduled request {req_id}.")
+                    
+                    # loop through executors, in (ascending TP_degree, descending normal batch size, ascending total batch size) order
                     flag_scheduled = False
-                    # for conf in [x for x in self.candidate_confidence_thresholds if x >= self.request_states[req_id].confidence_threshold]:
-                    # try to see if we can up the confidence threshold 
+                    # for conf in self.candidate_confidence_thresholds:
+                    max_conf_idx = self.request_states[req_id].max_confidence_threshold_idx
+                    logger.debug(f"max_conf_idx for request {req_id}: {max_conf_idx}")
                     for conf in self.candidate_confidence_thresholds[max_conf_idx:]:
-                        if conf < self.request_states[req_id].confidence_threshold:
+                        if flag_scheduled:
                             break
-                        logger.debug(f"Considering confidence threshold {conf} for request {req_id}")
-                        if not all_slos_met(
-                            [req_id],
-                            self.executor_states[executor_id].tp_degree,
-                            # batch_size,
-                            self.executor_states[executor_id].get_projected_req_ids(),
-                            {req_id: conf}):
+                        logger.debug(f"Trying confidence threshold {conf}.")
+                        for ex_id in sorted(
+                            [e_id for e_id in self.executor_states if not self.executors_manager.executors[e_id].is_killing() and not self.executors_manager.waiting_to_be_killed[e_id] and self.executor_states[e_id].has_no_pending_changes()],
+                            key=lambda eid: (
+                                self.executor_states[eid].tp_degree,
+                                -get_normal_batch_size(eid),
+                                self.executor_states[eid].get_batch_size() - get_normal_batch_size(eid)
+                                )
+                            ):
+                            if flag_scheduled:
+                                break
+                            logger.debug(f"Considering executor {ex_id}.")
+
+                            batch_size = request.num_tokens + get_normal_batch_size(ex_id)
+                            if batch_size > self.max_num_scheduled_tokens:
+                                logger.debug(f"Can't schedule due to batch size {batch_size} > max {self.max_num_scheduled_tokens}. Skipping executor.")
+                                continue
+
+                            # check if all normal reqs can meet SLO
+                            requests_scheduled = [req_id] + self.executor_states[ex_id].get_normal_req_ids(self.request_states)
+
+                            if not all_slos_met(
+                                requests_scheduled,
+                                self.executor_states[ex_id].tp_degree,
+                                # batch_size,
+                                requests_scheduled,
+                                {req_id: conf}):
+                                logger.debug(f"Can't schedule due to SLO miss when considering all normal requests. Skipping executor.")
+                                continue
+                            
+                            # scheduling this request to this executor
+                            if ex_id in idle_executors:
+                                # add now
+                                logger.debug(f"Executor {ex_id} is idle, so adding urgent request {req_id} to it with confidence {conf}.")
+                                self.executor_states[ex_id].add_request(request)
+                                self.request_states[req_id].set_executor(ex_id, RequestStatePriority.NORMAL, conf)
+                                self.request_states[req_id].set_pending_executor(ex_id, RequestStatePriority.NORMAL, conf)
+                                requests_in_scheduler_output.add(req_id)
+                            else:
+                                # add later
+                                logger.debug(f"Executor {ex_id} is not idle, so marking urgent request {req_id} for pending addition with confidence {conf}.")
+                                self.executor_states[ex_id].mark_pending_request_addition(request)
+                                self.request_states[req_id].set_pending_executor(ex_id, RequestStatePriority.NORMAL, conf)
+                            
+                            # requests_changed.add(req_id)
+                            flag_scheduled = True
+
+                            # look at opportunistic then best-effort requests, kicking off if necessary
+                            for r_id in self.executor_states[ex_id].get_opportunistic_req_ids(self.request_states) + \
+                                self.executor_states[ex_id].get_best_effort_req_ids(self.request_states):
+                                assert self.request_states[r_id].is_running
+                                logger.debug(f"looking at request {r_id} on executor {ex_id} to see if it can be kept.")
+                                logger.debug(f"self.executor_states[{ex_id}]: {self.executor_states[ex_id]}")
+
+                                remove_request_flag = False
+                                
+                                new_batch_size = batch_size + self.requests[r_id].num_tokens
+                                batch_size_exceeded = new_batch_size > self.max_num_scheduled_tokens
+                                remove_request_flag |= batch_size_exceeded
+                                logger.debug(f"batch size exceeded: {batch_size_exceeded}")
+
+                                if not remove_request_flag:
+                                    slo_miss = not all_slos_met(
+                                        [r for r in (requests_scheduled + [r_id]) if not self.request_states[r].is_best_effort],
+                                        self.executor_states[ex_id].tp_degree,
+                                        # new_batch_size,
+                                        requests_scheduled + [r_id],
+                                        {req_id: conf})
+                                    logger.debug(f"slo miss: {slo_miss}")
+                                    remove_request_flag |= slo_miss
+
+                                if remove_request_flag:
+                                    logger.debug(f"Removing {"opportunistic" if self.request_states[r_id].is_opportunistic else "best-effort"} request {r_id}")
+                                    
+                                    if ex_id in idle_executors:
+                                        logger.debug(f"Executor {ex_id} is idle, so removing request {r_id} immediately.")
+                                        self.executor_states[ex_id].remove_request(r_id)
+                                        self.request_states[r_id].remove_executor()
+                                        self.request_states[r_id].remove_pending_executor()
+                                        requests_in_scheduler_output.add(req_id)
+
+                                        # if self.request_states[r_id].is_unscheduled:
+                                        #     unscheduled_requests.add(r_id)
+                                        assert self.request_states[r_id].is_unscheduled
+                                        if self.is_possible_to_meet_slo(r_id):
+                                            # unscheduled_requests.add(r_id)
+                                            unscheduled_requests.append((-self.requests[r_id].unmask_progress, r_id))
+                                            heapq.heapify(unscheduled_requests)
+                                    else:
+                                        logger.debug(f"Executor {ex_id} is not idle, so marking request {r_id} for pending removal.")
+                                        self.executor_states[ex_id].mark_pending_request_removal(r_id)
+                                        self.request_states[r_id].remove_pending_executor()
+                                    
+                                else:
+                                    requests_scheduled.append(r_id)
+                                    batch_size += self.requests[r_id].num_tokens
+                                    logger.debug(f"Keeping opportunistic request {r_id} on executor {ex_id}. Updated batch size: {batch_size}")
+                                        
+
+                    if not flag_scheduled:
+                        logger.debug(f"Cannot schedule urgent request {req_id} to any idle executor due to SLO miss. Skipping for now.")
+                        # if not possible (likely due to max_num_batch_tokens), skip for now
+                        # skipped_waiting_requests.add_request(request)
+                        # skipped_waiting.append(req_id)
+                        # just find the lowest load executor and assign
+                        # no need to set request_states_snapshot because nothing has changed
+                
+                logger.debug(f"End B\n")
+                logger.debug(f"B took {time.time() - start_time} seconds")
+            
+            with self.schedule_profiler.section("stage 3"):
+                start_time = time.time()
+                # logger.debug(f"Start C (schedule opportunistic requests)")
+                # Opportunistic promoting (only looking at requests on idle executors)
+                # only promote to executors with no requests scheduled at all
+                promoted_req_ids = set()
+                
+                zero_load_executors = [
+                    ex_id
+                    for ex_id in idle_executors
+                    if self.executor_states[ex_id].is_drained()
+                ]
+                while len(zero_load_executors) > 0:
+                    # find the executor with highest TP degree
+                    tgt_ex_id = max(zero_load_executors, key=lambda eid: self.executor_states[eid].tp_degree)
+                    logger.debug(f"Looking at zero load executor {tgt_ex_id} with TP degree {self.executor_states[tgt_ex_id].tp_degree}")
+                    logger.debug(f"{self.executor_states[tgt_ex_id]}")
+                    # find a job to promote
+                    # find the job with the least (priority, conf, slo_time_remaining - est_time_left)
+                    best_req_id = None
+                    best_metric = (RequestStatePriority.BEST_EFFORT + 1, 1.1, float('inf'))
+                    # only look at req on idle executors
+                    for src_ex_id in idle_executors:
+                        # if best_req_id is not None:
+                        #     break
+                        for req_id in self.executor_states[src_ex_id].req_ids:
+                            if req_id in promoted_req_ids:
+                                continue
+                            if not can_migrate(self.requests[req_id]):
+                                logger.debug(f"Request {req_id} cannot migrate since not at block boundary.")
+                                requests_in_scheduler_output.add(req_id)
+                                continue
+                            logger.debug(f"Considering request {req_id} on executor {src_ex_id} for promotion to executor {tgt_ex_id}")
+                            # num_tokens = self.requests[req_id].num_tokens
+                            # _, src_step_latency = self.get_profile_latency(
+                            #     self.executor_states[src_ex_id].tp_degree, self.executor_states[src_ex_id].get_projected_batch_size())
+                            # _, tgt_step_latency = self.get_profile_latency(
+                            #     self.executor_states[tgt_ex_id].tp_degree, num_tokens)
+                            # logger.debug(f"src_step_latency: {src_step_latency}")
+                            # logger.debug(f"tgt_step_latency: {tgt_step_latency}")
+                            # if tgt_step_latency < src_step_latency:
+                            src_time_left = self.get_estimated_time_left(
+                                req_id,
+                                self.executor_states[src_ex_id].tp_degree,
+                                # self.executor_states[src_ex_id].get_batch_size(),
+                                self.executor_states[src_ex_id].get_projected_req_ids(),
+                                self.request_states[req_id].confidence_threshold)
+                            tgt_time_left = self.get_estimated_time_left(
+                                req_id,
+                                self.executor_states[tgt_ex_id].tp_degree,
+                                # num_tokens,
+                                [req_id],
+                                self.request_states[req_id].confidence_threshold)
+                            logger.debug(f"src_time_left: {src_time_left}")
+                            logger.debug(f"tgt_time_left: {tgt_time_left}")
+                            if tgt_time_left < src_time_left:
+                                best_req_id = req_id
+                                # possibly just pick the first one we see that satisfies this 
+                                est_time_left = self.get_estimated_time_left(
+                                    req_id, 
+                                    self.executor_states[src_ex_id].tp_degree,
+                                    # self.executor_states[src_ex_id].get_batch_size(),
+                                    self.executor_states[src_ex_id].req_ids,
+                                    self.request_states[req_id].confidence_threshold)
+                                slo_time_remaining = self.requests[req_id].slo_time_remaining
+                                metric = (
+                                    self.request_states[req_id].priority,
+                                    self.request_states[req_id].confidence_threshold,
+                                    # est_time_left - slo_time_remaining
+                                    slo_time_remaining - est_time_left
+                                )
+                                if metric < best_metric:
+                                    best_metric = metric
+                                    best_req_id = req_id
+                                    logger.debug(f"Found a better candidate for promotion: request {req_id} from executor {src_ex_id} with metric {metric}")
+                    
+                    logger.debug(f"Best request to promote to executor {tgt_ex_id}: {best_req_id}")
+                    # promote it
+                    if best_req_id is not None:
+                        src_ex_id = self.request_states[best_req_id].executor_id
+                        logger.debug(f"Promoting opportunistic request {best_req_id} from executor {src_ex_id} to executor {tgt_ex_id}")
+                        assert src_ex_id != tgt_ex_id
+
+                        # find the highest confidence that can meet SLO on the new executor
+                        # if best effort, just use the highest confidence
+                        if self.request_states[best_req_id].is_best_effort:
+                            # new_conf = max(self.candidate_confidence_thresholds)
+                            new_conf = min(self.candidate_confidence_thresholds)
+                        else:
+                            new_conf = None
+                            # for conf in self.candidate_confidenkce_thresholds:
+                            max_conf_idx = self.request_states[best_req_id].max_confidence_threshold_idx
+                            logger.debug(f"max_conf_idx for request {best_req_id}: {max_conf_idx}")
+                            for conf in self.candidate_confidence_thresholds[max_conf_idx:]:
+                                if all_slos_met(
+                                    [best_req_id],
+                                    self.executor_states[tgt_ex_id].tp_degree,
+                                    # self.requests[best_req_id].num_tokens,
+                                    [best_req_id],
+                                    {best_req_id: conf}):
+                                    new_conf = conf
+                                    break
+                        logger.debug(f"new_conf: {new_conf}. Old conf: {self.request_states[best_req_id].confidence_threshold}")
+                        # assert new_conf is not None
+                        # super rare case: request becomes best-effort DURING promotion
+                        # we just use the lowest confidence then
+                        if new_conf is None:
+                            new_conf = min(self.candidate_confidence_thresholds)
+                        # assert new_conf >= self.request_states[best_req_id].confidence_threshold
+                        # if src_time_left and tgt_time_left are very close, the confidence might actually drop
+                        # it's fine...
+
+                        # remove from src
+                        self.executor_states[src_ex_id].remove_request(best_req_id)
+                        self.request_states[best_req_id].remove_executor()
+                        self.request_states[best_req_id].remove_pending_executor()
+                        
+                        priority = RequestStatePriority.OPPORTUNISTIC if not self.request_states[best_req_id].is_best_effort else RequestStatePriority.BEST_EFFORT
+                        self.executor_states[tgt_ex_id].add_request(self.requests[best_req_id])
+                        self.request_states[best_req_id].set_executor(tgt_ex_id, priority, new_conf)
+                        self.request_states[best_req_id].set_pending_executor(tgt_ex_id, priority, new_conf)
+                        
+                        promoted_req_ids.add(best_req_id)
+                        requests_in_scheduler_output.add(best_req_id)
+
+                        zero_load_executors.remove(tgt_ex_id)
+                        if len(self.executor_states[src_ex_id].req_ids) == 0:
+                            zero_load_executors.append(src_ex_id)
+                    else:
+                        # nothing to promote
+                        logger.debug(f"Nothing to promote to executor {tgt_ex_id}.")
+                        break
+                
+                logger.debug(f"End C\n")
+                logger.debug(f"C took {time.time() - start_time} seconds")
+
+            with self.schedule_profiler.section("stage 4"):
+                start_time = time.time()
+                logger.debug(f"Start D (schedule best-effort requests)")
+                # Best Effort
+                # These requests has estimated time left > SLO remaining time even at the lowest confidence threshold,
+                # given current cluster load.
+                # Schedule them onto whichever executor with enough token budget and
+                # the existing requests on it can still meet SLO.
+                for req_id in [r_id for r_id in self.request_states if self.request_states[r_id].is_unscheduled]:
+                    logger.debug(f"Processing best-effort request {req_id}.")
+                    # conf = max(self.candidate_confidence_thresholds)
+                    conf = min(self.candidate_confidence_thresholds)
+                    for executor_id in idle_executors:
+                        logger.debug(f"Considering executor {executor_id}")
+                        # for idle executors, still possible there are pending add
+                        new_batch_size = self.requests[req_id].num_tokens + self.executor_states[executor_id].get_batch_size()
+                        
+                        if new_batch_size > self.max_num_scheduled_tokens:
+                            logger.debug(f"Can't schedule due to batch size {new_batch_size} > max {self.max_num_scheduled_tokens}. Skipping executor.")
                             continue
 
-                        logger.debug(f"Keeping request {req_id} on executor {executor_id} with conf {conf}")
-                        # no need to add_request, bc it's already on it
-                        # do need to add it to requests_changed to make scheduled_running_reqs
-                        # requests_changed.add(req_id)
-                        requests_in_scheduler_output.add(req_id)
-                        self.request_states[req_id].confidence_threshold = conf
-                        # priority remains the same
-                        flag_scheduled = True
-                        break
-                    if not flag_scheduled:
-                        logger.debug(f"Removing request {req_id} from executor {executor_id} due to SLO miss")
-                        # remove_request(request, executor_id)
-                        # cluster_snapshot[executor_id].pop(req_id)
-                        self.executor_states[executor_id].remove_request(req_id)
-                        self.request_states[req_id].remove_executor()
-                        self.request_states[req_id].remove_pending_executor()
-                        # requests_changed.add(req_id)
-                        requests_in_scheduler_output.add(req_id)
+                        normal_and_opportunistic_req_ids = self.executor_states[executor_id].get_conditional_req_ids(
+                            self.request_states, {RequestStatePriority.NORMAL, RequestStatePriority.OPPORTUNISTIC})
+                        if not all_slos_met(
+                            normal_and_opportunistic_req_ids,
+                            self.executor_states[executor_id].tp_degree,
+                            normal_and_opportunistic_req_ids + [req_id],
+                            {req_id: conf}):
+                            logger.debug(f"Can't schedule due to SLO miss when considering normal and opportunistic requests. Skipping executor.")
+                            continue
                         
-                logger.debug("\n")
-        logger.debug(f"End A\n")
-        logger.debug(f"A took {time.time() - start_time} seconds")
-        # finished A for all executors
+                        # schedule!
+                        self.executor_states[executor_id].add_request(self.requests[req_id])
+                        self.request_states[req_id].set_executor(executor_id, RequestStatePriority.BEST_EFFORT, conf)
+                        self.request_states[req_id].set_pending_executor(executor_id, RequestStatePriority.BEST_EFFORT, conf)
+                        logger.debug(f"Scheduling best-effort request {req_id} to executor {executor_id} with confidence {conf}.")
 
-        # B
-        start_time = time.time()
-        logger.debug(f"Start B (schedule unscheduled normal & opportunistic requests)")
-        # unscheduled_requests = deque(order_by_unmask_progress(
-        #     [r_id for r_id in self.request_states if self.request_states[r_id].is_unscheduled and \
-        #         self.is_possible_to_meet_slo(r_id)]))
-        unscheduled_requests = [
-            (-self.requests[r_id].unmask_progress, r_id) for r_id in self.request_states if self.request_states[r_id].is_unscheduled and \
-            self.is_possible_to_meet_slo(r_id)]
-        heapq.heapify(unscheduled_requests)
-        
-        while len(unscheduled_requests) > 0:
-            # maybe pick the request with the most progress?
-            # req_id = unscheduled_requests.popleft()
-            req_id = heapq.heappop(unscheduled_requests)[1]
-            request = self.requests[req_id]
-            logger.debug(f"Processing waiting unscheduled request {req_id}.")
-            
-            # loop through executors, in (ascending TP_degree, descending normal batch size, ascending total batch size) order
-            flag_scheduled = False
-            # for conf in self.candidate_confidence_thresholds:
-            max_conf_idx = self.request_states[req_id].max_confidence_threshold_idx
-            logger.debug(f"max_conf_idx for request {req_id}: {max_conf_idx}")
-            for conf in self.candidate_confidence_thresholds[max_conf_idx:]:
-                if flag_scheduled:
-                    break
-                logger.debug(f"Trying confidence threshold {conf}.")
-                for ex_id in sorted(
-                    [e_id for e_id in self.executor_states if not self.executors_manager.executors[e_id].is_killing() and self.executor_states[e_id].has_no_pending_changes()],
-                    key=lambda eid: (
-                        self.executor_states[eid].tp_degree,
-                        -get_normal_batch_size(eid),
-                        self.executor_states[eid].get_batch_size() - get_normal_batch_size(eid)
-                        )
-                    ):
-                    if flag_scheduled:
-                        break
-                    logger.debug(f"Considering executor {ex_id}.")
-
-                    batch_size = request.num_tokens + get_normal_batch_size(ex_id)
-                    if batch_size > self.max_num_scheduled_tokens:
-                        logger.debug(f"Can't schedule due to batch size {batch_size} > max {self.max_num_scheduled_tokens}. Skipping executor.")
-                        continue
-
-                    # check if all normal reqs can meet SLO
-                    requests_scheduled = [req_id] + self.executor_states[ex_id].get_normal_req_ids(self.request_states)
-
-                    if not all_slos_met(
-                        requests_scheduled,
-                        self.executor_states[ex_id].tp_degree,
-                        # batch_size,
-                        requests_scheduled,
-                        {req_id: conf}):
-                        logger.debug(f"Can't schedule due to SLO miss when considering all normal requests. Skipping executor.")
-                        continue
-                    
-                    # scheduling this request to this executor
-                    if ex_id in idle_executors:
-                        # add now
-                        logger.debug(f"Executor {ex_id} is idle, so adding urgent request {req_id} to it with confidence {conf}.")
-                        self.executor_states[ex_id].add_request(request)
-                        self.request_states[req_id].set_executor(ex_id, RequestStatePriority.NORMAL, conf)
-                        self.request_states[req_id].set_pending_executor(ex_id, RequestStatePriority.NORMAL, conf)
                         requests_in_scheduler_output.add(req_id)
+                        break
+                
+                logger.debug(f"End D\n")
+                logger.debug(f"D took {time.time() - start_time} seconds")
+            
+            with self.schedule_profiler.section("stage 5"):
+                start_time = time.time()
+                # For the remaining unscheduled, we just skip...
+
+                unscheduled_requests = set(
+                    [r_id for r_id in self.request_states if self.request_states[r_id].is_unscheduled]
+                )
+                logger.debug(f"Unscheduled requests after scheduling: {unscheduled_requests}")
+
+
+                # Actually add and remove requests
+                logger.debug(f"Finalizing scheduling decisions and updating states.")
+                for req_id in requests_in_scheduler_output:
+                    if old_request_states[req_id].executor_id != self.request_states[req_id].executor_id:
+                        logger.debug(f"Request {req_id} changed executor from {old_request_states[req_id].executor_id} to {self.request_states[req_id].executor_id}.")
+                        # None -> Some
+                        # Some -> None
+                        # Some -> Some (different)
+                        
+                        # remove from old
+                        if old_request_states[req_id].executor_id is not None:
+                            remove_request(
+                                self.requests[req_id], old_request_states[req_id].executor_id)
+                        if self.request_states[req_id].executor_id is not None:
+                            add_new_request(
+                                self.requests[req_id], self.request_states[req_id].executor_id)
                     else:
-                        # add later
-                        logger.debug(f"Executor {ex_id} is not idle, so marking urgent request {req_id} for pending addition with confidence {conf}.")
-                        self.executor_states[ex_id].mark_pending_request_addition(request)
-                        self.request_states[req_id].set_pending_executor(ex_id, RequestStatePriority.NORMAL, conf)
-                    
-                    # requests_changed.add(req_id)
-                    flag_scheduled = True
+                        # if it's a future change, don't do anything
+                        logger.debug(f"Request {req_id} remains on the same executor {self.request_states[req_id].executor_id}.")
+                        if self.request_states[req_id].executor_id is None:
+                            # None -> None
+                            # do nothing
+                            # this is possible if a request has pending addition, but 
+                            # then got removed later due to SLO miss
+                            continue
 
-                    # look at opportunistic then best-effort requests, kicking off if necessary
-                    for r_id in self.executor_states[ex_id].get_opportunistic_req_ids(self.request_states) + \
-                        self.executor_states[ex_id].get_best_effort_req_ids(self.request_states):
-                        assert self.request_states[r_id].is_running
-                        logger.debug(f"looking at request {r_id} on executor {ex_id} to see if it can be kept.")
-                        logger.debug(f"self.executor_states[{ex_id}]: {self.executor_states[ex_id]}")
-
-                        remove_request_flag = False
+                        assert self.request_states[req_id].executor_id in idle_executors + idle_not_accepting_executors
+                        # if self.request_states[req_id].executor_id not in idle_executors:
+                        #     # Some -> Some (same, but pending change)
+                        #     # do nothing for now
+                        #     pass
+                        # if old_request_states[req_id].pending_executor_id not in idle_executors:
+                        #     pass
+                        # if self.request_states[req_id].executor_id is None:
+                        #     # None -> None
+                        #     # do nothing
+                        #     pass
+                        add_running_request(
+                            self.requests[req_id], self.request_states[req_id].executor_id)
                         
-                        new_batch_size = batch_size + self.requests[r_id].num_tokens
-                        batch_size_exceeded = new_batch_size > self.max_num_scheduled_tokens
-                        remove_request_flag |= batch_size_exceeded
-                        logger.debug(f"batch size exceeded: {batch_size_exceeded}")
+                logger.debug(f"E took {time.time() - start_time} seconds")
+            
+            with self.schedule_profiler.section("stage 6"):
+                start_time = time.time()
+                    
+                # Construct the scheduler output.
+                scheduler_outputs: dict[int, SchedulerOutput] = {}
 
-                        if not remove_request_flag:
-                            slo_miss = not all_slos_met(
-                                [r for r in (requests_scheduled + [r_id]) if not self.request_states[r].is_best_effort],
-                                self.executor_states[ex_id].tp_degree,
-                                # new_batch_size,
-                                requests_scheduled + [r_id],
-                                {req_id: conf})
-                            logger.debug(f"slo miss: {slo_miss}")
-                            remove_request_flag |= slo_miss
+                for executor_id in idle_executors + idle_not_accepting_executors:
+                    if executor_id not in num_scheduled_tokens and \
+                        not self.free_req_ids[executor_id]:
+                        logger.debug(f"Executor {executor_id} has no requests scheduled to run, and no finished requests. skip")
+                        # not scheduled to run at all, and no finished reqs. skip
+                        # executor should not be in idle_not_accepting_executors
+                        assert executor_id not in idle_not_accepting_executors
+                        async with self.executors_manager.cond[executor_id]:
+                            logger.debug(f"Executor {executor_id} status transition: CONSIDERED_FOR_SCHEDULING -> IDLE")
+                            self.executors_manager.executors[executor_id].set_idle()
+                            self.executors_manager.cond[executor_id].notify()
+                        continue
 
-                        if remove_request_flag:
-                            logger.debug(f"Removing {"opportunistic" if self.request_states[r_id].is_opportunistic else "best-effort"} request {r_id}")
-                            
-                            if ex_id in idle_executors:
-                                logger.debug(f"Executor {ex_id} is idle, so removing request {r_id} immediately.")
-                                self.executor_states[ex_id].remove_request(r_id)
-                                self.request_states[r_id].remove_executor()
-                                self.request_states[r_id].remove_pending_executor()
-                                requests_in_scheduler_output.add(req_id)
-
-                                # if self.request_states[r_id].is_unscheduled:
-                                #     unscheduled_requests.add(r_id)
-                                assert self.request_states[r_id].is_unscheduled
-                                if self.is_possible_to_meet_slo(r_id):
-                                    # unscheduled_requests.add(r_id)
-                                    unscheduled_requests.append((-self.requests[r_id].unmask_progress, r_id))
-                                    heapq.heapify(unscheduled_requests)
-                            else:
-                                logger.debug(f"Executor {ex_id} is not idle, so marking request {r_id} for pending removal.")
-                                self.executor_states[ex_id].mark_pending_request_removal(r_id)
-                                self.request_states[r_id].remove_pending_executor()
-                            
+                    logger.debug(f"Executor {executor_id} status transition: CONSIDERED_FOR_SCHEDULING -> SCHEDULED")
+                    self.executors_manager.executors[executor_id].set_scheduled()
+                    # logger.debug(f"req_to_new_block_ids: {req_to_new_block_ids[executor_id]}")
+                    
+                    new_reqs_data = [
+                        NewRequestData.from_request(req, 
+                                    req_to_new_block_ids[executor_id][req.request_id])
+                        for req in scheduled_new_reqs[executor_id]
+                    ]
+                    cached_reqs_data = self._make_cached_request_data(
+                        scheduled_running_reqs[executor_id],
+                        scheduled_resumed_reqs[executor_id],
+                        num_scheduled_tokens[executor_id],
+                        {},
+                        req_to_new_block_ids[executor_id],
+                    )
+                    # TODO: decide confidence thresholds
+                    confidence_thresholds = {}
+                    for req_id in num_scheduled_tokens[executor_id].keys():
+                        req_confidence_threshold = self.requests[req_id].sampling_params.confidence_threshold
+                        if req_confidence_threshold is not None:
+                            confidence_thresholds[req_id] = req_confidence_threshold
+                            # logger.debug(f"using user-defined confidence threshold {confidence_thresholds[req_id]} for req {req_id}")
                         else:
-                            requests_scheduled.append(r_id)
-                            batch_size += self.requests[r_id].num_tokens
-                            logger.debug(f"Keeping opportunistic request {r_id} on executor {ex_id}. Updated batch size: {batch_size}")
-                                
+                            confidence_thresholds[req_id] = self.request_states[req_id].confidence_threshold
+                            # logger.debug(f"using scheduler-defined confidence threshold {confidence_thresholds[req_id]} for req {req_id}")
+                    
+                    exec_start_pos: dict[str, int] = {}
+                    
+                    for req in new_reqs_data:
+                        exec_start_pos[req.req_id] = req.exec_start_pos
+                    for idx, req_id in enumerate(cached_reqs_data.req_ids):
+                        exec_start_pos[req_id] = cached_reqs_data.exec_start_pos[idx]
 
-            if not flag_scheduled:
-                logger.debug(f"Cannot schedule urgent request {req_id} to any idle executor due to SLO miss. Skipping for now.")
-                # if not possible (likely due to max_num_batch_tokens), skip for now
-                # skipped_waiting_requests.add_request(request)
-                # skipped_waiting.append(req_id)
-                # just find the lowest load executor and assign
-                # no need to set request_states_snapshot because nothing has changed
+                    scheduler_output = SchedulerOutput(
+                        scheduled_new_reqs=new_reqs_data,
+                        scheduled_cached_reqs=cached_reqs_data,
+                        exec_start_pos=exec_start_pos,
+                        num_scheduled_tokens=num_scheduled_tokens[executor_id],
+                        total_num_scheduled_tokens=sum(
+                            num_scheduled_tokens[executor_id].values()),
+                        scheduled_spec_decode_tokens={},
+                        scheduled_encoder_inputs={},
+                        num_common_prefix_blocks=[],
+                        # finished_req_ids is an existing state in the scheduler,
+                        # instead of being newly scheduled in this step.
+                        # It contains the request IDs that are finished in between
+                        # the previous and the current steps.
+                        finished_req_ids=self.finished_req_ids[executor_id],
+                        free_req_ids=self.free_req_ids[executor_id],
+                        free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
+                        structured_output_request_ids={},
+                        grammar_bitmask=None,
+                        confidence_thresholds=confidence_thresholds
+                    )
+                    scheduler_outputs[executor_id] = scheduler_output
+
+                    self._update_after_schedule(executor_id, scheduler_output)
+                # self._update_after_schedule(0, scheduler_output)
+                logger.debug(f"returning scheduler output: {scheduler_outputs}")
+
+                self.system_logger.log()
+                logger.debug(f"last part took {time.time() - start_time} seconds")
         
-        logger.debug(f"End B\n")
-        logger.debug(f"B took {time.time() - start_time} seconds")
+        self.schedule_profiler.add_info(f"num_executors", len(self.executor_states))
+        self.schedule_profiler.add_info(f"num_idle_executors", len(idle_executors))
+        self.schedule_profiler.add_info(f"num_requests", len(self.request_states))
         
-        start_time = time.time()
-        # logger.debug(f"Start C (schedule opportunistic requests)")
-        # Opportunistic promoting (only looking at requests on idle executors)
-        # only promote to executors with no requests scheduled at all
-        promoted_req_ids = set()
+        self.schedule_profiler.commit()
         
-        zero_load_executors = [ex_id for ex_id in [e_id for e_id in idle_executors if self.executor_states[e_id].has_no_pending_changes()] if len(self.executor_states[ex_id].req_ids) == 0]
-        while len(zero_load_executors) > 0:
-            # find the executor with highest TP degree
-            tgt_ex_id = max(zero_load_executors, key=lambda eid: self.executor_states[eid].tp_degree)
-            logger.debug(f"Looking at zero load executor {tgt_ex_id} with TP degree {self.executor_states[tgt_ex_id].tp_degree}")
-            logger.debug(f"{self.executor_states[tgt_ex_id]}")
-            # find a job to promote
-            # find the job with the least (priority, conf, slo_time_remaining - est_time_left)
-            best_req_id = None
-            best_metric = (RequestStatePriority.BEST_EFFORT + 1, 1.1, float('inf'))
-            # only look at req on idle executors
-            for src_ex_id in idle_executors:
-                for req_id in self.executor_states[src_ex_id].req_ids:
-                    if req_id in promoted_req_ids:
-                        continue
-                    if not can_migrate(self.requests[req_id]):
-                        logger.debug(f"Request {req_id} cannot migrate since not at block boundary.")
-                        requests_in_scheduler_output.add(req_id)
-                        continue
-                    logger.debug(f"Considering request {req_id} on executor {src_ex_id} for promotion to executor {tgt_ex_id}")
-                    num_tokens = self.requests[req_id].num_tokens
-                    _, src_step_latency = self.get_profile_latency(
-                        self.executor_states[src_ex_id].tp_degree, self.executor_states[src_ex_id].get_projected_batch_size())
-                    _, tgt_step_latency = self.get_profile_latency(
-                        self.executor_states[tgt_ex_id].tp_degree, num_tokens)
-                    logger.debug(f"src_step_latency: {src_step_latency}")
-                    logger.debug(f"tgt_step_latency: {tgt_step_latency}")
-                    if tgt_step_latency < src_step_latency:
-                        # possibly just pick the first one we see that satisfies this 
-                        est_time_left = self.get_estimated_time_left(
-                            req_id, 
-                            self.executor_states[src_ex_id].tp_degree,
-                            # self.executor_states[src_ex_id].get_batch_size(),
-                            self.executor_states[src_ex_id].req_ids,
-                            self.request_states[req_id].confidence_threshold)
-                        slo_time_remaining = self.requests[req_id].slo_time_remaining
-                        metric = (
-                            self.request_states[req_id].priority,
-                            self.request_states[req_id].confidence_threshold,
-                            # est_time_left - slo_time_remaining
-                            slo_time_remaining - est_time_left
-                        )
-                        if metric < best_metric:
-                            best_metric = metric
-                            best_req_id = req_id
-                            logger.debug(f"Found a better candidate for promotion: request {req_id} from executor {src_ex_id} with metric {metric}")
-            
-            logger.debug(f"Best request to promote to executor {tgt_ex_id}: {best_req_id}")
-            # promote it
-            if best_req_id is not None:
-                src_ex_id = self.request_states[best_req_id].executor_id
-                logger.debug(f"Promoting opportunistic request {best_req_id} from executor {src_ex_id} to executor {tgt_ex_id}")
-                assert src_ex_id != tgt_ex_id
-
-                # find the highest confidence that can meet SLO on the new executor
-                # if best effort, just use the highest confidence
-                if self.request_states[best_req_id].is_best_effort:
-                    # new_conf = max(self.candidate_confidence_thresholds)
-                    new_conf = min(self.candidate_confidence_thresholds)
-                else:
-                    new_conf = None
-                    # for conf in self.candidate_confidenkce_thresholds:
-                    max_conf_idx = self.request_states[best_req_id].max_confidence_threshold_idx
-                    logger.debug(f"max_conf_idx for request {best_req_id}: {max_conf_idx}")
-                    for conf in self.candidate_confidence_thresholds[max_conf_idx:]:
-                        if all_slos_met(
-                            [best_req_id],
-                            self.executor_states[tgt_ex_id].tp_degree,
-                            # self.requests[best_req_id].num_tokens,
-                            [best_req_id],
-                            {best_req_id: conf}):
-                            new_conf = conf
-                            break
-                logger.debug(f"new_conf: {new_conf}. Old conf: {self.request_states[best_req_id].confidence_threshold}")
-                assert new_conf is not None
-                assert new_conf >= self.request_states[best_req_id].confidence_threshold
-
-                # remove from src
-                self.executor_states[src_ex_id].remove_request(best_req_id)
-                self.request_states[best_req_id].remove_executor()
-                self.request_states[best_req_id].remove_pending_executor()
-                
-                priority = RequestStatePriority.OPPORTUNISTIC if not self.request_states[best_req_id].is_best_effort else RequestStatePriority.BEST_EFFORT
-                self.executor_states[tgt_ex_id].add_request(self.requests[best_req_id])
-                self.request_states[best_req_id].set_executor(tgt_ex_id, priority, new_conf)
-                self.request_states[best_req_id].set_pending_executor(tgt_ex_id, priority, new_conf)
-                
-                promoted_req_ids.add(best_req_id)
-                requests_in_scheduler_output.add(best_req_id)
-
-                zero_load_executors.remove(tgt_ex_id)
-                if len(self.executor_states[src_ex_id].req_ids) == 0:
-                    zero_load_executors.append(src_ex_id)
-            else:
-                # nothing to promote
-                logger.debug(f"Nothing to promote to executor {tgt_ex_id}.")
-                break
-        
-        logger.debug(f"End C\n")
-        logger.debug(f"C took {time.time() - start_time} seconds")
-        start_time = time.time()
-
-        logger.debug(f"Start D (schedule best-effort requests)")
-        # Best Effort
-        # These requests has estimated time left > SLO remaining time even at the lowest confidence threshold,
-        # given current cluster load.
-        # Schedule them onto whichever executor with enough token budget and
-        # the existing requests on it can still meet SLO.
-        for req_id in [r_id for r_id in self.request_states if self.request_states[r_id].is_unscheduled]:
-            logger.debug(f"Processing best-effort request {req_id}.")
-            # conf = max(self.candidate_confidence_thresholds)
-            conf = min(self.candidate_confidence_thresholds)
-            for executor_id in idle_executors:
-                logger.debug(f"Considering executor {executor_id}")
-                 # for idle executors, still possible there are pending add
-                new_batch_size = self.requests[req_id].num_tokens + self.executor_states[executor_id].get_batch_size()
-                
-                if new_batch_size > self.max_num_scheduled_tokens:
-                    logger.debug(f"Can't schedule due to batch size {new_batch_size} > max {self.max_num_scheduled_tokens}. Skipping executor.")
-                    continue
-
-                normal_and_opportunistic_req_ids = self.executor_states[executor_id].get_conditional_req_ids(
-                    self.request_states, {RequestStatePriority.NORMAL, RequestStatePriority.OPPORTUNISTIC})
-                if not all_slos_met(
-                    normal_and_opportunistic_req_ids,
-                    self.executor_states[executor_id].tp_degree,
-                    normal_and_opportunistic_req_ids + [req_id],
-                    {req_id: conf}):
-                    logger.debug(f"Can't schedule due to SLO miss when considering normal and opportunistic requests. Skipping executor.")
-                    continue
-                
-                # schedule!
-                self.executor_states[executor_id].add_request(self.requests[req_id])
-                self.request_states[req_id].set_executor(executor_id, RequestStatePriority.BEST_EFFORT, conf)
-                self.request_states[req_id].set_pending_executor(executor_id, RequestStatePriority.BEST_EFFORT, conf)
-                logger.debug(f"Scheduling best-effort request {req_id} to executor {executor_id} with confidence {conf}.")
-
-                requests_in_scheduler_output.add(req_id)
-                break
-        
-        logger.debug(f"End D\n")
-        logger.debug(f"D took {time.time() - start_time} seconds")
-        
-        start_time = time.time()
-        # For the remaining unscheduled, we just skip...
-
-        unscheduled_requests = set(
-            [r_id for r_id in self.request_states if self.request_states[r_id].is_unscheduled]
-        )
-        logger.debug(f"Unscheduled requests after scheduling: {unscheduled_requests}")
-
-
-        # Actually add and remove requests
-        logger.debug(f"Finalizing scheduling decisions and updating states.")
-        for req_id in requests_in_scheduler_output:
-            if old_request_states[req_id].executor_id != self.request_states[req_id].executor_id:
-                logger.debug(f"Request {req_id} changed executor from {old_request_states[req_id].executor_id} to {self.request_states[req_id].executor_id}.")
-                # None -> Some
-                # Some -> None
-                # Some -> Some (different)
-                
-                # remove from old
-                if old_request_states[req_id].executor_id is not None:
-                    remove_request(
-                        self.requests[req_id], old_request_states[req_id].executor_id)
-                if self.request_states[req_id].executor_id is not None:
-                    add_new_request(
-                        self.requests[req_id], self.request_states[req_id].executor_id)
-            else:
-                # if it's a future change, don't do anything
-                logger.debug(f"Request {req_id} remains on the same executor {self.request_states[req_id].executor_id}.")
-                if self.request_states[req_id].executor_id is None:
-                    # None -> None
-                    # do nothing
-                    # this is possible if a request has pending addition, but 
-                    # then got removed later due to SLO miss
-                    continue
-
-                assert self.request_states[req_id].executor_id in idle_executors
-                # if self.request_states[req_id].executor_id not in idle_executors:
-                #     # Some -> Some (same, but pending change)
-                #     # do nothing for now
-                #     pass
-                # if old_request_states[req_id].pending_executor_id not in idle_executors:
-                #     pass
-                # if self.request_states[req_id].executor_id is None:
-                #     # None -> None
-                #     # do nothing
-                #     pass
-                add_running_request(
-                    self.requests[req_id], self.request_states[req_id].executor_id)
-                
-        logger.debug(f"E took {time.time() - start_time} seconds")
-        
-        start_time = time.time()
-            
-        # Construct the scheduler output.
-        scheduler_outputs: dict[int, SchedulerOutput] = {}
-
-        for executor_id in idle_executors:
-            if executor_id not in num_scheduled_tokens and \
-                not self.free_req_ids[executor_id]:
-                logger.debug(f"Executor {executor_id} has no requests scheduled to run, and no finished requests. skip")
-                # not scheduled to run at all, and no finished reqs. skip
-                async with self.executors_manager.cond[executor_id]:
-                    logger.debug(f"Executor {executor_id} status transition: CONSIDERED_FOR_SCHEDULING -> IDLE")
-                    self.executors_manager.executors[executor_id].set_idle()
-                    self.executors_manager.cond[executor_id].notify()
-                continue
-
-            logger.debug(f"Executor {executor_id} status transition: CONSIDERED_FOR_SCHEDULING -> SCHEDULED")
-            self.executors_manager.executors[executor_id].set_scheduled()
-            logger.debug(f"req_to_new_block_ids: {req_to_new_block_ids[executor_id]}")
-            
-            new_reqs_data = [
-                NewRequestData.from_request(req, 
-                            req_to_new_block_ids[executor_id][req.request_id])
-                for req in scheduled_new_reqs[executor_id]
-            ]
-            cached_reqs_data = self._make_cached_request_data(
-                scheduled_running_reqs[executor_id],
-                scheduled_resumed_reqs[executor_id],
-                num_scheduled_tokens[executor_id],
-                {},
-                req_to_new_block_ids[executor_id],
-            )
-            # TODO: decide confidence thresholds
-            confidence_thresholds = {}
-            for req_id in num_scheduled_tokens[executor_id].keys():
-                req_confidence_threshold = self.requests[req_id].sampling_params.confidence_threshold
-                if req_confidence_threshold is not None:
-                    confidence_thresholds[req_id] = req_confidence_threshold
-                    logger.debug(f"using user-defined confidence threshold {confidence_thresholds[req_id]} for req {req_id}")
-                else:
-                    confidence_thresholds[req_id] = self.request_states[req_id].confidence_threshold
-                    logger.debug(f"using scheduler-defined confidence threshold {confidence_thresholds[req_id]} for req {req_id}")
-            
-            exec_start_pos: dict[str, int] = {}
-            
-            for req in new_reqs_data:
-                exec_start_pos[req.req_id] = req.exec_start_pos
-            for idx, req_id in enumerate(cached_reqs_data.req_ids):
-                exec_start_pos[req_id] = cached_reqs_data.exec_start_pos[idx]
-
-            scheduler_output = SchedulerOutput(
-                scheduled_new_reqs=new_reqs_data,
-                scheduled_cached_reqs=cached_reqs_data,
-                exec_start_pos=exec_start_pos,
-                num_scheduled_tokens=num_scheduled_tokens[executor_id],
-                total_num_scheduled_tokens=sum(
-                    num_scheduled_tokens[executor_id].values()),
-                scheduled_spec_decode_tokens={},
-                scheduled_encoder_inputs={},
-                num_common_prefix_blocks=[],
-                # finished_req_ids is an existing state in the scheduler,
-                # instead of being newly scheduled in this step.
-                # It contains the request IDs that are finished in between
-                # the previous and the current steps.
-                finished_req_ids=self.finished_req_ids[executor_id],
-                free_req_ids=self.free_req_ids[executor_id],
-                free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
-                structured_output_request_ids={},
-                grammar_bitmask=None,
-                confidence_thresholds=confidence_thresholds
-            )
-            scheduler_outputs[executor_id] = scheduler_output
-
-            self._update_after_schedule(executor_id, scheduler_output)
-        # self._update_after_schedule(0, scheduler_output)
-        logger.debug(f"returning scheduler output: {scheduler_outputs}")
-
-        self.system_logger.log()
-        logger.debug(f"last part took {time.time() - start_time} seconds")
         return scheduler_outputs
 
     def _update_after_schedule(
@@ -1705,196 +1835,148 @@ class UrgentOpportunisticWithBudgetScheduler(SchedulerInterface):
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
         sampled_token_ids = model_runner_output.sampled_token_ids
-        spec_token_ids = model_runner_output.spec_token_ids
-        logprobs = model_runner_output.logprobs
-        prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
-        num_nans_in_logits = model_runner_output.num_nans_in_logits
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
 
+        with self.update_profiler.section("total"):
+            with self.update_profiler.section("request_loop"):
+                # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
+                # the below loop can be a performance bottleneck. We should do our best
+                # to avoid expensive operations inside the loop.
+                stopped_running_reqs: set[Request] = set()
+                stopped_preempted_reqs: set[Request] = set()
+                for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
+                    assert num_tokens_scheduled > 0
+                    request = self.requests.get(req_id)
+                    if request is None:
+                        # The request is already finished. This can happen if the
+                        # request is aborted while the model is executing it (e.g.,
+                        # in pipeline parallelism).
+                        continue
+
+                    request.set_in_execution(False)
+
+                    req_index = model_runner_output.req_id_to_index[req_id]
+                    generated_token_ids = sampled_token_ids[
+                        req_index] if sampled_token_ids else []
+                    logger.debug(f"generated_token_ids for req {req_id}: {generated_token_ids}")
+
+                    stopped = False
+                    kv_transfer_params = None
+                    new_token_ids = generated_token_ids
+                    status_before_stop = request.status
+
+                    # Check for stop and update request status.
+                    if new_token_ids:
+                        max_conf_idx = self.request_states[req_id].max_confidence_threshold_idx
+                        logger.debug(f"in update from output max_conf_idx  {req_id}: {max_conf_idx}")
+                        max_conf = self.candidate_confidence_thresholds[max_conf_idx]
+                        with self.update_profiler.event("update_request_with_output",
+                                                        req_id=req_id):
+                            stats, new_token_ids, stopped = self._update_request_with_output(
+                                request, new_token_ids, 
+                                scheduler_output.confidence_thresholds[req_id], 
+                                model_runner_output.avg_output_confidences[req_index],
+                                max_conf)
+                        # stats.confidence_threshold = \
+                        #     scheduler_output.confidence_thresholds[req_id]
+                        with self.update_profiler.event("add_data_point",
+                                                        req_id=req_id):
+                            self.step_estimator.add_data_point(stats)
+
+                        self.request_states[req_id].last_stats = stats
+
+                    with self.update_profiler.event("rest",
+                                                    req_id=req_id):
+                        if stopped:
+                            logger.debug(f"Request {req_id} is stopped.")
+                            kv_transfer_params = self._free_request(request, True)
+                            if status_before_stop == RequestStatus.RUNNING:
+                                stopped_running_reqs.add(request)
+                            else:
+                                stopped_preempted_reqs.add(request)
+                        else:
+                            self.requests_need_update_step_estimates.append(req_id)
+
+                        outputs[request.client_index].append(
+                            EngineCoreOutput(
+                                request_id=req_id,
+                                new_token_ids=new_token_ids,
+                                finish_reason=request.get_finished_reason(),
+                                new_logprobs=None,
+                                new_prompt_logprobs_tensors=None,
+                                pooling_output=None,
+                                stop_reason=request.stop_reason,
+                                events=request.take_events(),
+                                kv_transfer_params=kv_transfer_params,
+                                num_cached_tokens=request.num_cached_tokens,
+                                num_denoise_ran=request.num_denoise_ran,
+                            ))
+
+            # Remove the stopped requests from the running and waiting queues.
+            # if stopped_running_reqs:
+            #     self.running = [
+            #         req_id for req_id in self.running if req_id not in [r.request_id for r in stopped_running_reqs]
+            #     ]
+            # if stopped_preempted_reqs:
+            #     # This is a rare case and unlikely to impact performance.
+            #     # self.waiting.remove_requests(stopped_preempted_reqs)
+            #     self.scheduled = [
+            #         req_id for req_id in self.scheduled if req_id not in [r.request_id for r in stopped_preempted_reqs]
+            #     ]
+            #     self.unscheduled = [
+            #         req_id for req_id in self.unscheduled if req_id not in [r.request_id for r in stopped_preempted_reqs]
+            #     ]
+
+            # KV Connector: update state for finished KV Transfers.
+            # self._update_from_kv_xfer_finished(model_runner_output)
+
+            with self.update_profiler.section("create_engine_core_outputs"):
+                # Create EngineCoreOutputs for all clients that have requests with
+                # outputs in this step.
+                engine_core_outputs = {
+                    client_index: EngineCoreOutputs(outputs=outs)
+                    for client_index, outs in outputs.items()
+                }
+
+                if self.finished_req_ids_dict:
+                    finished_req_ids = self.finished_req_ids_dict[executor_id]
+                    # Include ids of requests that finished since last outputs
+                    # were sent.
+                    for client_index, finished_set in finished_req_ids.items():
+                        # Set finished request set in EngineCoreOutputs for this client.
+                        if (eco := engine_core_outputs.get(client_index)) is not None:
+                            eco.finished_requests = finished_set
+                        else:
+                            engine_core_outputs[client_index] = EngineCoreOutputs(
+                                finished_requests=finished_set)
+                    finished_req_ids.clear()
+
+                if engine_core_outputs:
+                    # Return stats to only one of the front-ends.
+                    next(iter(engine_core_outputs.values())).scheduler_stats = (
+                        self.make_stats(executor_id, spec_decoding_stats))
+
+            with self.update_profiler.section("set_executor_idle"):
+                # now that we have updated everything, set executor to IDLE
+                async with self.executors_manager.cond[executor_id]:
+                    logger.debug(f"In update_from_output, executor {executor_id} status transition: OUTPUT_READY -> IDLE")
+                    if self.cache_prefix or self.cache_suffix:
+                        if self.executors_manager.waiting_to_be_killed[executor_id] and not self.executor_states[executor_id].is_drained():
+                            self.executors_manager.executors[executor_id].set_idle_not_accepting_new_requests()
+                        else:
+                            self.executors_manager.executors[executor_id].set_idle()
+                    else:
+                        self.executors_manager.executors[executor_id].set_idle()
+                    self.executors_manager.cond[executor_id].notify()
+            
+        self.update_profiler.add_info("executor_id", executor_id)
+        self.update_profiler.add_info("num_requests", len(num_scheduled_tokens))
         
-        async with self.executors_manager.cond[executor_id]:
-            logger.debug(f"In update_from_output, executor {executor_id} status transition: OUTPUT_READY -> IDLE")
-            self.executors_manager.executors[executor_id].set_idle()
-            self.executors_manager.cond[executor_id].notify()
-
-        # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
-        # the below loop can be a performance bottleneck. We should do our best
-        # to avoid expensive operations inside the loop.
-        stopped_running_reqs: set[Request] = set()
-        stopped_preempted_reqs: set[Request] = set()
-        for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
-            assert num_tokens_scheduled > 0
-            request = self.requests.get(req_id)
-            if request is None:
-                # The request is already finished. This can happen if the
-                # request is aborted while the model is executing it (e.g.,
-                # in pipeline parallelism).
-                continue
-
-            request.set_in_execution(False)
-
-            req_index = model_runner_output.req_id_to_index[req_id]
-            generated_token_ids = sampled_token_ids[
-                req_index] if sampled_token_ids else []
-            logger.debug(f"generated_token_ids for req {req_id}: {generated_token_ids}")
-
-            scheduled_spec_token_ids = (
-                scheduler_output.scheduled_spec_decode_tokens.get(req_id))
-            if scheduled_spec_token_ids:
-                # num_computed_tokens represents the number of tokens
-                # processed in the current step, considering scheduled
-                # tokens and rejections. If some tokens are rejected,
-                # num_computed_tokens is decreased by the number of rejected
-                # tokens, where is given by:
-                # len(scheduled_spec_token_ids) + 1 - len(generated_token_ids).
-                num_tokens_rejected = (len(scheduled_spec_token_ids) + 1 -
-                                       len(generated_token_ids))
-                request.num_computed_tokens -= num_tokens_rejected
-                spec_decoding_stats = self.make_spec_decoding_stats(
-                    spec_decoding_stats,
-                    num_draft_tokens=len(scheduled_spec_token_ids),
-                    num_accepted_tokens=len(generated_token_ids) - 1)
-
-            stopped = False
-            new_logprobs = None
-            new_token_ids = generated_token_ids
-            kv_transfer_params = None
-            status_before_stop = request.status
-
-            # Check for stop and update request status.
-            if new_token_ids:
-                max_conf_idx = self.request_states[req_id].max_confidence_threshold_idx
-                logger.debug(f"in update from output max_conf_idx  {req_id}: {max_conf_idx}")
-                max_conf = self.candidate_confidence_thresholds[max_conf_idx]
-                stats, new_token_ids, stopped = self._update_request_with_output(
-                    request, new_token_ids, 
-                    scheduler_output.confidence_thresholds[req_id], 
-                    model_runner_output.avg_output_confidences[req_index],
-                    max_conf)
-                # stats.confidence_threshold = \
-                #     scheduler_output.confidence_thresholds[req_id]
-                self.step_estimator.add_data_point(stats)
-
-                self.request_states[req_id].last_stats = stats
-                self.update_step_estimates(req_id)
-
-            # Stop checking for pooler models.
-            pooler_output = None
-            if pooler_outputs:
-                pooler_output = pooler_outputs[req_index]
-                stopped = check_stop(request, self.max_model_len,
-                                     pooler_output)
-
-            if stopped:
-                logger.debug(f"Request {req_id} is stopped.")
-                kv_transfer_params = self._free_request(request, True)
-                if status_before_stop == RequestStatus.RUNNING:
-                    stopped_running_reqs.add(request)
-                else:
-                    stopped_preempted_reqs.add(request)
-
-            # Extract sample logprobs if needed.
-            if request.sampling_params is not None \
-                and request.sampling_params.logprobs is not None and logprobs:
-                # NOTE: once we support N tokens per step (spec decode),
-                # the outer lists can be of length > 1.
-                new_logprobs = logprobs.slice(req_index, req_index + 1)
-
-            if new_token_ids and self.structured_output_manager.should_advance(
-                    request):
-                # NOTE: structured_output_request
-                # should not be None if use_structured_output, we have
-                # check above, so safe to ignore type warning
-                request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
-                    req_id, new_token_ids)
-
-            # spec_token_ids comes from the model runner output
-            if num_nans_in_logits is not None and req_id in num_nans_in_logits:
-                request.num_nans_in_logits = num_nans_in_logits[req_id]
-
-            # Add newly generated spec token ids to the request.
-            if spec_token_ids is not None:
-                if self.structured_output_manager.should_advance(request):
-                    metadata = request.structured_output_request
-                    # Needs to happen after new_token_ids are accepted.
-                    request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
-                        spec_token_ids[req_index])
-                else:
-                    request.spec_token_ids = spec_token_ids[req_index]
-
-            # Get prompt logprobs for this request.
-            prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            if new_token_ids or pooler_output is not None \
-                or kv_transfer_params:
-
-                # Add EngineCoreOutput for this Request.
-                outputs[request.client_index].append(
-                    EngineCoreOutput(
-                        request_id=req_id,
-                        new_token_ids=new_token_ids,
-                        finish_reason=request.get_finished_reason(),
-                        new_logprobs=new_logprobs,
-                        new_prompt_logprobs_tensors=prompt_logprobs_tensors,
-                        pooling_output=pooler_output,
-                        stop_reason=request.stop_reason,
-                        events=request.take_events(),
-                        kv_transfer_params=kv_transfer_params,
-                        num_cached_tokens=request.num_cached_tokens,
-                        num_denoise_ran=request.num_denoise_ran,
-                    ))
-
-            else:
-                # Invariant: EngineCore returns no partial prefill outputs.
-                assert not prompt_logprobs_tensors
-
-
-        # Remove the stopped requests from the running and waiting queues.
-        # if stopped_running_reqs:
-        #     self.running = [
-        #         req_id for req_id in self.running if req_id not in [r.request_id for r in stopped_running_reqs]
-        #     ]
-        # if stopped_preempted_reqs:
-        #     # This is a rare case and unlikely to impact performance.
-        #     # self.waiting.remove_requests(stopped_preempted_reqs)
-        #     self.scheduled = [
-        #         req_id for req_id in self.scheduled if req_id not in [r.request_id for r in stopped_preempted_reqs]
-        #     ]
-        #     self.unscheduled = [
-        #         req_id for req_id in self.unscheduled if req_id not in [r.request_id for r in stopped_preempted_reqs]
-        #     ]
-
-        # KV Connector: update state for finished KV Transfers.
-        self._update_from_kv_xfer_finished(model_runner_output)
-
-        # Create EngineCoreOutputs for all clients that have requests with
-        # outputs in this step.
-        engine_core_outputs = {
-            client_index: EngineCoreOutputs(outputs=outs)
-            for client_index, outs in outputs.items()
-        }
-
-        if self.finished_req_ids_dict:
-            finished_req_ids = self.finished_req_ids_dict[executor_id]
-            # Include ids of requests that finished since last outputs
-            # were sent.
-            for client_index, finished_set in finished_req_ids.items():
-                # Set finished request set in EngineCoreOutputs for this client.
-                if (eco := engine_core_outputs.get(client_index)) is not None:
-                    eco.finished_requests = finished_set
-                else:
-                    engine_core_outputs[client_index] = EngineCoreOutputs(
-                        finished_requests=finished_set)
-            finished_req_ids.clear()
-
-        if engine_core_outputs:
-            # Return stats to only one of the front-ends.
-            next(iter(engine_core_outputs.values())).scheduler_stats = (
-                self.make_stats(executor_id, spec_decoding_stats))
-
+        self.update_profiler.commit()
         return engine_core_outputs
 
     def _update_request_with_output(
@@ -1957,21 +2039,19 @@ class UrgentOpportunisticWithBudgetScheduler(SchedulerInterface):
         return running_reqs, scheduled_reqs + unscheduled_reqs
 
     def add_request(self, request: Request) -> None:
-        if len(self.executor_states) == 0:
-            # we need this for update_request_max_confidence_thresholds
-            self.update_executors()
+        # if len(self.executor_states) == 0:
+        #     # we need this for update_request_max_confidence_thresholds
+        #     self.update_executors()
         logger.debug(f"Scheduler adding request {request.request_id}")
         # self.unscheduled.append(request.request_id)
         self.requests[request.request_id] = request
         self.request_states[request.request_id] = RequestState(request)
-        self.update_step_estimates(request.request_id)
+        self.requests_need_update_step_estimates.append(request.request_id)
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
         self.system_logger.log()
 
-        self.update_request_max_confidence_thresholds()
-        # self.update_max_throughput_demand_per_req()
-        self.update_throughput_supply()
+        self.request_added_or_removed = True
 
     def finish_requests(
         self,
@@ -2025,6 +2105,8 @@ class UrgentOpportunisticWithBudgetScheduler(SchedulerInterface):
             request.status = finished_status
             self._free_request(request, True)
         
+        self.request_added_or_removed = True
+        
     def _free_request_on_executor(self, request: Request, executor_id: int, 
                       finished: bool, prune: bool = True) -> Optional[dict[str, Any]]:
         logger.debug(f"in _free_request_on_executor, request: {request.request_id}, executor_id: {executor_id}, finished: {finished}")
@@ -2068,7 +2150,7 @@ class UrgentOpportunisticWithBudgetScheduler(SchedulerInterface):
         if prune and not self.request_states[request_id].executors_to_free:
             del self.request_states[request_id]
             del self.requests[request_id]
-            self.system_logger.log(write_out=True)
+            self.system_logger.log()
         
         return None
         
@@ -2092,10 +2174,8 @@ class UrgentOpportunisticWithBudgetScheduler(SchedulerInterface):
         for executor_id in list(self.request_states[request.request_id].executors_to_free):
             self._free_request_on_executor(request, executor_id, finished)
         
-        self.step_estimator.save_data()
-        self.update_request_max_confidence_thresholds()
-        # self.update_max_throughput_demand_per_req()
-        self.update_throughput_supply()
+        self.request_added_or_removed = True
+        
         return None
 
 
@@ -2124,7 +2204,7 @@ class UrgentOpportunisticWithBudgetScheduler(SchedulerInterface):
             logger.debug(f"request: {req}, is_in_execution: {req.is_in_execution}")
         logger.debug(f"in has_not_in_execution_requests, result is {any(not req.is_in_execution for req in self.requests.values())}")
         return any(not req.is_in_execution for req in self.requests.values())
-
+    
     def reset_prefix_cache(self) -> bool:
         return self.kv_cache_manager.reset_prefix_cache()
 
@@ -2149,25 +2229,9 @@ class UrgentOpportunisticWithBudgetScheduler(SchedulerInterface):
                                    for req_id in self.request_states if self.request_states[req_id].is_running),
         )
 
-    def make_spec_decoding_stats(
-        self,
-        spec_decoding_stats: Optional[SpecDecodingStats],
-        num_draft_tokens: int,
-        num_accepted_tokens: int,
-    ) -> Optional[SpecDecodingStats]:
-        if not self.log_stats:
-            return None
-        if spec_decoding_stats is None:
-            spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
-        spec_decoding_stats.observe_draft(
-            num_draft_tokens=num_draft_tokens,
-            num_accepted_tokens=num_accepted_tokens)
-        return spec_decoding_stats
-
     def shutdown(self) -> None:
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
-        self.step_estimator.save_data()
 
     ########################################################################
     # KV Connector Related Methods
@@ -2290,6 +2354,10 @@ class UrgentOpportunisticWithBudgetScheduler(SchedulerInterface):
 
         del self.executor_states[executor_id]
         del self.kv_cache_managers[executor_id]
+        # for the rare case that this executor has never had any requests completed
+        # we use if
+        if executor_id in self.free_req_ids:
+            del self.free_req_ids[executor_id]
         
         logger.debug(f"Removed executor {executor_id} from scheduler.")
         # recompute max tp degree
@@ -2306,4 +2374,4 @@ class UrgentOpportunisticWithBudgetScheduler(SchedulerInterface):
                 self.remove_executor(executor_id)
         
         # self.update_max_throughput_demand_per_req()
-        self.update_throughput_supply()
+        # self.update_throughput_supply()

@@ -5,93 +5,10 @@ import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 from collections import defaultdict
 import bisect
-from concurrent.futures import ProcessPoolExecutor
-from typing import List, Tuple, Any, Dict
 
 
 def parse_timestamp(ts: str) -> datetime:
     return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S.%f")
-
-
-def _active_at_time_local(t: datetime,
-                          arrival_list: List[datetime],
-                          completion_list: List[datetime]) -> int:
-    """Local helper for workers: compute #active requests at time t."""
-    arrived = bisect.bisect_right(arrival_list, t)
-    completed = bisect.bisect_right(completion_list, t)
-    return arrived - completed
-
-
-def _plot_single_request(args: Tuple[Any, List[dict], datetime, datetime, float,
-                                      List[datetime], List[datetime], str]) -> str:
-    """
-    Worker function to plot a single request's figure.
-
-    Args tuple:
-        rid,
-        entries,
-        start,
-        end,
-        slo_seconds,
-        arrival_list,
-        completion_list,
-        output_dir
-    """
-    (rid, entries, start, end, slo_seconds,
-     arrival_list, completion_list, output_dir) = args
-
-    deadline = start + timedelta(seconds=slo_seconds)
-
-    timestamps = [e["timestamp"] for e in entries]
-    conf = [e["confidence_threshold"] for e in entries]
-    max_conf = [e["max_confidence_threshold"] for e in entries]
-
-    # Compute active request counts at step timestamps
-    active_times = []
-    active_vals = []
-    for ts in timestamps:
-        if start <= ts <= end:
-            active_times.append(ts)
-            active_vals.append(_active_at_time_local(ts, arrival_list, completion_list))
-
-    # Compute plotting window
-    all_times = active_times + timestamps + [start, end, deadline]
-    min_time = min(all_times) - timedelta(seconds=0.5)
-    max_time = max(all_times) + timedelta(seconds=0.5)
-
-    fig, axs = plt.subplots(2, 1, sharex=True, figsize=(11, 7))
-    fig.suptitle(f"Request {rid}")
-
-    # ------------------------------------------
-    # Upper subplot: confidence thresholds
-    # ------------------------------------------
-    axs[0].set_ylim(0.5, 1.0)
-    axs[0].plot(timestamps, max_conf, label="max_confidence_threshold", marker="o")
-    axs[0].plot(timestamps, conf, label="confidence_threshold", marker="x")
-    axs[0].axvline(deadline, color="red", linestyle="--", label="SLO deadline")
-    axs[0].set_ylabel("confidence")
-    axs[0].grid(True)
-    axs[0].legend()
-
-    # ------------------------------------------
-    # Lower subplot: active request count (step)
-    # ------------------------------------------
-    color = axs[1].plot([], [])[0].get_color()  # get consistent color
-
-    axs[1].step(active_times, active_vals, where="post", color=color, linewidth=2)
-    axs[1].plot(active_times, active_vals, "o", color=color)
-
-    axs[1].axvline(deadline, color="red", linestyle="--")
-    axs[1].set_ylabel("# active requests")
-    axs[1].set_xlabel("time")
-    axs[1].set_xlim(min_time, max_time)
-    axs[1].grid(True)
-
-    plt.tight_layout()
-    out_path = os.path.join(output_dir, f"{rid}.png")
-    plt.savefig(out_path, dpi=150)
-    plt.close()
-    return out_path
 
 
 def main(step_data_path: str, workload_history_path: str, output_dir: str):
@@ -100,7 +17,7 @@ def main(step_data_path: str, workload_history_path: str, output_dir: str):
     # -------------------------------------------------------
     # Load step_data.json
     # -------------------------------------------------------
-    step_data: Dict[Any, List[dict]] = defaultdict(list)
+    step_data = defaultdict(list)
 
     with open(step_data_path, "r") as f:
         for line in f:
@@ -117,9 +34,9 @@ def main(step_data_path: str, workload_history_path: str, output_dir: str):
     # -------------------------------------------------------
     # Load workload_history.json
     # -------------------------------------------------------
-    arrival: Dict[Any, datetime] = {}
-    completion: Dict[Any, datetime] = {}
-    latency_slo: Dict[Any, float] = {}
+    arrival = {}
+    completion = {}
+    latency_slo = {}
 
     with open(workload_history_path, "r") as f:
         for line in f:
@@ -139,31 +56,73 @@ def main(step_data_path: str, workload_history_path: str, output_dir: str):
     arrival_list = sorted(arrival.values())
     completion_list = sorted(completion.values())
 
+    # Correct active-at-time function
+    def active_at_time(t: datetime):
+        arrived = bisect.bisect_right(arrival_list, t)
+        completed = bisect.bisect_right(completion_list, t)
+        return arrived - completed
+
     # -------------------------------------------------------
-    # Per-request plots (parallelized)
+    # Per-request plots
     # -------------------------------------------------------
-    tasks = []
-    for rid, entries in step_data.items():
+    for rid in step_data:
         if rid not in arrival or rid not in completion:
             continue
 
-        tasks.append(
-            (
-                rid,
-                entries,
-                arrival[rid],
-                completion[rid],
-                latency_slo[rid],
-                arrival_list,
-                completion_list,
-                output_dir,
-            )
-        )
+        start = arrival[rid]
+        end = completion[rid]
+        deadline = start + timedelta(seconds=latency_slo[rid])
 
-    if tasks:
-        with ProcessPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
-            for out_path in pool.map(_plot_single_request, tasks):
-                print(f"Saved {out_path}")
+        timestamps = [e["timestamp"] for e in step_data[rid]]
+        conf = [e["confidence_threshold"] for e in step_data[rid]]
+        max_conf = [e["max_confidence_threshold"] for e in step_data[rid]]
+
+        # Compute active request counts at step timestamps
+        active_times = []
+        active_vals = []
+        for ts in timestamps:
+            if start <= ts <= end:
+                active_times.append(ts)
+                active_vals.append(active_at_time(ts))
+
+        # Compute plotting window
+        all_times = active_times + timestamps + [start, end, deadline]
+        min_time = min(all_times) - timedelta(seconds=0.5)
+        max_time = max(all_times) + timedelta(seconds=0.5)
+
+        fig, axs = plt.subplots(2, 1, sharex=True, figsize=(11, 7))
+        fig.suptitle(f"Request {rid}")
+
+        #------------------------------------------
+        # Upper subplot: confidence thresholds
+        #------------------------------------------
+        axs[0].set_ylim(0.5, 1.0)
+        axs[0].plot(timestamps, max_conf, label="max_confidence_threshold", marker="o")
+        axs[0].plot(timestamps, conf, label="confidence_threshold", marker="x")
+        axs[0].axvline(deadline, color="red", linestyle="--", label="SLO deadline")
+        axs[0].set_ylabel("confidence")
+        axs[0].grid(True)
+        axs[0].legend()
+
+        #------------------------------------------
+        # Lower subplot: active request count (step)
+        #------------------------------------------
+        color = axs[1].plot([], [])[0].get_color()  # get consistent color
+
+        axs[1].step(active_times, active_vals, where="post", color=color, linewidth=2)
+        axs[1].plot(active_times, active_vals, 'o', color=color)
+
+        axs[1].axvline(deadline, color="red", linestyle="--")
+        axs[1].set_ylabel("# active requests")
+        axs[1].set_xlabel("time")
+        axs[1].set_xlim(min_time, max_time)
+        axs[1].grid(True)
+
+        plt.tight_layout()
+        out_path = os.path.join(output_dir, f"{rid}.png")
+        plt.savefig(out_path, dpi=150)
+        plt.close()
+        print(f"Saved {out_path}")
 
     # -------------------------------------------------------
     # GLOBAL CONFIDENCE OVER TIME
@@ -214,10 +173,7 @@ def main(step_data_path: str, workload_history_path: str, output_dir: str):
             global_avg_conf.append(None)
             global_avg_max_conf.append(None)
 
-        # Use the same active-at-time logic as in workers
-        global_active_vals.append(
-            _active_at_time_local(t, arrival_list, completion_list)
-        )
+        global_active_vals.append(active_at_time(t))
 
     # -------------------------------------------------------
     # GLOBAL PLOT (step)
@@ -229,12 +185,7 @@ def main(step_data_path: str, workload_history_path: str, output_dir: str):
         # Upper: global confidence curves
         axs[0].set_ylim(0.5, 1.0)
         axs[0].plot(global_times, global_avg_conf, marker="o", label="avg_confidence")
-        axs[0].plot(
-            global_times,
-            global_avg_max_conf,
-            marker="x",
-            label="avg_max_confidence",
-        )
+        axs[0].plot(global_times, global_avg_max_conf, marker="x", label="avg_max_confidence")
         axs[0].set_ylabel("confidence")
         axs[0].grid(True)
         axs[0].legend()
@@ -242,7 +193,7 @@ def main(step_data_path: str, workload_history_path: str, output_dir: str):
         # Lower: active requests (correct step plot)
         color = axs[1].plot([], [])[0].get_color()
         axs[1].step(global_times, global_active_vals, where="post", color=color, linewidth=2)
-        axs[1].plot(global_times, global_active_vals, "o", color=color)
+        axs[1].plot(global_times, global_active_vals, 'o', color=color)
 
         axs[1].set_ylabel("# active requests")
         axs[1].set_xlabel("time")

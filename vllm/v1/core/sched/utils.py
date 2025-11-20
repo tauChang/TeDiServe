@@ -6,12 +6,15 @@ import bisect
 import json
 import torch
 import os
+import time
 from datetime import datetime
+from collections import OrderedDict
 
 from vllm.v1.request import Request, RequestStatus
 from dataclasses import dataclass, field
 from typing import Dict, List
 from vllm.logger import init_logger
+import threading
 
 logger = init_logger(__name__)
 
@@ -164,25 +167,65 @@ class SystemSnapshot:
         return json.dumps(self.__dict__, indent=2)
     
 class SystemLogger:
-    def __init__(self, log_dir: str, scheduler: object):
+    def __init__(self, log_dir: str, scheduler: object, flush_interval: float = 10.0):
         self.scheduler = scheduler
-        # self.log_dir = log_dir
-        self.log_file = os.path.join(scheduler.vllm_config.experiment_config.experiment_dir, "system_log.log")
-        # os.makedirs(log_dir, exist_ok=True)
-        self.log_file = os.path.join(log_dir, f"system_log_{get_cur_timestamp(include_ms=False)}.log")
-        with open(self.log_file, "w") as f:
-            f.write("")  # Create or clear the log file
-        self.snapshots = []
+        self.log_file = os.path.join(
+            scheduler.vllm_config.experiment_config.experiment_dir,
+            "system_log.json"
+        )
 
-    def log(self, write_out: bool = False):
+        # Create or clear file
+        with open(self.log_file, "w"):
+            pass
+
+        # Append-only buffer for snapshots
+        self._snapshots = []
+
+        # Lock for atomic swap
+        self._lock = threading.Lock()
+
+        # How often to flush
+        self.flush_interval = flush_interval
+
+        # Launch background thread
+        t = threading.Thread(target=self._periodic_flush, daemon=True)
+        t.start()
+
+    # ------------------------------------------------------------
+    # Main functionality
+    # ------------------------------------------------------------
+
+    def log(self):
+        """Fast path: just append a snapshot (tiny overhead)."""
         snapshot = SystemSnapshot.from_states(self.scheduler)
-        self.snapshots.append(snapshot)
-        logger.debug(f"System Snapshot at {snapshot.timestamp}:\n{snapshot}")
+        with self._lock:
+            self._snapshots.append(snapshot)
 
-        if write_out:
-            logger.info(f"Writing {len(self.snapshots)} snapshots to {self.log_file}")
-            with open(self.log_file, "a") as f:
-                for snap in self.snapshots:
-                    f.write(str(snap) + "\n")
-            
-            self.snapshots.clear()
+    # ------------------------------------------------------------
+    # Background flush thread
+    # ------------------------------------------------------------
+
+    def _periodic_flush(self):
+        while True:
+            time.sleep(self.flush_interval)
+            self.flush()
+
+    def flush(self):
+        """Atomic buffer swap + write outside lock."""
+        # ---- atomic swap ----
+        with self._lock:
+            if not self._snapshots:
+                return
+            to_write = self._snapshots
+            self._snapshots = []
+        # ---- lock released ----
+
+        # Write outside lock
+        with open(self.log_file, "a") as f:
+            for snap in to_write:
+                f.write(json.dumps(snap.__dict__) + "\n")
+
+        logger.info(
+            f"SystemLogger: flushed {len(to_write)} snapshots to {self.log_file}"
+        )
+

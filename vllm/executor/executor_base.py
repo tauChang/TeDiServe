@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import os
 import time
+from datetime import datetime
 from abc import ABC, abstractmethod
 from functools import cached_property
 from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
@@ -11,6 +13,7 @@ import enum
 
 import torch.nn as nn
 from typing_extensions import TypeVar
+import threading
 
 import vllm.platforms
 from vllm.config import VllmConfig
@@ -30,6 +33,7 @@ _R = TypeVar("_R", default=Any)
 class ExecutorStatus(enum.IntEnum):
     """Status of an executor."""
     IDLE = enum.auto()
+    IDLE_NOT_ACCEPTING_NEW_REQUESTS = enum.auto()
     CONSIDERED_FOR_SCHEDULING = enum.auto()
     SCHEDULED = enum.auto()
     EXECUTING = enum.auto()
@@ -71,6 +75,16 @@ class ExecutorBase(ABC):
         self.is_sleeping = False
         self.sleeping_tags: set[str] = set()
         self.status = ExecutorStatus.IDLE
+        self._status_log_buffer = []
+        self.executor_status_file = f"{self.vllm_config.experiment_config.experiment_dir}/executor_status/{self.id}.log"
+        os.makedirs(os.path.dirname(self.executor_status_file), exist_ok=True)
+
+        self._status_log_buffer = []
+        self._status_log_lock = threading.Lock()
+        self.status_log_flush_interval = 10.0
+        
+        t = threading.Thread(target=self._periodic_status_flush, daemon=True)
+        t.start()
 
     @abstractmethod
     def _init_executor(self) -> None:
@@ -298,26 +312,66 @@ class ExecutorBase(ABC):
         exception."""
         self.check_health()
     
+    def _periodic_status_flush(self):
+        while True:
+            time.sleep(self.status_log_flush_interval)
+            self.flush_status_log_buffer()
+    
+    def flush_status_log_buffer(self):
+        # Step 1: atomic swap
+        with self._status_log_lock:
+            if not self._status_log_buffer:
+                return
+            to_write = self._status_log_buffer
+            self._status_log_buffer = []
+
+        # Step 2: write outside lock
+        with open(self.executor_status_file, "a") as f:
+            for line in to_write:
+                f.write(line + "\n")
+        
+        logger.debug(f"Flushed {len(to_write)} status log entries to {self.executor_status_file}.")
+
+    def log_status_transition(self, old_status: ExecutorStatus, new_status: ExecutorStatus):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+        entry = f"{timestamp}: {old_status.name} -> {new_status.name}"
+
+        with self._status_log_lock:
+            self._status_log_buffer.append(entry)
+
+        if new_status == ExecutorStatus.KILLING:
+            self.flush_status_log_buffer()
+
+    def _set_new_status(self, new_status: ExecutorStatus):
+        self.log_status_transition(self.status, new_status)
+        self.status = new_status
+    
     def set_idle(self):
-        self.status = ExecutorStatus.IDLE
+        self._set_new_status(ExecutorStatus.IDLE)
+    
+    def set_idle_not_accepting_new_requests(self):
+        self._set_new_status(ExecutorStatus.IDLE_NOT_ACCEPTING_NEW_REQUESTS)
     
     def set_considered_for_scheduling(self):
-        self.status = ExecutorStatus.CONSIDERED_FOR_SCHEDULING
+        self._set_new_status(ExecutorStatus.CONSIDERED_FOR_SCHEDULING)
         
     def set_scheduled(self):
-        self.status = ExecutorStatus.SCHEDULED
+        self._set_new_status(ExecutorStatus.SCHEDULED)
     
     def set_executing(self):
-        self.status = ExecutorStatus.EXECUTING
+        self._set_new_status(ExecutorStatus.EXECUTING)
         
     def set_output_ready(self):
-        self.status = ExecutorStatus.OUTPUT_READY
+        self._set_new_status(ExecutorStatus.OUTPUT_READY)
     
     def set_killing(self):
-        self.status = ExecutorStatus.KILLING
+        self._set_new_status(ExecutorStatus.KILLING)
     
     def is_idle(self) -> bool:
         return self.status == ExecutorStatus.IDLE
+    
+    def is_idle_not_accepting_new_requests(self) -> bool:
+        return self.status == ExecutorStatus.IDLE_NOT_ACCEPTING_NEW_REQUESTS
     
     def is_considered_for_scheduling(self) -> bool:
         return self.status == ExecutorStatus.CONSIDERED_FOR_SCHEDULING

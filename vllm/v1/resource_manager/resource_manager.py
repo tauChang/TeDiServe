@@ -15,6 +15,7 @@ from collections import defaultdict
 
 import asyncio
 from collections import defaultdict
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 import ray
 from ray.util import placement_group_table
@@ -26,7 +27,7 @@ import json
 from collections import deque
 
 logger = init_logger(__name__)
-TIMESTAMP = time.strftime("%Y-%m-%d_%H:%M:%S")
+TIME_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
 
 def create_stagewise_parallel_command(old_config: Dict[int, List[int]], 
                     new_config:Dict[int, List[int]]) -> ReconfigCommand:
@@ -300,7 +301,7 @@ class ResourceManager:
         self.bundle_to_node: Dict[int, str] = {}
         self.config: Dict[int, List[int]] = {}
 
-        self.workload_monitor = WorkloadMonitor(vllm_config, time_window=30.0)
+        self.workload_monitor = WorkloadMonitor(vllm_config, time_window=120)
         # delay until first time reconfig planner is called to create, since reconfig planner needs latency profile,
         # which requires vllm_config.cluster_config.placement_group.bundle_specs to be initialized
         self.reconfig_planner = None 
@@ -533,6 +534,7 @@ class ResourceManager:
         if len(self.config) == 0:
             # use cluster config
             new_config = self.get_initial_config()
+            workload_classes = []
         else:
             # one bundle per executor
             # copy old config
@@ -569,15 +571,26 @@ class ResourceManager:
             #         raise RuntimeError(
             #             f"Cannot assign a GPU to model executor {me_id} "
             #             "on a single node; not enough free bundles.")
+            workload_classes = self.workload_monitor.get_workload_classes()
         
         logger.debug(f"Old config: {self.config}")
         logger.debug(f"New config: {new_config}")
         cmd = create_stagewise_parallel_command(self.config, new_config)
         logger.debug(f"Reconfiguration command created: {cmd}")
         self.config = new_config
+
+        timestamp = time.time()
+        record = ConfigRecord(
+            timestamp=datetime.fromtimestamp(timestamp).strftime(TIME_FORMAT),
+            config=new_config,
+            workload_classes=workload_classes
+        )
+        self.config_history.append(record)
+        self.write_config_history()
         return cmd
     
     async def reconfig(self) -> ReconfigCommand:
+        # return self.naive_reconfig()
         timestamp = time.time()
         if len(self.config) == 0:
             logger.info("Initial config")
@@ -618,7 +631,7 @@ class ResourceManager:
 
         # record
         record = ConfigRecord(
-            timestamp=timestamp,
+            timestamp=datetime.fromtimestamp(timestamp).strftime(TIME_FORMAT),
             config=new_config,
             workload_classes=workload_classes
         )
