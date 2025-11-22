@@ -738,7 +738,7 @@ class EngineCoreProc(EngineCore):
                 self.addresses.coordinator_input,
                 self.identity
             ),
-            self.run_reconfigure_loop(),
+            # self.run_reconfigure_loop(),
         )
 
     async def run_reconfigure_loop(self):
@@ -856,7 +856,7 @@ class EngineCoreProc(EngineCore):
             #     self.scheduler_outputs[executor_id], model_output
             # )
             # logger.debug(f"Scheduler outputs after update: {outputs}")
-            logger.info(f"scheduler_outputs after update for executor {executor_id}: {outputs}")
+            # logger.info(f"scheduler_outputs after update for executor {executor_id}: {outputs}")
             received_non_empty_output |= len(outputs) > 0
             for output in (outputs.items() if outputs else ()):
                 # output is EngineCoreOutputs
@@ -880,7 +880,7 @@ class EngineCoreProc(EngineCore):
             received_non_empty_output |= len(outputs) > 0
             # for output in (outputs.items() if outputs else ()):
             #     self.output_queue.put_nowait(output)
-            logger.info(f"scheduler_outputs after update for executor {executor_id}: {outputs}")
+            # logger.info(f"scheduler_outputs after update for executor {executor_id}: {outputs}")
             for output in (outputs.items() if outputs else ()):
                 # output is EngineCoreOutputs
                 self.output_queue.put_nowait(output)

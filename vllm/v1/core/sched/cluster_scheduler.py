@@ -1069,7 +1069,7 @@ class ClusterScheduler(SchedulerInterface):
                 stats, new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids, 
                     scheduler_output.confidence_thresholds[req_id], 
-                    model_runner_output.avg_output_confidences[req_index])
+                    model_runner_output.confidence_stats[req_index])
                 stats.confidence_threshold = \
                     scheduler_output.confidence_thresholds[req_id]
                 self.step_estimator.add_data_point(stats)
@@ -1203,7 +1203,8 @@ class ClusterScheduler(SchedulerInterface):
         request: Request,
         new_token_ids: list[tuple[int, int]],
         confidence_threshold: float,
-        avg_output_confidence: float,
+        confidence_stats: dict[str, int],
+        max_confidence_threshold: Optional[float] = None,
     ) -> tuple[list[tuple[int, int]], bool]:
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
@@ -1212,7 +1213,8 @@ class ClusterScheduler(SchedulerInterface):
         stats = request.update_from_output(
             new_token_ids,
             confidence_threshold,
-            avg_output_confidence,
+            confidence_stats,
+            max_confidence_threshold
         )
 
         stopped = check_stop(request, self.max_model_len)
@@ -1336,7 +1338,7 @@ class ClusterScheduler(SchedulerInterface):
         if prune and not self.request_states[request_id].executors_to_free:
             del self.request_states[request_id]
             del self.requests[request_id]
-            self.system_logger.log(write_out=True)
+            self.system_logger.log()
         
         return None
         
@@ -1347,7 +1349,6 @@ class ClusterScheduler(SchedulerInterface):
         for executor_id in list(self.request_states[request.request_id].executors_to_free):
             self._free_request_on_executor(request, executor_id, finished)
         
-        self.step_estimator.save_data()
         return None
 
 
@@ -1502,7 +1503,6 @@ class ClusterScheduler(SchedulerInterface):
     def shutdown(self) -> None:
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
-        self.step_estimator.save_data()
 
     ########################################################################
     # KV Connector Related Methods

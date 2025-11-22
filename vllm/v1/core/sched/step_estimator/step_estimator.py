@@ -28,8 +28,18 @@ class StepStats:
 
     confidence_threshold: Optional[float] = None
     max_confidence_threshold: Optional[float] = None
-    last_recompute_avg_output_confidence: Optional[float] = None
-    cur_avg_output_confidence: Optional[float] = None
+    min_confidence: Optional[float] = None
+    q25_confidence: Optional[float] = None
+    median_confidence: Optional[float] = None
+    q75_confidence: Optional[float] = None
+    avg_confidence: Optional[float] = None
+    output_min_confidence: Optional[float] = None
+    output_q25_confidence: Optional[float] = None
+    output_median_confidence: Optional[float] = None
+    output_q75_confidence: Optional[float] = None
+    output_avg_confidence: Optional[float] = None
+    # last_recompute_avg_output_confidence: Optional[float] = None
+    # cur_avg_output_confidence: Optional[float] = None
 
 class StepEstimator:
     def __init__(self, vllm_config: VllmConfig):

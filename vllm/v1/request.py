@@ -145,9 +145,9 @@ class Request:
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0
 
-        self.last_recompute_avg_output_confidence = None
+        # self.last_recompute_avg_output_confidence = None
         # TODO: fix SLO
-        self.latency_slo = 5.0
+        self.latency_slo = 3 
 
 
     @classmethod
@@ -184,13 +184,13 @@ class Request:
         self,
         token_ids: list[tuple[int, int]],
         confidence_threshold: float,
-        avg_output_confidence: float,
+        confidence_stats: dict[str, float],
         max_confidence_threshold: Optional[float] = None,
     ) -> StepStats:
     
         no_cache = self.num_exec_tokens == len(self._all_token_ids)
-        if no_cache or self.is_start_of_new_block:
-            self.last_recompute_avg_output_confidence = avg_output_confidence
+        # if no_cache or self.is_start_of_new_block:
+            # self.last_recompute_avg_output_confidence = avg_output_confidence
 
         self.num_last_unmasked_tokens = len(token_ids)
         self._unmasked_token_ids.extend(token_ids)
@@ -214,8 +214,18 @@ class Request:
             block_size=self.denoise_block_size,
             confidence_threshold=confidence_threshold,
             max_confidence_threshold=max_confidence_threshold,
-            last_recompute_avg_output_confidence=self.last_recompute_avg_output_confidence,
-            cur_avg_output_confidence=avg_output_confidence,
+            min_confidence=confidence_stats.get("min", None),
+            q25_confidence=confidence_stats.get("q25", None),
+            median_confidence=confidence_stats.get("median", None),
+            q75_confidence=confidence_stats.get("q75", None),
+            avg_confidence=confidence_stats.get("avg", None),
+            output_min_confidence=confidence_stats["output_min"],
+            output_q25_confidence=confidence_stats["output_q25"],
+            output_median_confidence=confidence_stats["output_median"],
+            output_q75_confidence=confidence_stats["output_q75"],
+            output_avg_confidence=confidence_stats["output_avg"],
+            # last_recompute_avg_output_confidence=self.last_recompute_avg_output_confidence,
+            # cur_avg_output_confidence=avg_output_confidence,
         )
 
         self.num_denoise_ran += 1

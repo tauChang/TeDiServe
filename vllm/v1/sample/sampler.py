@@ -34,7 +34,10 @@ class Sampler(nn.Module):
         exec_start_pos: torch.Tensor, # [tau_chang]: shape [num_reqs]
         num_exec_tokens: torch.Tensor, # [tau_chang]: shape [num_reqs]
         sampling_metadata: SamplingMetadata,
-        confidence_thresholds: list[float]
+        confidence_thresholds: list[float],
+        confidences: torch.Tensor, # [max]
+        req_ids: list[str],
+        req_id_to_index: dict[str, int],
     ) -> SamplerOutput:
         # NOTE(woosuk): Use the original logits (before any penalties or
         # temperature scaling) for the top-k logprobs.
@@ -42,6 +45,7 @@ class Sampler(nn.Module):
         # is used for sampling (after penalties and temperature scaling).
         # TODO(rob): provide option for logprobs post sampling.
         # See https://vllm-dev.slack.com/archives/C07UUL8E61Z/p1735907856007919 # noqa: E501
+        assert len(req_ids) == len(sampling_metadata.num_tokens)
 
         # [tau_chang] Ignore for now.
         # num_logprobs = sampling_metadata.max_num_logprobs
@@ -67,8 +71,9 @@ class Sampler(nn.Module):
         # Sample the next token.
 
         # sampled = self.sample(logits, sampling_metadata) # [TODO (tau_chang)]: output should be List[List[Tuple[int, int]]]
-        unmasked, avg_output_confidences = self.unmask(is_mask, logits, exec_start_pos, num_exec_tokens,
-                               sampling_metadata, confidence_thresholds)
+        unmasked, confidence_stats = self.unmask(
+            is_mask, logits, exec_start_pos, num_exec_tokens, sampling_metadata, 
+            confidence_thresholds, confidences, req_ids, req_id_to_index)
         logprobs_tensors = None
 
         # [tau_chang] Ignore for now.
@@ -89,7 +94,7 @@ class Sampler(nn.Module):
         # These are GPU tensors.
         sampler_output = SamplerOutput(
             sampled_token_ids=unmasked,
-            avg_output_confidences=avg_output_confidences,
+            confidence_stats=confidence_stats,
             logprobs_tensors=logprobs_tensors,
         )
         return sampler_output
@@ -124,6 +129,7 @@ class Sampler(nn.Module):
             logger.debug(f"Request {i}:"
                          f"block_start={block_start}, block_end={block_end}, "
                          )
+            req_range = (req_start, req_start + num_exec_tokens[i].item())
             unmask_range = (req_start + block_start - exec_start,
                             req_start + block_end - exec_start)
 
@@ -131,15 +137,20 @@ class Sampler(nn.Module):
             if is_recompute:
                 output_confidence_range = (req_start + sampling_metadata.num_prompt_tokens[i],
                                            req_start + sampling_metadata.num_tokens[i])
+                output_pos_range = (sampling_metadata.num_prompt_tokens[i],
+                                    sampling_metadata.num_tokens[i])
             else:
                 output_confidence_range = (req_start,
                                            req_start + num_exec_tokens[i].item())
+                output_pos_range = (block_start, block_end)
             
             ranges.append(
                 {
+                    "req_range": req_range,
                     "unmask_range": unmask_range,
                     "output_confidence_range": output_confidence_range,
-                    "block_start": block_start
+                    "block_start": block_start,
+                    "output_pos_range": output_pos_range,
                 }
             )
             logger.debug(f"ranges: {ranges[-1]}")
@@ -163,7 +174,10 @@ class Sampler(nn.Module):
         exec_start_pos: torch.Tensor,
         num_exec_tokens: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        confidence_thresholds: list[float]
+        confidence_thresholds: list[float],
+        confidences: torch.Tensor,
+        req_ids: list[str],
+        req_id_to_index: dict[str, int],
     ) -> list[list[tuple[int, int]]]:
         """Unmask the logits based on the is_mask tensor."""
         # [tau_chang]: For now, we assume that is_mask is same shape as logits.
@@ -184,15 +198,17 @@ class Sampler(nn.Module):
         x_0 = x_0.cpu()
         
         unmasked_tokens = []
-        avg_output_confidences = []
+        confidence_stats = [] # list of dicts
         # avg_masked_confidence = []
         # for i, (start, end, block_start) in \
         #     enumerate(self.get_output_range(sampling_metadata, exec_start_pos, num_exec_tokens)):
         for i, ranges in \
             enumerate(self.get_output_range(sampling_metadata, exec_start_pos, num_exec_tokens)):
+            req_start, req_end = ranges["req_range"]
             start, end = ranges["unmask_range"]
             block_start = ranges["block_start"]
             output_start, output_end = ranges["output_confidence_range"]
+            output_pos_start, output_pos_end = ranges["output_pos_range"]
 
             logger.debug(
                 f"Processing range {start}:{end}, block_start={block_start}")
@@ -207,7 +223,8 @@ class Sampler(nn.Module):
 
 
             masked_confidences = confidence_slice[is_mask_slice]
-            masked_indices = torch.nonzero(is_mask_slice, as_tuple=False).squeeze(1)
+            # masked_indices = torch.nonzero(is_mask_slice, as_tuple=False).squeeze(1)
+            masked_indices = is_mask_slice.nonzero(as_tuple=False).squeeze(1)
             # logger.debug(
             #     f"Masked indices: {masked_indices}, "
             #     f"Masked confidences: {masked_confidences}")
@@ -239,19 +256,75 @@ class Sampler(nn.Module):
                 for index, token in zip(selected_indices, selected_tokens)
             ])
 
-            avg_output_confidences.append(
-                confidence[output_start:output_end].mean().item()
+            # copy confidence slice back to confidnces tensor
+            req_id = req_ids[i]
+            req_index = req_id_to_index[req_id]
+            num_tokens = sampling_metadata.num_tokens[i]
+            num_prompt_tokens = sampling_metadata.num_prompt_tokens[i]
+            logger.debug(f"req_id: {req_id}, req_index: {req_index}")
+            logger.debug(f"req_id_to_index: {req_id_to_index}")
+            # req_confidence_slice = confidence[req_start:req_end]
+            # logger.debug(f"copying confidence[{req_start}:{req_end}] to "
+            #              f"confidences[{req_index},"
+            #              f"{exec_start_pos[i]}:"
+            #              f"{exec_start_pos[i] + num_exec_tokens[i]}]")
+            # copy to confidences[req_index, exec_start_pos[i]:exec_start_pos[i] + num_exec_tokens[i]]
+            # confidences[req_index,
+            #             exec_start_pos[i]:exec_start_pos[i] + num_exec_tokens[i]] = \
+            #     req_confidence_slice
+            logger.debug(f"copying confidence[{output_start}:{output_end}] to "
+                         f"confidences[{req_index},"
+                         f"{output_pos_start}:"
+                         f"{output_pos_end}]")
+            output_confidence_slice = confidence[output_start:output_end]
+            confidences[req_index, 
+                        output_pos_start:output_pos_end] = \
+                output_confidence_slice
+
+            # confidence related stats
+            # conf = confidences[req_index, :num_tokens]
+            logger.debug(f"output confidence slice: "
+                         f"confidences[{req_index},"
+                         f"{num_prompt_tokens}:{num_tokens}]")
+            output_conf = confidences[req_index, num_prompt_tokens:num_tokens]
+
+            # mn = conf.min()
+            # avg = conf.mean()
+            # q25, med, q75 = torch.quantile(conf, torch.tensor([0.25, 0.5, 0.75], device=conf.device))
+
+            output_mn = output_conf.min()
+            output_avg = output_conf.mean()
+            output_q25, output_med, output_q75 = torch.quantile(
+                output_conf, torch.tensor([0.25, 0.5, 0.75], device=output_conf.device)
             )
+            
+            confidence_stats.append(
+                {
+                    # "avg": avg.item(),
+                    # "min": mn.item(),
+                    # "q25": q25.item(),
+                    # "median": med.item(),
+                    # "q75": q75.item(),
+                    "output_avg": output_avg.item(),
+                    "output_min": output_mn.item(),
+                    "output_q25": output_q25.item(),
+                    "output_median": output_med.item(),
+                    "output_q75": output_q75.item(),
+                }
+            )
+            # logger.debug(
+            #     f"Confidence stats for request {i} (id: {req_id}): "
+            #     f"avg={avg}, min={mn},"
+            #     f"q25={q25}, median={med}, q75={q75}"
+            # )
             logger.debug(
-                f"Avg output confidence for range {output_start}:{output_end}: "
-                f"{avg_output_confidences[-1]}"
+                f"Output Confidence stats for request {i} (id: {req_id}): "
+                f"output_avg={output_avg}, output_min={output_mn},"
+                f"output_q25={output_q25}, output_median={output_med}, "
+                f"output_q75={output_q75}"
             )
 
-            # logger.debug(
-            #     f"Unmasked tokens for range {start}:{end}: {unmasked_tokens[-1]}"
-            # )
-        
-        return unmasked_tokens, avg_output_confidences
+        return unmasked_tokens, confidence_stats
 
     def sample(
         self,

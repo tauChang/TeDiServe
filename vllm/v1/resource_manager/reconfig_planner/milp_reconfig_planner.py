@@ -681,7 +681,22 @@ class MILPReconfigPlanner:
 
         # TODO
         self.candidate_confidence_thresholds = [.9, .8, .7, .6, .5]
-        self.confidence_unmasked_tokens_per_step = {.9: 3.18, .8: 4.12, .7: 5.14, .6: 6.25, .5: 7.14}
+        # # from "step_data_kiet/gsm8k_100/256/"
+        # self.confidence_unmasked_tokens_per_step = {
+        #     .9: 3.18, 
+        #     .8: 4.12, 
+        #     .7: 5.14, 
+        #     .6: 6.25, 
+        #     .5: 7.14
+        #     }
+        # from "step_data_dual_cache_with_output/dual_*_256"
+        self.confidence_unmasked_tokens_per_step = {
+            .9: 3.02, 
+            .8: 3.89, 
+            .7: 4.77, 
+            .6: 5.65, 
+            .5: 6.58
+            }
         # self.candidate_tp_degree = [4, 2, 1]
         self.candidate_tp_degree = [4,2,1]
         self.latency_profile_paths = {}

@@ -69,7 +69,7 @@ class SamplerOutput:
     # PLACEHOLDER_TOKEN_ID (-1 by default) is used for padding.
     # sampled_token_ids: torch.Tensor
     sampled_token_ids: list[list[tuple[int, int]]]
-    avg_output_confidences: list[list[float]]
+    confidence_stats: list[dict[str, float]]
     logprobs_tensors: Optional[LogprobsTensors]
 
 
@@ -88,7 +88,7 @@ class ModelRunnerOutput:
     # generated in the current step. It can be different for
     # each request due to speculative/jump decoding.
     sampled_token_ids: list[list[tuple[int, int]]]
-    avg_output_confidences: list[list[float]]
+    confidence_stats: list[dict[str, float]]
 
     # num_reqs x num_spec_tokens
     spec_token_ids: Optional[list[list[int]]]
@@ -119,7 +119,8 @@ EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               req_id_to_index={},
                                               sampled_token_ids=[],
                                               spec_token_ids=None,
-                                              avg_output_confidences=[],
+                                              confidence_stats=[],
+                                            #   avg_output_confidences=[],
                                               logprobs=None,
                                               prompt_logprobs_dict={},
                                               pooler_output=[],

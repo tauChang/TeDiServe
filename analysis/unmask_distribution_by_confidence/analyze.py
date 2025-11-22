@@ -1,31 +1,54 @@
 import json
 import matplotlib.pyplot as plt
 import numpy as np
+from collections import defaultdict
 
 # Define your file patterns
+# files = [
+#     # "GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
+#     # "GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
+#     # "GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
+#     # "GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
+#     # "GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
+# ]
+# dir = "../../step_data_kiet/gsm8k_100/256/"
+# files = [dir + f for f in files]
 files = [
-    "GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
-    "GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
-    "GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
-    "GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
-    "GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
-]
-dir = "../../step_data_kiet/gsm8k_100/256/"
-files = [dir + f for f in files]
+    "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.9_256.json",
+    "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.8_256.json",
+    "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.7_256.json",
+    "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.6_256.json",
+    "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.5_256.json",
+    # "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.9_512.json",
+    # "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.8_512.json",
+    # "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.7_512.json",
+    # "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.6_512.json",
+    # "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.5_512.json",
+    # "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.9_1024.json",
+    # "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.8_1024.json",
+    # "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.7_1024.json",
+    # "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.6_1024.json",
+    # "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.5_1024.json",
 
-data_by_conf = {}
+]
+
+data_by_conf = defaultdict(list)
 
 # Read each file and extract num_cur_unmasked_tokens
 for path in files:
-    conf = float(path.split("conf")[-1].replace(".json", ""))
+    # conf = float(path.split("conf")[-1].replace(".json", ""))
     values = []
     with open(path, "r") as f:
+        # find conf by looking at the first row of the file in the "confidence_threshold" field
+        first_line = f.readline()
+        first_obj = json.loads(first_line)
+        conf = first_obj["confidence_threshold"]
         for line in f:
             if not line.strip():
                 continue
             obj = json.loads(line)
             values.append(obj["num_cur_unmasked_tokens"])
-    data_by_conf[conf] = values
+    data_by_conf[conf].extend(values)
 
 # Plot
 plt.figure(figsize=(8, 5))

@@ -123,7 +123,8 @@ def run_test(args):
                  apply_chat_template=SHOULD_APPLY_CHAT_TEMPLATE[args.model],
                  tokenizer_name=args.model,
                  arrival_pattern=arrival_pattern,
-                 output_path=args.output_path
+                 output_path=args.output_path,
+                 warmup=args.warmup
                  )
 
     proxy_url = "http://localhost:12345/v1/completions"
@@ -146,6 +147,7 @@ def run_test(args):
             "max_tokens": args.output_length,
         },
         limit=args.limit,
+        random_seed=0,
     )
 
     if args.write_results:
@@ -186,6 +188,9 @@ def main():
     )
     parser.add_argument(
         "--write-results", action="store_true", help="Whether to write results to output path"
+    )
+    parser.add_argument(
+        "--warmup", action="store_true", help="Whether to perform warmup requests before starting evaluation"
     )
     args = parser.parse_args()
 

@@ -130,6 +130,10 @@ class InputBatch:
         self.denoise_block_size_cpu = self.denoise_block_size_cpu_tensor.numpy()
         self.sampling_metadata_needs_refresh = False
 
+        self.confidences = torch.zeros((max_num_reqs, max_model_len),
+                                       dtype=torch.float32,
+                                       device=device)
+
         # Block table.
         self.block_table = MultiGroupBlockTable(
             max_num_reqs=max_num_reqs,
@@ -503,6 +507,8 @@ class InputBatch:
             self.presence_penalties_cpu[i2], self.presence_penalties_cpu[i1]
         self.repetition_penalties_cpu[i1], self.repetition_penalties_cpu[i2] =\
             self.repetition_penalties_cpu[i2], self.repetition_penalties_cpu[i1]
+        self.confidences[i1, :], self.confidences[i2, :] =\
+            self.confidences[i2, :], self.confidences[i1, :]
 
         # NOTE: the following is unsafe
         # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
@@ -612,6 +618,9 @@ class InputBatch:
 
             self.request_lora_mapping[empty_index] = self.request_lora_mapping[
                 last_req_index]
+
+            self.confidences[empty_index, :num_tokens] = \
+                self.confidences[last_req_index, :num_tokens]
 
             # TODO convert these to LogitsProcessors
             if self.allowed_token_ids_mask_cpu_tensor is not None:

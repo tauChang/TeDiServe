@@ -1,5 +1,5 @@
 import time
-# from vllm.v1.resource_manager.reconfig_planner.milp_reconfig_planner_bak import MILPReconfigPlanner
+# from vllm.v1.resource_manager.reconfig_planner.milp_reconfig_planner_bak_1116 import MILPReconfigPlanner
 from vllm.v1.resource_manager.reconfig_planner.milp_reconfig_planner import MILPReconfigPlanner
 from vllm.v1.resource_manager.workload_monitor import WorkloadClass
 
@@ -119,7 +119,7 @@ def plot_reconfig_timeline(df, rps_trace, title="Reconfiguration Timeline"):
     plt.savefig("reconfig_timeline_subplots_prefix.png", dpi=200)
 
 
-def simulate_reconfiguration(planner, node_to_bundles, current_config, rps_trace, P_k, O_k, SLO_k):
+async def simulate_reconfiguration(planner, node_to_bundles, current_config, rps_trace, P_k, O_k, SLO_k):
     """
     Simulate dynamic workload changes over time.
     Args:
@@ -147,7 +147,7 @@ def simulate_reconfiguration(planner, node_to_bundles, current_config, rps_trace
         ]
 
         # Run planner
-        new_config = planner.plan_reconfiguration(
+        new_config = await planner.plan_reconfiguration_async(
             node_to_bundles=node_to_bundles,
             current_config=current_config,
             workload_classes=workload_classes,
@@ -165,27 +165,35 @@ def simulate_reconfiguration(planner, node_to_bundles, current_config, rps_trace
     return configs_over_time
 
 
-if __name__ == "__main__":
+async def main():
     latency_profile_paths = {
         1: "./latency_profiles/GSAI-ML_LLaDA-8B-Instruct/GH200/TP1.json",
         2: "./latency_profiles/GSAI-ML_LLaDA-8B-Instruct/GH200/TP2.json",
         4: "./latency_profiles/GSAI-ML_LLaDA-8B-Instruct/GH200/TP4.json",
     }
 
-    num_instances = 2
-    K = ["1024_256", "1280_256", "1536_256"]
-    # K = ["1536_256"]
-    P_k = {"1024_256": 1536, "1280_256": 2048, "1536_256": 2560}
-    O_k = {"1024_256": 256, "1280_256": 256, "1536_256": 256}
-    SLO_k = {"1024_256": 5.0, "1280_256": 5.0, "1536_256": 5.0}
+    # K = ["1024_256", "1280_256", "1536_256"]
+    # K = ["1024_256"]
+    # P_k = {"1024_256": 1024, "1280_256": 1280, "1536_256": 1536}
+    # O_k = {"1024_256": 256, "1280_256": 256, "1536_256": 256}
+    # SLO_k = {"1024_256": 5.0, "1280_256": 5.0, "1536_256": 5.0}
+    K = [(768, 256), (1024, 256), (1280, 256)]
+    P_k = {f"{p}_{o}": p for p, o in K}
+    O_k = {f"{p}_{o}": o for p, o in K}
+    SLO_k = {f"{p}_{o}": 5.0 for p, o in K}
+    RPS_k = None
+    K = [f"{p}_{o}" for p, o in K]
 
     # Node layout
-    node_to_bundles = {f"node{i}": [i * 8 + j for j in range(8)] for i in range(num_instances)}
+    num_instances = 2
+    node_to_bundles = {f"node{i}": [i * 4 + j for j in range(4)] for i in range(num_instances)}
     current_config = {
         0: [0, 1, 2, 3], 
-        1: [4, 5, 6, 7],
-        2: [8, 9, 10, 11],
-        3: [12, 13, 14, 15],
+        1: [4, 5],
+        2: [6],
+        3: [7],
+        # 2: [8, 9, 10, 11],
+        # 3: [12, 13, 14, 15],
         # 4: [16, 17, 18, 19],
         # 5: [20, 21, 22, 23],
         # 6: [24, 25, 26, 27],
@@ -205,22 +213,32 @@ if __name__ == "__main__":
     #     # {"1536_256": 1.6*5},
     #     # {"1024_256": .4, "1280_256": .4, "1536_256": 0.2},
     # ]
+    # rps_trace = [
+    #     {"1024_256": 0.1, "1280_256": 0.06666666666666667},
+    #     {"768_256": 0.1, "1024_256": 0.13333333333333333, "1280_256": 0.1},
+    #     {"1024_256": 0.16666666666666666, "1280_256": 0.2},
+    #     # {"1024_256": 0.1, "1280_256": 0.16666},
+    # ]
 
-    # rps_classless_trace = [.4, .8, 1.2, 1.6, 2.0, 2.4, 2.8, 3.2, 3.6, 4.0]
-    # rps_classless_trace += rps_classless_trace[-2::-1]  # ramp down
-    # rps_classless_trace = [6.0]
-    rps_classless_trace = [0.1 * i for i in range(1, 60)]  # 0.1 to 2.0
     rps_trace = []
+    # rps_classless_trace = [.4, .8, 1.2, 1.6, 2.0, 2.4, 2.8, 3.2, 3.6, 4.0]
+    rps_classless_trace = [1/1, 1/0.5]
+    # rps_classless_trace = [1/0.25]
+    # rps_classless_trace += rps_classless_trace[-2::-1]  # ramp down
+    # rps_trace = rps_classless_trace
+    # # rps_classless_trace = [6.0]
+    # rps_classless_trace = [0.1 * i for i in range(1, 60)]  # 0.1 to 2.0
+    # rps_trace = []
     for rps in rps_classless_trace:
         rps_trace.append({k: rps / len(K) for k in K})
 
     planner = MILPReconfigPlanner(
         latency_profile_paths=latency_profile_paths,
         cache_prefix=True,
-        cache_suffix=False,
+        cache_suffix=True,
         denoise_block_size=32)
 
-    configs_over_time = simulate_reconfiguration(
+    configs_over_time = await simulate_reconfiguration(
         planner,
         node_to_bundles=node_to_bundles,
         current_config=current_config,
@@ -240,3 +258,7 @@ if __name__ == "__main__":
 
     # Plot
     plot_reconfig_timeline(df_summary, rps_trace)
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())

@@ -120,58 +120,92 @@ async def wait_upstream_ready(url, timeout=120, interval=2.0):
 @app.post("/v1/completions")
 async def proxy_completions(request: Request):
     data = await request.json()
-    
-    await wait_upstream_ready(app.state.upstream_url)
-    
-    if app.state.first_request_arrival_time is None:
+    logger.info(f"Received request data: {data}")
+
+    req_id = int(data["request_id"])
+
+    # ============================================================
+    # 1. Warmup using request 0's payload
+    # ============================================================
+    if req_id == 0:
+        await wait_upstream_ready(app.state.upstream_url)
+        if app.state.does_warmup:
+            logger.info("⚠️ Warmup triggered by request 0 — sending warmup call.")
+            
+            warmup_data = data.copy()   # SAME payload as normal request 0
+
+            # Send warmup immediately, no scheduling, non-blocking
+            async with httpx.AsyncClient(timeout=200) as client:
+                try:
+                    _ = await client.post(
+                        f"{app.state.upstream_url}/completions",
+                        json=warmup_data,
+                        headers={"X-Request-Id": "warmup"}
+                    )
+                    logger.info("Warmup request succeeded.")
+                except Exception as e:
+                    logger.warning(f"Warmup request failed: {e}")
+
+        await asyncio.sleep(1.0)
         app.state.first_request_arrival_time = time.monotonic()
+        app.state.warmup_done = True
+        logger.info("Warmup complete. Proceeding with normal handling.")
 
-    req_id = app.state.req_count
-    app.state.req_count += 1
-    logger.info(f"data: {data}")
 
+    # ============================================================
+    # 2. All requests must wait until warmup finishes
+    # ============================================================
+    while not app.state.warmup_done:
+        await asyncio.sleep(0.1)
+
+    # ============================================================
+    # 3. Normal request path (request 0 included)
+    # ============================================================
+    # Apply chat template if enabled
     if app.state.apply_chat_template:
         prompt = data["prompt"]
-        m = [{"role": "user", "content": prompt}, ]
-        prompt = app.state.tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
+        m = [{"role": "user", "content": prompt}]
+        data["prompt"] = app.state.tokenizer.apply_chat_template(
+            m,
+            add_generation_prompt=True,
+            tokenize=False
+        )
 
-        data["prompt"] = prompt 
-
-        # logger.info(f"Request {req_id} after chat template: {data['prompt']}")
-    
-        
-    # Schedule the release time for this request
-    delay = max(0.0, 
-                app.state.first_request_arrival_time + app.state.request_arrival_time[req_id] - time.monotonic())
-    # delay = max(0.0, app.state.next_release_time - time.monotonic())
-
-    logger.info(
-        f"Request {req_id}: "
-        f"scheduled after {delay:.3f}s (gap {app.state.request_arrival_time[req_id]:.3f}s)"
+    # Compute scheduled release delay
+    delay = max(
+        0.0,
+        app.state.first_request_arrival_time
+        + app.state.request_arrival_time[req_id]
+        - time.monotonic()
     )
 
-    headers = {"X-Request-Id": str(req_id)}
+    logger.info(
+        f"Request {req_id}: scheduled after {delay:.3f}s "
+        f"(gap={app.state.request_arrival_time[req_id]:.3f}s)"
+    )
 
-    # Sleep until its release time
     await asyncio.sleep(delay)
     logger.info(f"Request {req_id} released after waiting {delay:.3f}s")
+    logger.info(f"Prompt (first 200 chars): {data['prompt'][:200]}")
 
+    # Forward real request to upstream
     start_time = time.monotonic()
-    # Forward to the real vLLM server
     async with httpx.AsyncClient(timeout=1200) as client:
         resp = await client.post(
-            f"{app.state.upstream_url}/completions", 
+            f"{app.state.upstream_url}/completions",
             json=data,
-            headers=headers)
+            headers={"X-Request-Id": str(req_id)}
+        )
         resp.raise_for_status()
+
     elapsed = time.monotonic() - start_time
     app.state.resp_time[req_id] = elapsed
 
-    # add elapsed time to resp
-    resp = resp.json()
-    logger.info(f"Request {req_id} got response {resp}")
+    resp_json = resp.json()
+    logger.info(f"Request {req_id} got response: {resp_json}")
 
-    return resp
+    return resp_json
+
 
 def write_response_times(file_path: str):
     # if write-results is true, file_path should already exist. We read it, append the resp_time dict, and write it back
@@ -197,7 +231,8 @@ def launch_proxy(upstream_url: str,
                  apply_chat_template: bool = False,
                  tokenizer_name: str = None,
                  arrival_pattern = (100, 0.0),
-                 output_path: str = "eval_results.json"
+                 output_path: str = "eval_results.json",
+                 warmup: bool = True
                  ):
     # assert avg_inter_arrival_time >= 0, "inter_arrival_time must be non-negative"
     
@@ -222,6 +257,8 @@ def launch_proxy(upstream_url: str,
     app.state.req_count = 0
     app.state.next_release_time = None
     app.state.resp_time = {}
+    app.state.does_warmup = warmup
+    app.state.warmup_done = False
 
      
     def _run():

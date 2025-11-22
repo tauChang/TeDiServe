@@ -944,6 +944,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             num_exec_tokens=self.num_exec_tokens_cpu[:self.input_batch.num_reqs],
                             sampling_metadata=sampling_metadata,
                             confidence_thresholds=confidence_thresholds,
+                            confidences=self.input_batch.confidences,
+                            req_ids=self.input_batch.req_ids,
+                            req_id_to_index=self.input_batch.req_id_to_index,
                         )
                         # logger.debug(f"Sampler output: {sampler_output}")
                     except Exception as e:
@@ -1038,7 +1041,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         req_ids=self.input_batch.req_ids,
                         req_id_to_index=self.input_batch.req_id_to_index,
                         sampled_token_ids=valid_sampled_token_ids,
-                        avg_output_confidences=sampler_output.avg_output_confidences,
+                        confidence_stats=sampler_output.confidence_stats,
                         spec_token_ids=None,
                         logprobs=logprobs_lists,
                         prompt_logprobs_dict=prompt_logprobs_dict,
@@ -1456,10 +1459,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         f"{time.time() - start_time} seconds")
         logger.debug(f"hidden_states shape: {hidden_states.shape}, "
                      f"logits shape: {logits.shape}")
-        num_reqs = logits.size(0)
+        # num_reqs = logits.size(0)
+        num_reqs = (seq_len + self.max_model_len - 1)//self.max_model_len
+        chunk_lengths = []
+        for i in range(num_reqs):
+            if i == num_reqs -1:
+                chunk_lengths.append(seq_len - i * self.max_model_len)
+            else:
+                chunk_lengths.append(self.max_model_len)
         
-        exec_start_pos = torch.zeros((1,), dtype=torch.int32)
-        num_exec_tokens = torch.tensor((seq_len,), dtype=torch.int32)
+        exec_start_pos = torch.zeros((num_reqs,), dtype=torch.int32)
+        num_exec_tokens = torch.tensor(chunk_lengths, dtype=torch.int32)
 
         dummy_tensors = lambda v: torch.full(
             (num_reqs, ), v, device=self.device)
@@ -1481,16 +1491,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             allowed_token_ids_mask=None,
             bad_words_token_ids={},
             logitsprocs=LogitsProcessorManager(),
-            num_prompt_tokens=[seq_len // 2],
-            num_tokens=[seq_len],
-            num_denoise_ran=[0],
-            cur_block_start=[0],
-            denoise_block_size=[seq_len]
+            num_prompt_tokens=[0] * num_reqs,
+            num_tokens=[num_exec_tokens[i].item() for i in range(num_reqs)],
+            num_denoise_ran=[0] * num_reqs,
+            cur_block_start=[0] * num_reqs,
+            denoise_block_size=[seq_len] * num_reqs,
         )
         if unmask_all:
-            confidence_thresholds = [0.0] # if 0, unmasks everything
+            confidence_thresholds = [0.0] * num_reqs # unmask all tokens
         else:
-            confidence_thresholds = [0.9] # usual case: only a few tokens are unmasked
+            confidence_thresholds = [0.9] * num_reqs # usual case: only a few tokens are unmasked
         try:
             # [tau_chang] is_mask is all True
             is_mask = torch.ones(
@@ -1502,7 +1512,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                           exec_start_pos=exec_start_pos,
                                           num_exec_tokens=num_exec_tokens,
                                           sampling_metadata=dummy_metadata,
-                                          confidence_thresholds=confidence_thresholds)
+                                          confidence_thresholds=confidence_thresholds,
+                                          confidences=self.input_batch.confidences,
+                                          req_ids=[f"dummy_req_{i}" for i in range(num_reqs)],
+                                          req_id_to_index={f"dummy_req_{i}": i for i in range(num_reqs)}
+                                          )
+                                          
             self._sync_device()
             logger.debug(f"in _dummy_sampler_run sampler took "
                          f"{time.time() - start_time} seconds")

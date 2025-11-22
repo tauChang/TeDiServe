@@ -5,6 +5,63 @@ from sklearn.metrics import mean_squared_error, r2_score, root_mean_squared_erro
 import matplotlib.pyplot as plt
 from typing import Optional, Union
 
+def evaluate_only(model_path: str,
+                  features_path: str,
+                  test_path: Union[str, list[str]]) -> None:
+    import lightgbm as lgb
+    model = lgb.Booster(model_file=model_path)
+    with open(features_path, "r") as f:
+        included_features = [line.strip() for line in f.readlines()]
+    
+    if type(test_path) == str:
+        test_path = [test_path]
+    
+    df = pd.concat([load_and_transform(p) for p in test_path], ignore_index=True)
+    df["id"] =df["id"]
+
+    # only keep id with cmpl-0-0
+    # df = df[df["id"].str.contains("cmpl-0-0")]
+    
+    X_test  = df[included_features]
+    y_test  = df["denoise_ratio"]
+    
+    y_pred = model.predict(X_test)
+    
+    rmse_ratio = root_mean_squared_error(y_test, y_pred)
+    print(f"RMSE (ratio): {rmse_ratio:.4f}")
+    # WMAPE
+    # df = df[included_features]
+    results_df = df.copy()
+    results_df["y_pred_ratio"] = y_pred
+    results_df["y_test_ratio"] = y_test
+    results_df["y_pred_steps"] = (y_pred * results_df["output_length"])
+    results_df["y_test_steps"] = (y_test * results_df["output_length"])
+    numerator = np.abs(results_df["y_test_steps"] - results_df["y_pred_steps"]).sum()
+    denominator = np.abs(results_df["y_test_steps"]).sum()
+    wmape = numerator / denominator
+    print(f"WMAPE (steps): {wmape:.4f}")
+
+    # R^2
+    r2_ratio  = r2_score(results_df["y_test_ratio"], results_df["y_pred_ratio"])
+    print(f"R^2 (ratio): {r2_ratio:.4f}")
+    r2_steps  = r2_score(results_df["y_test_steps"], results_df["y_pred_steps"])
+    print(f"R^2 (steps): {r2_steps:.4f}")
+
+    # plot
+    plt.figure(figsize=(6,5))
+    plt.scatter(y_test, y_pred, alpha=0.3)
+    plt.xlabel("Actual Denoise Ratio")
+    plt.ylabel("Predicted Denoise Ratio")
+    plt.title(f"Predicted vs Actual Denoise Ratio")
+    # plot y = x
+    plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--')
+    plt.tight_layout()
+    plt.savefig("denoise_ratio_prediction_evaluate_only.png", dpi=300)
+
+    results_df = results_df.round(6)
+    results_df.to_csv("denoise_step_prediction_results.csv", index=False)
+    
+
 def plot_final_denoise_histogram(path: list[str]) -> None:
     """Plot histogram of final denoise steps per sequence."""
     df = pd.concat([pd.read_json(p, lines=True) for p in path], ignore_index=True)
@@ -142,9 +199,11 @@ def load_and_transform(path: str) -> pd.DataFrame:
     df["num_cur_unmasked_tokens"] = df.groupby("id")["num_unmasked_tokens"].diff().fillna(df["num_unmasked_tokens"])
     df["full_cur_unmask_progress"] = df["num_cur_unmasked_tokens"] / df["output_length"]
 
-    compute_masked_confidence(df)
-    compute_output_confidence(df)
-    compute_all_confidence_stats(df)
+    # compute_masked_confidence(df)
+    # compute_output_confidence(df)
+    # compute_all_confidence_stats(df)
+    df["last_recompute_avg_output_confidence"] = df["avg_confidence"]
+    df["cur_avg_output_confidence"] = df["avg_confidence"]
 
     return df[[
         "source_file",
@@ -164,16 +223,26 @@ def load_and_transform(path: str) -> pd.DataFrame:
         "block_progress",
         "block_unmask_progress",
         "denoise_ratio",
-        "masked_conf_avg",
-        "output_conf_avg",
-        # "last_recompute_avg_output_confidence",
-        # "cur_avg_output_confidence",
-        "min_all_confidence",
-        "max_all_confidence",
-        "lower_quartile_all_confidence",
-        "upper_quartile_all_confidence",
-        "mean_all_confidence",
-        "median_all_confidence",
+        # "masked_conf_avg",
+        # "output_conf_avg",
+        "last_recompute_avg_output_confidence",
+        "cur_avg_output_confidence",
+        # "min_all_confidence",
+        # "max_all_confidence",
+        # "lower_quartile_all_confidence",
+        # "upper_quartile_all_confidence",
+        # "mean_all_confidence",
+        # "median_all_confidence",
+        # "min_confidence",
+        # "q25_confidence",
+        # "median_confidence",
+        # "avg_confidence",
+        # "q75_confidence",
+        "output_min_confidence",
+        "output_q25_confidence",
+        "output_median_confidence",
+        "output_avg_confidence",
+        "output_q75_confidence",
     ]]
     
 def mape_objective(y_pred, dataset):
@@ -193,36 +262,53 @@ def mape_metric(y_pred, dataset):
 
 
 def train_and_evaluate(train_path: Union[str, list[str]],
+                       model_name: str = "tmp",
                        test_path: Optional[Union[str, list[str]]] = None) -> None:
     # objective = "num_denoise_left"
     objective = "denoise_ratio"
     included_features = [
         # "id",
-        "confidence_threshold",
-        "num_unmasked_tokens",
-        "output_length",
-        "block_size",
-        "block",
-        "block_num_unmasked_tokens",
         # "num_denoise_ran",
         # "num_denoise_left",
+
+        # "confidence_threshold",
+        # "num_unmasked_tokens",
+        # "output_length",
+        # "block_size",
+        # "block",
+        # "block_num_unmasked_tokens",
+        # "block_progress",
+        # "block_unmask_progress",
+        # "full_cur_unmask_progress",
+        # "full_progress",
+        # "full_unmask_progress",
+
         "full_progress",
         "full_unmask_progress",
-        "block_progress",
-        "block_unmask_progress",
-        # "full_cur_unmask_progress",
-        "masked_conf_avg",
-        "output_conf_avg",
+        "confidence_threshold",
+        "output_min_confidence",
+        "output_q25_confidence",
+        "output_median_confidence",
+        "output_avg_confidence",
+        "output_q75_confidence",
+
+        # "masked_conf_avg",
+        # "output_conf_avg",
         # "last_recompute_avg_output_confidence",
         # "cur_avg_output_confidence",
         # "denoise_ratio"
         # "num_cur_unmasked_tokens",
-        "min_all_confidence",
-        "max_all_confidence",
-        "lower_quartile_all_confidence",
-        "upper_quartile_all_confidence",
-        "mean_all_confidence",
-        "median_all_confidence",
+        # "min_all_confidence",
+        # "max_all_confidence",
+        # "lower_quartile_all_confidence",
+        # "upper_quartile_all_confidence",
+        # "mean_all_confidence",
+        # "median_all_confidence",
+        # "min_confidence",
+        # "q25_confidence",
+        # "median_confidence",
+        # "avg_confidence",
+        # "q75_confidence",
     ]
 
     if type(train_path) == str:
@@ -264,9 +350,9 @@ def train_and_evaluate(train_path: Union[str, list[str]],
     
 
     # linear regression
-    # from sklearn.linear_model import LinearRegression
-    # model = LinearRegression()
-    # model.fit(X_train, y_train)
+    from sklearn.linear_model import LinearRegression
+    model = LinearRegression()
+    model.fit(X_train, y_train)
 
     # # # # print parameters
     # print("Model parameters:")
@@ -284,8 +370,7 @@ def train_and_evaluate(train_path: Union[str, list[str]],
             'objective': 'regression',
             'metric': 'rmse',
             # 'objective': 'quantile',
-            # 'metric': 'quantile',
-            # 'alpha': 0.5,  # for quantile regression
+            # 'alpha': 0.6,  # for quantile regression
             # 'learning_rate': 0.2,
             # 'num_leaves': 800,
             # 'max_depth': 16,
@@ -302,6 +387,12 @@ def train_and_evaluate(train_path: Union[str, list[str]],
     #     train_data,
     #     feval=mape_metric
     # )
+    # # zip features and importances
+    # feature_importances = sorted(zip(X_train.columns, model.feature_importance()), key=lambda x: x[1], reverse=True)
+    # print("Feature importances:")
+    # for feature, importance in feature_importances:
+    #     print(f"  {feature}: {importance}")
+    # # model.save_model("denoise_ratio_model.txt")
 
     # import xgboost as xgb
     # model = xgb.XGBRegressor(
@@ -317,22 +408,19 @@ def train_and_evaluate(train_path: Union[str, list[str]],
     # model.fit(X_train, y_train)
     
     
-    # zip features and importances
-    feature_importances = sorted(zip(X_train.columns, model.feature_importance()), key=lambda x: x[1], reverse=True)
-    print("Feature importances:")
-    for feature, importance in feature_importances:
-        print(f"  {feature}: {importance}")
-    # model.save_model("denoise_ratio_model.txt")
 
     # save the model and features used to ./models
-    name = "dual_cache_256_8"
-    name = "tmp"
-    model_path = f"models/lgb/{name}/model.bin"
-    features_path = f"models/lgb/{name}/features.txt"
+    # name = "dual_cache_32_1120"
+    # name = "dual_cache_1120_256_32"
+    # name = "dual_cache_1120_256_32_tiny"
+    # name = "tmp_quantile"
+    model_path = f"models/lgb/{model_name}/model.bin"
+    features_path = f"models/lgb/{model_name}/features.txt"
     import os
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     os.makedirs(os.path.dirname(features_path), exist_ok=True)
-    model.save_model(model_path)
+    if hasattr(model, "save_model"):
+        model.save_model(model_path)
     with open(features_path, "w") as f:
         for feature in included_features:
             f.write(f"{feature}\n")
@@ -343,7 +431,7 @@ def train_and_evaluate(train_path: Union[str, list[str]],
     pred_time = []
     for i in range(min(500, len(X_test))):
         start_time = time.time()
-        _ = model.predict(X_test.iloc[i:i+5])
+        _ = model.predict(X_test.iloc[i:i+10])
         pred_time.append(time.time() - start_time)
     print(f"Average prediction time per sample (single): {sum(pred_time) / len(pred_time):.6f} seconds")
     
@@ -384,14 +472,33 @@ def train_and_evaluate(train_path: Union[str, list[str]],
     print(f"R^2 (ratio): {r2_ratio:.4f}")
     print(f"R^2 (steps): {r2_steps:.4f}")
 
+    # QCE (Quantile Calibration Error)
+    quantile = 0.8
+    # quantile condition: y_true <= y_pred
+    coverage = np.mean(results_df["y_test_steps"] <= results_df["y_pred_steps"])
+    print(f"Coverage (steps): {coverage:.4f}")
+    qce = abs(coverage - quantile)
+    print(f"QCE (steps): {qce:.4f}")
+
+    
+
     # plot error vs. full_unmask_progress
     results_df["full_unmask_progress_rounded"] = results_df["full_unmask_progress"].round(1)
     results_df["masked_tokens_left"] = results_df["output_length"] - results_df["num_unmasked_tokens"]
-    results_df["error"] = (results_df["y_test_steps"] - results_df["y_pred_steps"]) / results_df["masked_tokens_left"]
-    results_df["error"] = (results_df["y_test_steps"] - results_df["y_pred_steps"])
+    results_df["error"] = (results_df["y_pred_steps"] - results_df["y_test_steps"]) / results_df["y_test_steps"] 
+    # results_df["error"] = (results_df["y_test_steps"] - results_df["y_pred_steps"])
     plt.figure(figsize=(10,5))
     results_df.boxplot(column="error", by="full_unmask_progress_rounded",
                           grid=False, showfliers=False)
+    # write result_df to file
+    # drop source_file column
+    results_df = results_df.drop(columns=["source_file", "full_unmask_progress_rounded", "error"])
+    # print to two decimal places
+    # results_df = results_df.round(2)
+    results_df.to_csv("denoise_step_prediction_results.csv", index=False)
+    
+    # y limit -1 and 1
+    plt.ylim(-1, 1)
     plt.xlabel("Full Denoise Progress (rounded)")
     plt.ylabel("Prediction Error")
     plt.title(f"Prediction Error vs Full Denoise Progress{title_suffix}")
@@ -425,21 +532,75 @@ def train_and_evaluate(train_path: Union[str, list[str]],
     plt.scatter(y_test, y_pred, alpha=0.3)
     plt.xlabel("Actual Denoise Ratio")
     plt.ylabel("Predicted Denoise Ratio")
+    for threshold in results_df["confidence_threshold"].unique():
+        subset = results_df[results_df["confidence_threshold"] == threshold]
+        plt.scatter(subset["y_test_ratio"], subset["y_pred_ratio"], alpha=0.3, label=f"Threshold {threshold}")
+    plt.legend(title="Confidence Threshold")
     plt.title(f"Predicted vs Actual Denoise Ratio{title_suffix}")
     # plot y = x
     plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--')
     plt.tight_layout()
     plt.savefig("denoise_ratio_prediction.png", dpi=300)
 
+    
+
 # --- Usage ---
 # 1) Single file, internal split
 # train_and_evaluate("GSAI-ML_LLaDA-8B-Base_prefix_step_estimator.json")
 # train_and_evaluate("../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_128_step_estimator.json")
 # train_and_evaluate("../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block32_conf0.8_out256.json")
+# evaluate_only(
+#     # "models/lgb/dual_cache_32_1120/model.bin",
+#     # "models/lgb/dual_cache_32_1120/features.txt",
+#     # "models/lgb/tmp/model.bin",
+#     # "models/lgb/tmp/features.txt",
+#     "models/lgb/dual_cache_256_32/model.bin",
+#     "models/lgb/dual_cache_256_32/features.txt",
+#     [
+#         # "/u/tchang85/dllm/experiment_dir/20251120_164011/step_data.json",
+#         # "/u/tchang85/dllm/experiment_dir/20251120_165845/step_data.json"
+#         # "/u/tchang85/dllm/experiment_dir/20251120_165033/step_data.json"
+#         "/u/tchang85/dllm/current_experiment/step_data.json"
+#     ]
+# )
+# 3/0
 cross_test = False
 train_and_evaluate(
     # "GSAI-ML_LLaDA-8B-Base_prefix_step_estimator.json",
-    [
+    # model_name="1121_dual_256_512_1024_quantile_0.6",
+    model_name="tmp",
+    train_path=[
+        # "/u/tchang85/dllm/experiment_dir/20251120_164011/step_data.json",
+        "../../step_data_dual_cache_with_output/dual_0.9_256.json",
+        "../../step_data_dual_cache_with_output/dual_0.8_256.json",
+        "../../step_data_dual_cache_with_output/dual_0.7_256.json",
+        "../../step_data_dual_cache_with_output/dual_0.6_256.json",
+        "../../step_data_dual_cache_with_output/dual_0.5_256.json",
+        "../../step_data_dual_cache_with_output/dual_0.9_512.json",
+        "../../step_data_dual_cache_with_output/dual_0.8_512.json",
+        "../../step_data_dual_cache_with_output/dual_0.7_512.json",
+        "../../step_data_dual_cache_with_output/dual_0.6_512.json",
+        "../../step_data_dual_cache_with_output/dual_0.5_512.json",
+        "../../step_data_dual_cache_with_output/dual_0.9_1024.json",
+        "../../step_data_dual_cache_with_output/dual_0.8_1024.json",
+        "../../step_data_dual_cache_with_output/dual_0.7_1024.json",
+        "../../step_data_dual_cache_with_output/dual_0.6_1024.json",
+        "../../step_data_dual_cache_with_output/dual_0.5_1024.json",
+        # "../../step_pred_data_dual_cache/dual_0.9_256.json",
+        # "../../step_pred_data_dual_cache/dual_0.8_256.json",
+        # "../../step_pred_data_dual_cache/dual_0.7_256.json",
+        # "../../step_pred_data_dual_cache/dual_0.6_256.json",
+        # "../../step_pred_data_dual_cache/dual_0.5_256.json",
+        # "../../step_pred_data_dual_cache/dual_0.9_512.json",
+        # "../../step_pred_data_dual_cache/dual_0.8_512.json",
+        # "../../step_pred_data_dual_cache/dual_0.7_512.json",
+        # "../../step_pred_data_dual_cache/dual_0.6_512.json",
+        # "../../step_pred_data_dual_cache/dual_0.5_512.json",
+        # "../../step_pred_data_dual_cache/dual_0.9_1024.json",
+        # "../../step_pred_data_dual_cache/dual_0.8_1024.json",
+        # "../../step_pred_data_dual_cache/dual_0.7_1024.json",
+        # "../../step_pred_data_dual_cache/dual_0.6_1024.json",
+        # "../../step_pred_data_dual_cache/dual_0.5_1024.json",
         # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
         # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
         # "../../step_data_1107_combined/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
@@ -472,11 +633,11 @@ train_and_evaluate(
         # "../../step_data_1106/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
         # "../../step_data_1106/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block8_conf0.9.json",
         # "../../step_data_1106/gsm8k_/256/GSAI-ML_LLaDA-8B-Instruct_prefix_suffix_block32_conf0.9.json",
-        "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
-        "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
-        "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
-        "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
-        "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
+        # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
+        # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
+        # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
+        # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",
+        # "../../step_data_kiet/gsm8k_100/256/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.5.json",
         # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
         # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
         # "../../step_data_kiet/gsm8k_100/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
@@ -491,8 +652,38 @@ train_and_evaluate(
         # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block32_conf0.9_out256.json",
         # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block32_conf0.9_out512.json",
     ],
-    [
-        "../../step_data_1107_combined/gsm8k_/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
+    test_path = [
+        # "../../step_data_dual_cache_with_output/dual_0.9_256.json",
+        # "../../step_data_dual_cache_with_output/dual_0.8_256.json",
+        # "../../step_data_dual_cache_with_output/dual_0.7_256.json",
+        # "../../step_data_dual_cache_with_output/dual_0.6_256.json",
+        # "../../step_data_dual_cache_with_output/dual_0.5_256.json",
+        # "../../step_data_dual_cache_with_output/dual_0.9_512.json",
+        # "../../step_data_dual_cache_with_output/dual_0.8_512.json",
+        # "../../step_data_dual_cache_with_output/dual_0.7_512.json",
+        # "../../step_data_dual_cache_with_output/dual_0.6_512.json",
+        # "../../step_data_dual_cache_with_output/dual_0.5_512.json",
+        # "../../step_data_dual_cache_with_output/dual_0.9_1024.json",
+        # "../../step_data_dual_cache_with_output/dual_0.8_1024.json",
+        # "../../step_data_dual_cache_with_output/dual_0.7_1024.json",
+        # "../../step_data_dual_cache_with_output/dual_0.6_1024.json",
+        # "../../step_data_dual_cache_with_output/dual_0.5_1024.json",
+        # "/u/tchang85/dllm/experiment_dir/20251121/092606/step_data.json"
+        # "/u/tchang85/dllm/experiment_dir/20251121/092606/step_data.json"
+        # "../../step_data_dual_cache_with_output/dual_0.5_256.json",
+        # "/u/tchang85/dllm/experiment_dir/20251120_164011/step_data.json",
+        # "/u/tchang85/dllm/current_experiment/step_data.json"
+        # "../../step_pred_data_dual_cache/dual_0.9_512.json",
+        # "../../step_pred_data_dual_cache/dual_0.8_512.json",
+        # "../../step_pred_data_dual_cache/dual_0.7_512.json",
+        # "../../step_pred_data_dual_cache/dual_0.6_512.json",
+        # "../../step_pred_data_dual_cache/dual_0.5_512.json",
+        # "../../step_pred_data_dual_cache/dual_0.9_1024.json",
+        # "../../step_pred_data_dual_cache/dual_0.8_1024.json",
+        # "../../step_pred_data_dual_cache/dual_0.7_1024.json",
+        # "../../step_pred_data_dual_cache/dual_0.6_1024.json",
+        # "../../step_pred_data_dual_cache/dual_0.5_1024.json",
+        # "../../step_data_1107_combined/gsm8k_/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.9.json",
         # "../../step_data_1107_combined/gsm8k_/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.8.json",
         # "../../step_data_1107_combined/gsm8k_/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.7.json",
         # "../../step_data_1107_combined/gsm8k_/512/GSAI-ML_LLaDA-8B-Instruct_block32_conf0.6.json",

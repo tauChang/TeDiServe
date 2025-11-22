@@ -20,8 +20,19 @@ def transform_features(step_stats: Union[StepStats, list[StepStats]],
         "block_num_unmasked_tokens": lambda s: s.block_num_unmasked_tokens,
         "block_size": lambda s: s.block_size,
         "confidence_threshold": lambda s: s.confidence_threshold,
-        "last_recompute_avg_output_confidence": lambda s: s.last_recompute_avg_output_confidence,
-        "cur_avg_output_confidence": lambda s: s.cur_avg_output_confidence,
+        "max_confidence_threshold": lambda s: s.max_confidence_threshold,
+        "min_confidence": lambda s: s.min_confidence,
+        "q25_confidence": lambda s: s.q25_confidence,
+        "median_confidence": lambda s: s.median_confidence,
+        "q75_confidence": lambda s: s.q75_confidence,
+        "avg_confidence": lambda s: s.avg_confidence,
+        "output_min_confidence": lambda s: s.output_min_confidence,
+        "output_q25_confidence": lambda s: s.output_q25_confidence,
+        "output_median_confidence": lambda s: s.output_median_confidence,
+        "output_q75_confidence": lambda s: s.output_q75_confidence,
+        "output_avg_confidence": lambda s: s.output_avg_confidence,
+        "last_recompute_avg_output_confidence": lambda s: s.output_avg_confidence,
+        "cur_avg_output_confidence": lambda s: s.output_avg_confidence,
     }
 
     derived_attrs = {
@@ -38,5 +49,8 @@ def transform_features(step_stats: Union[StepStats, list[StepStats]],
     for s in step_stats:
         row = {f: func(s) for f, func in all_attrs.items() if f in features}
         rows.append(row)
+    
+    df = pd.DataFrame(rows)
+    df = df[features]
 
-    return pd.DataFrame(rows)
+    return df
