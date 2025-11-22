@@ -5,7 +5,7 @@ import os
 from vllm.logger import init_logger
 from typing import Union
 import pandas as pd
-# import time
+import time
 # pd.set_option('display.max_rows', None)
 # pd.set_option('display.max_columns', None)
 # pd.set_option('display.max_colwidth', None)
@@ -23,11 +23,18 @@ class LightGradientBoostMachine(BaseModel):
         super().__init__(model_path, features_path, features)
         
     def predict(self, X: Union[StepStats, list[StepStats]]) -> Union[float, list[float]]:
-        X_df = transform_features(X, self.features)
+        # start_time = time.perf_counter()
+        X_np = transform_features(X, self.features)
+        # end_time = time.perf_counter()
+        # logger.debug(f"Transformed features in {(end_time - start_time) * 1000:.3f} ms.")
         # logger.debug(f"Predicting with features: {X_df}")
         # raw_predict = self.model.predict(X_df)
         # predict one row at a time
-        predictions = self.model.predict(X_df) * (X.output_length if isinstance(X, StepStats) else X[0].output_length)
+        # start_time = time.perf_counter()
+        predictions = self.model.predict(X_np) * (X.output_length if isinstance(X, StepStats) else X[0].output_length)
+        # end_time = time.perf_counter()
+        # logger.debug(f"Made predictions in {(end_time - start_time) * 1000:.3f} ms.")
+        #
         logger.debug(f"Predictions: {predictions}")
         return predictions[0] if len(predictions) == 1 else predictions
 

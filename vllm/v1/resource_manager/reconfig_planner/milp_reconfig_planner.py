@@ -27,7 +27,7 @@ def get_minimum_movement_config(
         old_config: dict[int, list[int]], # {me_id: [bundle_ids]}
         node_to_bundles: dict[int, list[int]],
         candidate_tp_degree: list[int],
-        log_dir: str
+        log_file: str,
     ) -> dict[int, list[int]]:
     """
     ILP that:
@@ -182,7 +182,7 @@ def get_minimum_movement_config(
     m.setObjective(obj_keep, GRB.MAXIMIZE)
 
     # ---------- Solve -------------------------------------------------------
-    m.setParam("LogFile", f"{log_dir}/{get_timestamp()}_stage2.log")
+    m.setParam("LogFile", log_file)
     m.setParam("LogToConsole", 0)
     m.setParam("Threads", NUM_THREADS)
     m.Params.MIPGap = 0.01
@@ -278,7 +278,7 @@ def get_maximum_confidence_abstract_config(
         cache_prefix: bool,
         cache_suffix: bool,
         denoise_block_size: int,
-        log_dir: str
+        log_file: str,
     ):
     # returns x_ng, objective
         # --- Inputs ---
@@ -339,7 +339,7 @@ def get_maximum_confidence_abstract_config(
     # Maximize avg confidence per token
     total_RPS = sum(RPS_k[k] for k in K)
     token_conf_obj = quicksum(
-        (RPS_k[k] / O_k[k]) * quicksum(c * T_c[c] * s_kc[k, c] for c in C)
+        (RPS_k[k] / O_k[k]) * quicksum(c * T_c[c] * (s_kc[k, c]+sp_kc[k, c]) for c in C)
         for k in K
     ) / total_RPS
     # m.setObjective(obj, GRB.MAXIMIZE)
@@ -478,11 +478,11 @@ def get_maximum_confidence_abstract_config(
     # --- Solve ---
     m.update()
     # m.setParam("OutputFlag", 0)
-    m.setParam("LogFile", f"{log_dir}/{get_timestamp()}_stage1.log")
+    m.setParam("LogFile", log_file)
     m.setParam("LogToConsole", 0) 
     m.setParam("Threads", NUM_THREADS)
     m.setParam("MIPGap", 0.01)
-    m.setParam("TimeLimit", 10)
+    m.setParam("TimeLimit", 30)
     m.ObjNAbsTol = 0.0
     m.ObjNRelTol = 0.0
     m.optimize()
@@ -552,8 +552,13 @@ def plan_reconfiguration(
         cache_prefix: bool,
         cache_suffix: bool,
         denoise_block_size: int,
-        log_dir: str
+        log_dir: str,
+        compare_with_fixed: bool = True
     ) -> dict[int, list[int]]:
+    # create a subfolder using date/time
+    log_dir = os.path.join(log_dir, f"{datetime.now().strftime("%Y%m%d")}", f"{datetime.now().strftime("%H%M%S")}")
+    os.makedirs(log_dir, exist_ok=True)
+
 
     p = psutil.Process()
     all_cpus = get_slurm_assigned_cpus()
@@ -570,7 +575,7 @@ def plan_reconfiguration(
     
     # scale workload classes RPS by 2 to provide buffer
     for wc in workload_classes:
-        wc.rps = wc.rps * 2
+        # wc.rps = wc.rps * 2
         logger.debug(f"Scaled workload class {wc.name} RPS to {wc.rps}")
     
     # read latency profile
@@ -591,57 +596,60 @@ def plan_reconfiguration(
         cache_prefix=cache_prefix,
         cache_suffix=cache_suffix,
         denoise_block_size=denoise_block_size,
-        log_dir=log_dir
+        log_file=f"{log_dir}/free_abstract.log"
     )
 
     new_config_free = get_minimum_movement_config(
-        x_ng_free, current_config, node_to_bundles, candidate_tp_degree, log_dir)
+        x_ng_free, current_config, node_to_bundles, candidate_tp_degree, f"{log_dir}/free_movement.log")
     
-    # constrained
-    x_ng_fixed, sol_count_fixed, objectives_fixed = get_maximum_confidence_abstract_config(
-        node_to_bundles,
-        current_config,
-        workload_classes,
-        fix_x_ng=True,
-        candidate_tp_degree=candidate_tp_degree,
-        candidate_confidence_thresholds=candidate_confidence_thresholds,
-        latency_profiles=latency_profiles,
-        confidence_unmasked_tokens_per_step=confidence_unmasked_tokens_per_step,
-        cache_prefix=cache_prefix,
-        cache_suffix=cache_suffix,
-        denoise_block_size=denoise_block_size,
-        log_dir=log_dir
-    )
-    new_config_fixed = current_config
-
-    logger.debug(f"Free: {sol_count_free} solutions found with objectives {objectives_free}")
-    logger.debug(f"Fixed: {sol_count_fixed} solutions found with objectives {objectives_fixed}")
-
-    # if no feasible solution with fixed x_ng, use free one
-    if sol_count_fixed == 0:
-        logger.info("No feasible reconfiguration found that preserves current executor counts; using unconstrained solution.")
+    if not compare_with_fixed:
         new_config = new_config_free
     else:
-        # if objective improve by 10% or more, use free
-        conf_free = objectives_free[0]
-        slack_free = objectives_free[1]
-        conf_fixed = objectives_fixed[0]
-        slack_fixed = objectives_fixed[1]
-        logger.debug(f"Free confidence: {conf_free}, slack: {slack_free}")
-        logger.debug(f"Fixed confidence: {conf_fixed}, slack: {slack_fixed}")
-        if conf_free is not None and conf_fixed is not None:
-            # make positive
-            if conf_free > conf_fixed * 1.1 or \
-                (conf_free >= conf_fixed and slack_free > slack_fixed * 1.1):
-                logger.info("Significant objective improvement with unconstrained solution; using it.")
-                new_config = new_config_free
-            else:
-                logger.info("Using constrained solution that preserves current executor counts.")
-                new_config = new_config_fixed
+        # constrained
+        x_ng_fixed, sol_count_fixed, objectives_fixed = get_maximum_confidence_abstract_config(
+            node_to_bundles,
+            current_config,
+            workload_classes,
+            fix_x_ng=True,
+            candidate_tp_degree=candidate_tp_degree,
+            candidate_confidence_thresholds=candidate_confidence_thresholds,
+            latency_profiles=latency_profiles,
+            confidence_unmasked_tokens_per_step=confidence_unmasked_tokens_per_step,
+            cache_prefix=cache_prefix,
+            cache_suffix=cache_suffix,
+            denoise_block_size=denoise_block_size,
+            log_file=f"{log_dir}/fixed_abstract.log"
+        )
+        new_config_fixed = current_config
+
+        logger.debug(f"Free: {sol_count_free} solutions found with objectives {objectives_free}")
+        logger.debug(f"Fixed: {sol_count_fixed} solutions found with objectives {objectives_fixed}")
+
+        # if no feasible solution with fixed x_ng, use free one
+        if sol_count_fixed == 0:
+            logger.info("No feasible reconfiguration found that preserves current executor counts; using unconstrained solution.")
+            new_config = new_config_free
         else:
-            # no solution found for both free and fixed. Use fixed (all TP=1's)
-            logger.debug("No solutions found for both constrained and unconstrained; using TP=1 configuration.")
-            new_config = new_config_fixed
+            # if objective improve by 10% or more, use free
+            conf_free = objectives_free[0]
+            slack_free = objectives_free[1]
+            conf_fixed = objectives_fixed[0]
+            slack_fixed = objectives_fixed[1]
+            logger.debug(f"Free confidence: {conf_free}, slack: {slack_free}")
+            logger.debug(f"Fixed confidence: {conf_fixed}, slack: {slack_fixed}")
+            if conf_free is not None and conf_fixed is not None:
+                # make positive
+                if conf_free > conf_fixed * 1.1 or \
+                    (conf_free >= conf_fixed and slack_free > slack_fixed * 1.1):
+                    logger.info("Significant objective improvement with unconstrained solution; using it.")
+                    new_config = new_config_free
+                else:
+                    logger.info("Using constrained solution that preserves current executor counts.")
+                    new_config = new_config_fixed
+            else:
+                # no solution found for both free and fixed. Use fixed (all TP=1's)
+                logger.debug("No solutions found for both constrained and unconstrained; using TP=1 configuration.")
+                new_config = new_config_fixed
     
 
     # check new_config validity
@@ -680,7 +688,8 @@ class MILPReconfigPlanner:
         os.makedirs(self.log_dir, exist_ok=True)
 
         # TODO
-        self.candidate_confidence_thresholds = [.9, .8, .7, .6, .5]
+        # self.candidate_confidence_thresholds = [.9, .8, .7, .6, .5]
+        self.candidate_confidence_thresholds = [.9]
         # # from "step_data_kiet/gsm8k_100/256/"
         # self.confidence_unmasked_tokens_per_step = {
         #     .9: 3.18, 
@@ -725,6 +734,7 @@ class MILPReconfigPlanner:
                                     node_to_bundles: dict[int, list[int]],
                                     current_config: dict[int, list[int]], # me_id -> [bundle_ids]
                                     workload_classes: list[WorkloadClass],
+                                    compare_with_fixed: bool = True
                                     ) -> dict[int, list[int]]:
         loop = asyncio.get_event_loop()
         logger.debug(f"main process {os.getpid()}")
@@ -742,7 +752,8 @@ class MILPReconfigPlanner:
             self.cache_prefix,
             self.cache_suffix,
             self.denoise_block_size,
-            self.log_dir
+            self.log_dir,
+            compare_with_fixed
         )
 
                 

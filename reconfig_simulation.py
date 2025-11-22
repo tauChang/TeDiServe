@@ -151,6 +151,7 @@ async def simulate_reconfiguration(planner, node_to_bundles, current_config, rps
             node_to_bundles=node_to_bundles,
             current_config=current_config,
             workload_classes=workload_classes,
+            compare_with_fixed=False
         )
 
         print("→ New config:", new_config)
@@ -177,28 +178,29 @@ async def main():
     # P_k = {"1024_256": 1024, "1280_256": 1280, "1536_256": 1536}
     # O_k = {"1024_256": 256, "1280_256": 256, "1536_256": 256}
     # SLO_k = {"1024_256": 5.0, "1280_256": 5.0, "1536_256": 5.0}
-    K = [(768, 256), (1024, 256), (1280, 256)]
+    K = [(1024, 256), (1280, 256)]
     P_k = {f"{p}_{o}": p for p, o in K}
     O_k = {f"{p}_{o}": o for p, o in K}
-    SLO_k = {f"{p}_{o}": 5.0 for p, o in K}
+    SLO_k = {f"{p}_{o}": 3.0 for p, o in K}
     RPS_k = None
     K = [f"{p}_{o}" for p, o in K]
 
     # Node layout
-    num_instances = 2
-    node_to_bundles = {f"node{i}": [i * 4 + j for j in range(4)] for i in range(num_instances)}
     current_config = {
         0: [0, 1, 2, 3], 
-        1: [4, 5],
-        2: [6],
-        3: [7],
-        # 2: [8, 9, 10, 11],
-        # 3: [12, 13, 14, 15],
+        # 1: [4, 5],
+        # 2: [6],
+        # 3: [7],
+        1: [4, 5, 6, 7],
+        2: [8, 9, 10, 11],
+        3: [12, 13, 14, 15],
         # 4: [16, 17, 18, 19],
         # 5: [20, 21, 22, 23],
         # 6: [24, 25, 26, 27],
         # 7: [28, 29, 30, 31],
     }
+    num_instances = len(current_config)
+    node_to_bundles = {f"node{i}": [i * 4 + j for j in range(4)] for i in range(num_instances)}
 
     # Example RPS trace (time series)
     # rps_trace = [
@@ -222,7 +224,7 @@ async def main():
 
     rps_trace = []
     # rps_classless_trace = [.4, .8, 1.2, 1.6, 2.0, 2.4, 2.8, 3.2, 3.6, 4.0]
-    rps_classless_trace = [1/1, 1/0.5]
+    rps_classless_trace = [2, 2.5, 3, 3.5, 4, 4.5, 5]
     # rps_classless_trace = [1/0.25]
     # rps_classless_trace += rps_classless_trace[-2::-1]  # ramp down
     # rps_trace = rps_classless_trace
