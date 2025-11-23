@@ -11,7 +11,7 @@ ln -sfn "$EXPERIMENT_DIR" ./current_experiment
 # copy this file to experiment dir for record keeping
 cp run_lmeval.sh $EXPERIMENT_DIR/
 
-SLO=3.2  # seconds
+SLO=5  # seconds
 # VLLM Args
 MODEL=GSAI-ML/LLaDA-8B-Instruct
 NUM_GPUS_PER_MODEL_EXECUTOR=1
@@ -36,10 +36,10 @@ LOG_DIR=$EXPERIMENT_DIR/logs
 mkdir -p $LOG_DIR
 
 DENOISE_BLOCK_SIZE=32
-CACHE_PREFIX=false
-CACHE_SUFFIX=false
-# CACHE_PREFIX=true
-# CACHE_SUFFIX=true
+# CACHE_PREFIX=false
+# CACHE_SUFFIX=false
+CACHE_PREFIX=true
+CACHE_SUFFIX=true
 
 if [ "$CACHE_PREFIX" = true ] && [ "$CACHE_SUFFIX" = true ]; then
     # use dual_cache_256_32 model
@@ -51,12 +51,12 @@ if [ "$CACHE_PREFIX" = true ] && [ "$CACHE_SUFFIX" = true ]; then
     # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_1120_256_32/features.txt
     # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_1120_256_32_tiny/model.bin
     # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_1120_256_32_tiny/features.txt
-    STEP_ESTIMATOR_MODEL_PATH=/u/tchang85/dllm/analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_avg/model.bin
-    STEP_ESTIMATOR_FEATURES_PATH=/u/tchang85/dllm/analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_avg/features.txt
-    # STEP_ESTIMATOR_MODEL_PATH=/u/tchang85/dllm/analysis/denoise_step_prediction/models/lgb/1121_dual_256_avg/model.bin
-    # STEP_ESTIMATOR_FEATURES_PATH=/u/tchang85/dllm/analysis/denoise_step_prediction/models/lgb/1121_dual_256_avg/features.txt
-    # STEP_ESTIMATOR_MODEL_PATH=/u/tchang85/dllm/analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_quantile_0.7/model.bin
-    # STEP_ESTIMATOR_FEATURES_PATH=/u/tchang85/dllm/analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_quantile_0.7/features.txt
+    STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_avg/model.bin
+    STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_avg/features.txt
+    # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_avg/model.bin
+    # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_avg/features.txt
+    # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_quantile_0.7/model.bin
+    # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_quantile_0.7/features.txt
 elif [ "$CACHE_PREFIX" = true ] && [ "$CACHE_SUFFIX" = false ]; then
     STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/prefix_cache_256_32/model.bin
     STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/prefix_cache_256_32/features.txt
@@ -79,7 +79,7 @@ TASK=gsm8k
 # ARRIVAL_PATTERN="300:0.5,300:0.2"
 # ARRIVAL_PATTERN="30:3:8"
 # ARRIVAL_PATTERN="100:0.8:1"
-ARRIVAL_PATTERN="200:1.25"
+ARRIVAL_PATTERN="200:0.15"
 # ARRIVAL_PATTERN="100:0.1"
 # ARRIVAL_PATTERN="1319:0.3125"
 # ARRIVAL_PATTERN="5:0"

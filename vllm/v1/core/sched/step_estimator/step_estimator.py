@@ -6,6 +6,7 @@ from typing import Optional
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import resolve_obj_by_qualname
+from vllm.v1.utils import BufferedAsyncFileWriter
 from typing import Union
 import threading
 import json
@@ -73,12 +74,8 @@ class StepEstimator:
         # One lock to protect buffer during atomic swap
         self._lock = threading.Lock()
 
-        # Flush every N seconds (default 5s)
-        self.flush_interval = 10
-
-        # Start background flush thread
-        t = threading.Thread(target=self._periodic_flush, daemon=True)
-        t.start()
+        # for writing step data
+        self.file_writer = BufferedAsyncFileWriter(file_path=self._get_file_path())
 
         profiler_path = os.path.join(
             self.vllm_config.experiment_config.experiment_dir,
@@ -86,7 +83,6 @@ class StepEstimator:
         self.predict_profiler = TimeProfiler(
             name="step_estimator_predict",
             file_path=profiler_path,
-            flush_interval=10,   # seconds
         )
 
     # ------------------------------------------------------------
@@ -118,15 +114,11 @@ class StepEstimator:
     def add_data_point(self, stats: StepStats):
         """Fast, thread-safe append."""
         row = asdict(stats)
-        with self._lock:
-            self._row_buffer.append(row)
+        self.file_writer.add(row)
 
-    def predict(self, stats):
+    def predict(self, stats: list[StepStats]):
         # Ensure list-like for counting
-        if isinstance(stats, StepStats):
-            batch_size = 1
-        else:
-            batch_size = len(stats)
+        batch_size = len(stats)
 
         # ---------------------------
         # Timed profiling section
@@ -141,43 +133,3 @@ class StepEstimator:
         self.predict_profiler.commit()
 
         return result
-
-    # ------------------------------------------------------------
-    # Background flush
-    # ------------------------------------------------------------
-
-    def _periodic_flush(self):
-        while True:
-            time.sleep(self.flush_interval)
-            self.flush()
-
-    def flush(self):
-        """
-        Thread-safe atomic swap flush:
-        - lock just long enough to steal row_buffer
-        - release lock immediately
-        - write & concat outside lock
-        """
-        # -------- atomic swap --------
-        with self._lock:
-            if not self._row_buffer:
-                return
-            to_write = self._row_buffer
-            self._row_buffer = []     # new empty buffer
-        # -------- lock released --------
-
-        # Convert to DataFrame (outside lock)
-        new_df = pd.DataFrame(to_write)
-
-        # Update in-memory df
-        self.df = pd.concat([self.df, new_df], ignore_index=True)
-
-        # Append to JSONL file
-        file_path = self._get_file_path()
-        with open(file_path, "a") as f:
-            for row in to_write:
-                f.write(json.dumps(row) + "\n")
-
-        logger.debug(
-            f"StepEstimator: flushed {len(to_write)} rows to {file_path}"
-        )
