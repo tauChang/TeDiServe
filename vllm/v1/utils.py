@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 T = TypeVar("T")
-
+FLUSH_INTERVAL = 5
 
 class ConstantList(Generic[T], Sequence):
 
@@ -339,25 +339,104 @@ def get_cur_timestamp(include_ms: bool = True) -> str:
         return datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
     return datetime.now().strftime("%Y-%m-%d_%H:%M:%S.%f")[:-3]
 
+class BufferedAsyncFileWriter:
+    """
+    A reusable async file writer with:
+    - internal thread
+    - lock-protected buffer
+    - periodic flush
+    - optional "flush when buffer stops changing" rule
+    """
+    def __init__(
+        self,
+        file_path: str,
+        flush_interval: float = FLUSH_INTERVAL,
+        stable_required: int = 1,
+        create_dir: bool = True
+    ):
+        self.file_path = file_path
+        self.flush_interval = flush_interval
+        self.stable_required = stable_required
+
+        # Buffer + lock
+        self._buffer = []
+        self._lock = threading.Lock()
+
+        # Stability detection
+        self._last_buffer_size = 0
+        self._stable_cycles = 0
+
+        # Ensure directory exists
+        if create_dir:
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+        # Start background flush thread
+        self._thread = threading.Thread(
+            target=self._periodic_flush, daemon=True
+        )
+        self._thread.start()
+
+    # ---------------------------------------------------------
+    # Public API
+    # ---------------------------------------------------------
+
+    def add(self, obj):
+        """Append any JSON-serializable object to the buffer."""
+        with self._lock:
+            self._buffer.append(obj)
+
+    def flush(self):
+        """Flush all buffered entries immediately."""
+        with self._lock:
+            if not self._buffer:
+                return
+            to_write = self._buffer
+            self._buffer = []
+
+        logger.info(f"BufferedAsyncFileWriter: flushing to {self.file_path} with {len(to_write)} entries")
+        with open(self.file_path, "a") as f:
+            for entry in to_write:
+                f.write(json.dumps(entry) + "\n")
+
+    # ---------------------------------------------------------
+    # Background thread
+    # ---------------------------------------------------------
+
+    def _periodic_flush(self):
+        while True:
+            time.sleep(self.flush_interval)
+
+            with self._lock:
+                size = len(self._buffer)
+
+                # detect whether buffer is stable
+                if size == self._last_buffer_size:
+                    self._stable_cycles += 1
+                else:
+                    self._stable_cycles = 0
+
+                self._last_buffer_size = size
+
+                should_flush = (
+                    size > 0 and
+                    self._stable_cycles >= self.stable_required
+                )
+
+            if should_flush:
+                self.flush()
+
+
 class TimeProfiler:
-    def __init__(self, name: str, file_path: str, flush_interval: float = 10):
+    def __init__(self, name: str, file_path: str):
         self.name = name
         self.file_path = file_path
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        self.flush_interval = flush_interval
+        logger.info(f"profiler path: {file_path}")
+        self.file_writer = BufferedAsyncFileWriter(file_path)
 
         # Current entry (single-threaded, no lock needed)
         self.sections = {}
         self.info = {}
         self.events = []
-
-        # Completed entries buffer (shared with flush thread)
-        self.buffer = []
-        self._buffer_lock = threading.Lock()   # only lock needed
-
-        # Background flushing thread
-        t = threading.Thread(target=self._periodic_flush, daemon=True)
-        t.start()
 
     def section(self, name: str):
         return _SectionTimer(self, name)
@@ -372,7 +451,6 @@ class TimeProfiler:
     
     def _add_event(self, event: dict):
         self.events.append(event)
-
 
     # Called only on single-thread context → no lock needed
     def add_info(self, key: str, value):
@@ -398,35 +476,12 @@ class TimeProfiler:
             "events": self.events,
         }
 
-        # Push entry to the buffer (shared with flush thread)
-        with self._buffer_lock:
-            self.buffer.append(entry)
+        self.file_writer.add(entry)
 
         # Reset in-progress entry (still single-threaded)
         self.sections = {}
         self.info = {}
         self.events = []
-
-    def _periodic_flush(self):
-        while True:
-            time.sleep(self.flush_interval)
-            self.flush()
-
-    def flush(self):
-        """Flush all completed entries to disk using atomic buffer swap."""
-        # Atomically take all entries from buffer
-        with self._buffer_lock:
-            if not self.buffer:
-                return
-            to_write = self.buffer
-            self.buffer = []  # atomic swap
-
-        logger.info(f"Profiler '{self.name}': flushing to {self.file_path} with {len(to_write)} entries")
-        # Write outside lock
-        with open(self.file_path, "a") as f:
-            for entry in to_write:
-                f.write(json.dumps(entry) + "\n")
-
 
 class _SectionTimer:
     def __init__(self, profiler: TimeProfiler, name: str):

@@ -147,7 +147,7 @@ class Request:
 
         # self.last_recompute_avg_output_confidence = None
         # TODO: fix SLO
-        self.latency_slo = 3 
+        self.latency_slo = 3.2 
 
 
     @classmethod

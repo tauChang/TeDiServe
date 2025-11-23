@@ -25,6 +25,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest, PoolerOutput
 from vllm.utils import make_async
 from vllm.worker.worker_base import WorkerBase
+from vllm.v1.utils import BufferedAsyncFileWriter
 
 logger = init_logger(__name__)
 
@@ -75,16 +76,8 @@ class ExecutorBase(ABC):
         self.is_sleeping = False
         self.sleeping_tags: set[str] = set()
         self.status = ExecutorStatus.IDLE
-        self._status_log_buffer = []
         self.executor_status_file = f"{self.vllm_config.experiment_config.experiment_dir}/executor_status/{self.id}.log"
-        os.makedirs(os.path.dirname(self.executor_status_file), exist_ok=True)
-
-        self._status_log_buffer = []
-        self._status_log_lock = threading.Lock()
-        self.status_log_flush_interval = 10.0
-        
-        t = threading.Thread(target=self._periodic_status_flush, daemon=True)
-        t.start()
+        self.file_writer = BufferedAsyncFileWriter(self.executor_status_file)
 
     @abstractmethod
     def _init_executor(self) -> None:
@@ -312,35 +305,16 @@ class ExecutorBase(ABC):
         exception."""
         self.check_health()
     
-    def _periodic_status_flush(self):
-        while True:
-            time.sleep(self.status_log_flush_interval)
-            self.flush_status_log_buffer()
-    
-    def flush_status_log_buffer(self):
-        # Step 1: atomic swap
-        with self._status_log_lock:
-            if not self._status_log_buffer:
-                return
-            to_write = self._status_log_buffer
-            self._status_log_buffer = []
-
-        # Step 2: write outside lock
-        with open(self.executor_status_file, "a") as f:
-            for line in to_write:
-                f.write(line + "\n")
-        
-        logger.debug(f"Flushed {len(to_write)} status log entries to {self.executor_status_file}.")
-
     def log_status_transition(self, old_status: ExecutorStatus, new_status: ExecutorStatus):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-        entry = f"{timestamp}: {old_status.name} -> {new_status.name}"
-
-        with self._status_log_lock:
-            self._status_log_buffer.append(entry)
-
+        entry = {
+            "timestamp": timestamp,
+            "old_status": old_status.name,
+            "new_status": new_status.name
+        }
+        self.file_writer.add(entry)
         if new_status == ExecutorStatus.KILLING:
-            self.flush_status_log_buffer()
+            self.file_writer.flush()
 
     def _set_new_status(self, new_status: ExecutorStatus):
         self.log_status_transition(self.status, new_status)

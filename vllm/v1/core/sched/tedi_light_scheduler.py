@@ -224,7 +224,13 @@ class RequestState:
         self.executor_id = None
         self.executors_to_free: OrderedSet[int] = OrderedSet()
         self.pending_executor_id = None # executor to be set in the next scheduling step
-        self.pred_num_steps_left = {} # confidence_threshold -> predicted steps left
+        self.pred_num_steps_left = {
+            0.9: request.output_length / 3.02,
+            0.8: request.output_length / 3.89,
+            0.7: request.output_length / 4.77,
+            0.6: request.output_length / 5.65,
+            0.5: request.output_length / 6.58,
+        }  if request is not None else {} # confidence_threshold -> predicted steps left
         self.last_stats: StepStats = StepStats(
             id = self.request_id,
             timestamp="",
@@ -367,7 +373,7 @@ class RequestState:
             self.status = RequestStateStatus.UNSCHEDULED
 
 
-class TeDiScheduler(SchedulerInterface):
+class TeDiLightScheduler(SchedulerInterface):
 
     def __init__(
         self,
@@ -508,9 +514,13 @@ class TeDiScheduler(SchedulerInterface):
         self.update_profiler = TimeProfiler("Update", profiler_path)
 
         self.request_added_or_removed = False
-        self.requests_need_update_step_estimates: list[str] = []
+        self.requests_need_update_step_estimates: set[str] = set()
+        self.cum_requests_need_update_step_estimates: set[str] = set()
         self.last_update_request = 0.0
         self.update_request_interval = 1.0 # seconds
+
+        self.last_update_step_estimates = 0.0
+        self.update_step_estimates_interval = 0.5 # seconds
     
     def get_avg_num_tokens_per_req(self) -> float:
         if len(self.requests) == 0:
@@ -873,12 +883,32 @@ class TeDiScheduler(SchedulerInterface):
             with self.schedule_profiler.section("copy"):
                 old_request_states = copy.deepcopy(self.request_states)
 
-            with self.schedule_profiler.section("update_step_estimates"):
-                logger.debug(f"Updating step estimates for requests: {self.requests_need_update_step_estimates}")
-                if self.requests_need_update_step_estimates:
-                    self.update_step_estimates_batch(
-                        self.requests_need_update_step_estimates)
-                    self.requests_need_update_step_estimates = []
+            # with self.schedule_profiler.section("update_step_estimates"):
+            #     logger.debug(f"Updating step estimates for requests: {self.requests_need_update_step_estimates}")
+            #     if self.requests_need_update_step_estimates:
+            #         self.update_step_estimates_batch(
+            #             self.requests_need_update_step_estimates)
+            #         self.requests_need_update_step_estimates = []
+            with self.schedule_profiler.section("maybe_update_step_estimates"):
+                self.cum_requests_need_update_step_estimates.update(
+                    self.requests_need_update_step_estimates)
+                if time.time() - self.last_update_step_estimates > self.update_step_estimates_interval:
+                    logger.debug(f"Updating step estimates for cum requests: {self.cum_requests_need_update_step_estimates}")
+                    if self.cum_requests_need_update_step_estimates:
+                        self.update_step_estimates_batch(
+                            list(self.cum_requests_need_update_step_estimates))
+                        self.cum_requests_need_update_step_estimates = set()
+                    self.last_update_step_estimates = time.time()
+                else:
+                    # decrease their step estimates by one
+                    for req_id in self.requests_need_update_step_estimates:
+                        req_state = self.request_states[req_id]
+                        for conf in self.candidate_confidence_thresholds:
+                            if req_state.pred_num_steps_left[conf] > 0:
+                                req_state.pred_num_steps_left[conf] -= 1
+                self.requests_need_update_step_estimates = set()
+
+                
 
             with self.schedule_profiler.section("update requests"):
                 if self.request_added_or_removed and \
@@ -1404,7 +1434,8 @@ class TeDiScheduler(SchedulerInterface):
                             else:
                                 stopped_preempted_reqs.add(request)
                         else:
-                            self.requests_need_update_step_estimates.append(req_id)
+                            # self.requests_need_update_step_estimates.append(req_id)
+                            self.requests_need_update_step_estimates.add(req_id)
 
                         outputs[request.client_index].append(
                             EngineCoreOutput(
@@ -1532,7 +1563,8 @@ class TeDiScheduler(SchedulerInterface):
         # self.unscheduled.append(request.request_id)
         self.requests[request.request_id] = request
         self.request_states[request.request_id] = RequestState(request)
-        self.requests_need_update_step_estimates.append(request.request_id)
+        # self.requests_need_update_step_estimates.append(request.request_id)
+        self.requests_need_update_step_estimates.add(request.request_id)
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
         self.system_logger.log()
@@ -1656,6 +1688,9 @@ class TeDiScheduler(SchedulerInterface):
             self._free_request_on_executor(request, executor_id, finished)
         
         self.request_added_or_removed = True
+        # remove from request need update step estimates
+        if request.request_id in self.cum_requests_need_update_step_estimates:
+            self.cum_requests_need_update_step_estimates.remove(request.request_id)
         
         return None
 

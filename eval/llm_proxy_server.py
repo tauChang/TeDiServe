@@ -99,7 +99,7 @@ def wait_until_up(url: str,
             raise TimeoutError(f"Server at {url} not ready after {timeout:.1f} seconds")
         time.sleep(interval)
         
-async def wait_upstream_ready(url, timeout=120, interval=2.0):
+async def wait_upstream_ready(url, timeout=30000, interval=2.0):
     start = time.monotonic()
     async with httpx.AsyncClient() as client:
         while True:
@@ -129,24 +129,52 @@ async def proxy_completions(request: Request):
     # ============================================================
     if req_id == 0:
         await wait_upstream_ready(app.state.upstream_url)
-        if app.state.does_warmup:
-            logger.info("⚠️ Warmup triggered by request 0 — sending warmup call.")
+        # if app.state.does_warmup:
+        #     logger.info("⚠️ Warmup triggered by request 0 — sending warmup call.")
             
-            warmup_data = data.copy()   # SAME payload as normal request 0
+        #     warmup_data = data.copy()   # SAME payload as normal request 0
 
-            # Send warmup immediately, no scheduling, non-blocking
-            async with httpx.AsyncClient(timeout=200) as client:
-                try:
-                    _ = await client.post(
-                        f"{app.state.upstream_url}/completions",
-                        json=warmup_data,
-                        headers={"X-Request-Id": "warmup"}
-                    )
-                    logger.info("Warmup request succeeded.")
-                except Exception as e:
-                    logger.warning(f"Warmup request failed: {e}")
+        #     # Send warmup immediately, no scheduling, non-blocking
+        #     async with httpx.AsyncClient(timeout=200) as client:
+        #         try:
+        #             _ = await client.post(
+        #                 f"{app.state.upstream_url}/completions",
+        #                 json=warmup_data,
+        #                 headers={"X-Request-Id": "warmup"}
+        #             )
+        #             logger.info("Warmup request succeeded.")
+        #         except Exception as e:
+        #             logger.warning(f"Warmup request failed: {e}")
 
-        await asyncio.sleep(1.0)
+        # await asyncio.sleep(1.0)
+        # app.state.first_request_arrival_time = time.monotonic()
+        # app.state.warmup_done = True
+        # logger.info("Warmup complete. Proceeding with normal handling.")
+        if app.state.does_warmup:
+            logger.info("⚠️ Warmup triggered — sending 30 warmup calls.")
+
+            warmup_data = data.copy()
+
+            async def send_one(i):
+                async with httpx.AsyncClient(timeout=200) as client:
+                    try:
+                        await client.post(
+                            f"{app.state.upstream_url}/completions",
+                            json=warmup_data,
+                            headers={"X-Request-Id": f"warmup-{i}"
+                        })
+                        logger.info(f"Warmup request {i} succeeded.")
+                    except Exception as e:
+                        logger.warning(f"Warmup request {i} failed: {e}")
+
+            # Launch 30 warmup requests concurrently
+            tasks = [asyncio.create_task(send_one(i)) for i in range(30)]
+            # tasks = [asyncio.create_task(send_one(i)) for i in range(3)]
+            await asyncio.gather(*tasks)
+
+            logger.info("All warmup requests completed.")
+
+        await asyncio.sleep(3.0)
         app.state.first_request_arrival_time = time.monotonic()
         app.state.warmup_done = True
         logger.info("Warmup complete. Proceeding with normal handling.")
@@ -203,6 +231,7 @@ async def proxy_completions(request: Request):
 
     resp_json = resp.json()
     logger.info(f"Request {req_id} got response: {resp_json}")
+    logger.info(f"Time since first request arrival: {time.monotonic() - app.state.first_request_arrival_time:.3f}s")
 
     return resp_json
 

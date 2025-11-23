@@ -20,6 +20,7 @@ from vllm.platforms import current_platform
 
 from llm_proxy_server import launch_proxy
 import logging
+import time
 
 logging.basicConfig(
     level=logging.INFO,  # or INFO
@@ -158,6 +159,7 @@ def run_test(args):
 
     measured_value = results["results"][args.task]
     print(f"Measured value: {measured_value}")
+    time.sleep(5)  # wait for all profiler data to be flushed
 
 def main():
     parser = argparse.ArgumentParser()

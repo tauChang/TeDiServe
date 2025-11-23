@@ -24,8 +24,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
 from vllm.executor.executor_base import ExecutorStatus
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
-                                                compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.step_estimator import StepEstimator, StepStats
 from vllm.v1.core.sched.interface import SchedulerInterface
@@ -471,36 +469,8 @@ class LlumnixScheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
 
-        # Encoder-related.
-        # Calculate encoder cache size if applicable
-        # NOTE: For now we use the same budget for both compute and space.
-        # This can be changed when we make encoder cache for embedding caching
-        # across requests.
-        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
-            model_config=vllm_config.model_config,
-            scheduler_config=vllm_config.scheduler_config,
-            mm_registry=mm_registry,
-        )
-
-        # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
-        # projector if needed). Currently, we assume that the encoder also
-        # has the Transformer architecture (e.g., ViT).
-        self.max_num_encoder_input_tokens = encoder_compute_budget
-        # NOTE: For the models without encoder (e.g., text-only models),
-        # the encoder cache will not be initialized because cache size is 0
-        # for these models.
-        self.encoder_cache_manager = EncoderCacheManager(
-            cache_size=encoder_cache_size)
-
-        speculative_config = vllm_config.speculative_config
-
         self.use_eagle = False
         self.num_spec_tokens = self.num_lookahead_tokens = 0
-        if speculative_config:
-            self.num_spec_tokens = speculative_config.num_speculative_tokens
-            if speculative_config.use_eagle():
-                self.use_eagle = True
-                self.num_lookahead_tokens = self.num_spec_tokens
 
         # Create the KV cache manager.
         # [tau_chang] one kv_cache_manager per executor for now
@@ -658,6 +628,13 @@ class LlumnixScheduler(SchedulerInterface):
             
             best_executor_id = None
             best_step_latency = cur_step_latency
+            # sort executor by projected batch size (increasing)
+            candidate_executors.sort(
+                key=lambda ex_id: self.executor_states[ex_id].get_projected_batch_size(),
+            )
+            logger.debug(f"Sorted candidate executors by projected batch size: {candidate_executors}")
+            logger.debug(f"their projected batch sizes: {[self.executor_states[ex_id].get_projected_batch_size() for ex_id in candidate_executors]}")
+
             for ex_id in candidate_executors:
                 if ex_id == cur_executor_id:
                     continue
@@ -665,7 +642,8 @@ class LlumnixScheduler(SchedulerInterface):
                 projected_batch_size = self.executor_states[ex_id].get_projected_batch_size()
                 if projected_batch_size + num_tokens > self.max_num_scheduled_tokens:
                     logger.debug(f"Can't consider executor {ex_id} due to projected batch size {projected_batch_size + num_tokens} > max {self.max_num_scheduled_tokens}. Skipping.")
-                    continue
+                    # later executors will only have larger projected batch sizes
+                    break
                 migrated_step_latency = self.get_profile_latency(
                     self.executor_states[ex_id].tp_degree,
                     projected_batch_size + num_tokens)[1]
@@ -854,13 +832,20 @@ class LlumnixScheduler(SchedulerInterface):
                 # first, those that can meet SLO, in increasing slo time remaining order (earliest slo deadline first)
                 # followed by those that already violates SLOs, in increasing slo time remaining order (most late first)
                 # should be like [0.1, 0.5, 1.3, 5.0, and then -5, -1, -0.3]
-                unscheduled_requests = [
-                    (self.requests[r_id].slo_time_remaining, r_id)
-                    for r_id in unscheduled_requests
-                ]
-                unscheduled_requests.sort(key=lambda x: (x[0] < 0, abs(x[0])))
-                logger.debug(f"Ordered unscheduled requests by SLO time remaining: {unscheduled_requests}")
-                unscheduled_requests = [r_id for _, r_id in unscheduled_requests]
+                unscheduled_requests = sorted(
+                    unscheduled_requests,
+                    key=lambda r_id: (
+                        self.requests[r_id].slo_time_remaining < 0,
+                        abs(self.requests[r_id].slo_time_remaining),
+                    )
+                )
+                # unscheduled_requests = [
+                #     (self.requests[r_id].slo_time_remaining, r_id)
+                #     for r_id in unscheduled_requests
+                # ]
+                # unscheduled_requests.sort(key=lambda x: (x[0] < 0, abs(x[0])))
+                # logger.debug(f"Ordered unscheduled requests by SLO time remaining: {unscheduled_requests}")
+                # unscheduled_requests = [r_id for _, r_id in unscheduled_requests]
                 
                 for req_id in unscheduled_requests:
                     request = self.requests[req_id]
@@ -886,6 +871,7 @@ class LlumnixScheduler(SchedulerInterface):
 
                     else:
                         logger.debug(f"Cannot schedule request {req_id}. Skipping for now.")
+                        break # avoid overload
                 
                 logger.debug(f"End B\n")
                 logger.debug(f"B took {time.time() - start_time} seconds")
@@ -1010,7 +996,7 @@ class LlumnixScheduler(SchedulerInterface):
                         # the previous and the current steps.
                         finished_req_ids=self.finished_req_ids[executor_id],
                         free_req_ids=self.free_req_ids[executor_id],
-                        free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
+                        free_encoder_input_ids=[],
                         structured_output_request_ids={},
                         grammar_bitmask=None,
                         confidence_thresholds=confidence_thresholds
@@ -1052,14 +1038,6 @@ class LlumnixScheduler(SchedulerInterface):
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
             request.set_in_execution(True)
-
-            # NOTE: _free_encoder_inputs relies on num_computed_tokens, which
-            # may be updated again in _update_from_output for speculative
-            # decoding. However, it is safe to call the method here because
-            # encoder inputs are always part of the prompt, not the output,
-            # and thus are unaffected by speculative decoding.
-            if request.has_encoder_inputs:
-                self._free_encoder_inputs(request)
 
         # Clear the finished request IDs.
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
@@ -1129,89 +1107,6 @@ class LlumnixScheduler(SchedulerInterface):
             denoise_block_size=denoise_block_size,
             exec_start_pos=exec_start_pos,
         )
-
-    def _try_schedule_encoder_inputs(
-        self,
-        request: Request,
-        num_computed_tokens: int,
-        num_new_tokens: int,
-        encoder_budget: int,
-    ) -> tuple[list[int], int, int]:
-        """
-        Determine which encoder inputs need to be scheduled in the current step,
-        and update `num_new_tokens` and encoder token budget accordingly.
-
-        An encoder input will be scheduled if:
-        - Its output tokens overlap with the range of tokens being computed
-        in this step, i.e.,
-        [num_computed_tokens, num_computed_tokens + num_new_tokens).
-        - It is not already computed and stored in the encoder cache.
-        - There is sufficient encoder token budget to process it.
-        - The encoder cache has space to store it.
-
-        If an encoder input cannot be scheduled due to cache or budget
-        limitations, the method adjusts `num_new_tokens` to schedule only the
-        decoder tokens up to just before the unschedulable encoder input.
-
-        Note that num_computed_tokens includes both locally cached
-        blocks and externally cached blocks (via KVConnector).
-        """
-        if num_new_tokens == 0 or not request.has_encoder_inputs:
-            return [], num_new_tokens, encoder_budget
-        encoder_inputs_to_schedule: list[int] = []
-        mm_positions = request.mm_positions
-        assert mm_positions is not None
-        assert len(mm_positions) > 0
-        for i, pos_info in enumerate(mm_positions):
-            start_pos = pos_info.offset
-            num_encoder_tokens = pos_info.length
-
-            # The encoder output is needed if the two ranges overlap:
-            # [num_computed_tokens, num_computed_tokens + num_new_tokens) and
-            # [start_pos, start_pos + num_encoder_tokens)
-            if start_pos >= num_computed_tokens + num_new_tokens:
-                # The encoder input is not needed in this step.
-                break
-            if start_pos + num_encoder_tokens <= num_computed_tokens:
-                # The encoder input is already computed and stored
-                # in the decoder's KV cache.
-                continue
-
-            if self.encoder_cache_manager.has_cache(request, i):
-                # The encoder input is already computed and cached.
-                continue
-
-            # If no encoder input chunking is allowed, we do not want to
-            # partially schedule a multimodal item. If the scheduled range would
-            # only cover part of the mm input, roll back to before the mm item.
-            if (self.scheduler_config.disable_chunked_mm_input
-                    and num_computed_tokens < start_pos
-                    and (num_computed_tokens + num_new_tokens)
-                    < (start_pos + num_encoder_tokens)):
-                num_new_tokens = start_pos - num_computed_tokens
-                break
-
-            if (not self.encoder_cache_manager.can_allocate(request, i)
-                    or num_encoder_tokens > encoder_budget):
-                # The encoder cache is full or the encoder budget is exhausted.
-                # NOTE(woosuk): We assume that the encoder input tokens should
-                # be processed altogether, as the encoder usually uses
-                # bidirectional attention.
-                if num_computed_tokens < start_pos:
-                    # We only schedule the decoder tokens just before the
-                    # encoder input.
-                    num_new_tokens = start_pos - num_computed_tokens
-                else:
-                    # Because of prefix caching, num_computed_tokens is greater
-                    # than start_pos even though its encoder input is not
-                    # available. In this case, we can't schedule any token for
-                    # the request in this step.
-                    num_new_tokens = 0
-                break
-
-            encoder_budget -= num_encoder_tokens
-            encoder_inputs_to_schedule.append(i)
-        return encoder_inputs_to_schedule, num_new_tokens, encoder_budget
 
     async def update_from_output(
         self,
@@ -1394,25 +1289,6 @@ class LlumnixScheduler(SchedulerInterface):
         #         break
         return stats, new_token_ids, stopped
 
-    def _free_encoder_inputs(self, request: Request) -> None:
-        cached_encoder_input_ids = (
-            self.encoder_cache_manager.get_cached_input_ids(request))
-        # OPTIMIZATION: Avoid list(set) if the set is empty.
-        if not cached_encoder_input_ids:
-            return
-
-        # Here, we use list(set) to avoid modifying the set while iterating
-        # over it.
-        for input_id in list(cached_encoder_input_ids):
-            mm_positions = request.mm_positions[input_id]
-            start_pos = mm_positions.offset
-            num_tokens = mm_positions.length
-            if start_pos + num_tokens <= request.num_computed_tokens:
-                # The encoder output is already processed and stored
-                # in the decoder's KV cache.
-                self.encoder_cache_manager.free_encoder_input(
-                    request, input_id)
-
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
         # return len(self.running), len(self.scheduled) + len(self.unscheduled)
@@ -1495,11 +1371,6 @@ class LlumnixScheduler(SchedulerInterface):
                       finished: bool, prune: bool = True) -> Optional[dict[str, Any]]:
         logger.debug(f"in _free_request_on_executor, request: {request.request_id}, executor_id: {executor_id}, finished: {finished}")
         request_id = request.request_id
-
-        # # [tau_chang] Not used start
-        # delay_free_blocks, kv_xfer_params = self._connector_finished(request)
-        # self.encoder_cache_manager.free(request)
-        # # [tau_chang] Not used end
 
         self.free_req_ids[executor_id].add(request_id)
         if finished:

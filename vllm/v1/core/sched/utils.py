@@ -11,10 +11,13 @@ from datetime import datetime
 from collections import OrderedDict
 
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.utils import BufferedAsyncFileWriter
 from dataclasses import dataclass, field
 from typing import Dict, List
 from vllm.logger import init_logger
 import threading
+from dataclasses import asdict
+
 
 logger = init_logger(__name__)
 
@@ -167,29 +170,14 @@ class SystemSnapshot:
         return json.dumps(self.__dict__, indent=2)
     
 class SystemLogger:
-    def __init__(self, log_dir: str, scheduler: object, flush_interval: float = 10.0):
+    def __init__(self, log_dir: str, scheduler: object):
         self.scheduler = scheduler
         self.log_file = os.path.join(
             scheduler.vllm_config.experiment_config.experiment_dir,
             "system_log.json"
         )
 
-        # Create or clear file
-        with open(self.log_file, "w"):
-            pass
-
-        # Append-only buffer for snapshots
-        self._snapshots = []
-
-        # Lock for atomic swap
-        self._lock = threading.Lock()
-
-        # How often to flush
-        self.flush_interval = flush_interval
-
-        # Launch background thread
-        t = threading.Thread(target=self._periodic_flush, daemon=True)
-        t.start()
+        self.file_writer = BufferedAsyncFileWriter(file_path=self.log_file)
 
     # ------------------------------------------------------------
     # Main functionality
@@ -198,34 +186,4 @@ class SystemLogger:
     def log(self):
         """Fast path: just append a snapshot (tiny overhead)."""
         snapshot = SystemSnapshot.from_states(self.scheduler)
-        with self._lock:
-            self._snapshots.append(snapshot)
-
-    # ------------------------------------------------------------
-    # Background flush thread
-    # ------------------------------------------------------------
-
-    def _periodic_flush(self):
-        while True:
-            time.sleep(self.flush_interval)
-            self.flush()
-
-    def flush(self):
-        """Atomic buffer swap + write outside lock."""
-        # ---- atomic swap ----
-        with self._lock:
-            if not self._snapshots:
-                return
-            to_write = self._snapshots
-            self._snapshots = []
-        # ---- lock released ----
-
-        # Write outside lock
-        with open(self.log_file, "a") as f:
-            for snap in to_write:
-                f.write(json.dumps(snap.__dict__) + "\n")
-
-        logger.info(
-            f"SystemLogger: flushed {len(to_write)} snapshots to {self.log_file}"
-        )
-
+        self.file_writer.add(asdict(snapshot))

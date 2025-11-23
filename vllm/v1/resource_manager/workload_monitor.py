@@ -1,5 +1,6 @@
 from vllm.logger import init_logger
 from vllm.v1.request import Request
+from vllm.v1.utils import BufferedAsyncFileWriter
 from vllm.config import VllmConfig
 from typing import Dict
 from dataclasses import dataclass, asdict
@@ -64,15 +65,8 @@ class WorkloadMonitor:
         self.time_window = time_window
         self.start_time = time.time()
         self.workload_history_path = f"{vllm_config.experiment_config.experiment_dir}/workload_history.json"
-        os.makedirs(os.path.dirname(self.workload_history_path), exist_ok=True)
         
-        self._log_buffer = []
-        self._flush_lock = threading.Lock()
-
-        self.flush_interval = 10
-
-        t = threading.Thread(target=self._periodic_flush, daemon=True)
-        t.start()
+        self.file_writer = BufferedAsyncFileWriter(self.workload_history_path)
     
     def record_request_arrival(self, request: Request):
         stats = RequestArrivalStats.from_request(request)
@@ -80,8 +74,7 @@ class WorkloadMonitor:
         logger.info(f"Logged arrival of request {stats.request_id} at time {stats.arrival_time} "
                     f"with prompt length {stats.prompt_length} and output length {stats.output_length}.")
         
-        with self._flush_lock:
-            self._log_buffer.append(stats.asdict())
+        self.file_writer.add(stats.asdict())
     
     def record_request_completion(self, request_id: str):
         logger.info(f"Request {request_id} has completed processing.")
@@ -90,8 +83,7 @@ class WorkloadMonitor:
             completion_time=datetime.now().strftime(TIME_FORMAT)
         )
         
-        with self._flush_lock:
-            self._log_buffer.append(asdict(stats))
+        self.file_writer.add(asdict(stats))
 
     def _purge_old_requests(self):
         """Drop outdated requests (arrival_time < now - time_window)."""
@@ -140,27 +132,3 @@ class WorkloadMonitor:
                         f"prompt={wc.prompt_length}, output={wc.output_length}")
 
         return workload_classes
-
-    def _periodic_flush(self):
-        while True:
-            time.sleep(self.flush_interval)
-            self.flush()
-    
-    def flush(self):
-        """Atomically swap buffer and write to disk."""
-        with self._flush_lock:
-            if not self._log_buffer:
-                return
-            to_write = self._log_buffer
-            self._log_buffer = []
-
-        # Write outside the lock (fast I/O)
-        with open(self.workload_history_path, "a") as f:
-            for record in to_write:
-                json.dump(record, f)
-                f.write("\n")
-
-        logger.debug(
-            f"WorkloadMonitor: flushed {len(to_write)} entries to {self.workload_history_path}"
-        )
-    

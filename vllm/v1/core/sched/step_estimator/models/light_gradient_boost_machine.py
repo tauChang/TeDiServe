@@ -22,7 +22,7 @@ class LightGradientBoostMachine(BaseModel):
         logger.info(f"Creating LightGradientBoostMachine with model_path: {model_path}, features_path: {features_path}, features: {features}")
         super().__init__(model_path, features_path, features)
         
-    def predict(self, X: Union[StepStats, list[StepStats]]) -> Union[float, list[float]]:
+    def predict(self, X: list[StepStats]) -> list[float]:
         # start_time = time.perf_counter()
         X_np = transform_features(X, self.features)
         # end_time = time.perf_counter()
@@ -36,7 +36,7 @@ class LightGradientBoostMachine(BaseModel):
         # logger.debug(f"Made predictions in {(end_time - start_time) * 1000:.3f} ms.")
         #
         logger.debug(f"Predictions: {predictions}")
-        return predictions[0] if len(predictions) == 1 else predictions
+        return predictions
 
     def train(self, X, y):
         # TODO

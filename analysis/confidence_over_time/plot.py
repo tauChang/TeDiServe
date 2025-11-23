@@ -100,6 +100,9 @@ def main(step_data_path: str, workload_history_path: str, output_dir: str):
         for line in f:
             entry = json.loads(line)
             rid = entry["id"]
+            # if rid contains "warmup", skip
+            if "warmup" in str(rid).lower():
+                continue
             ts = parse_timestamp(entry["timestamp"])
             entry["timestamp"] = ts
             step_data[rid].append(entry)
@@ -151,10 +154,10 @@ def main(step_data_path: str, workload_history_path: str, output_dir: str):
             )
         )
 
-    if tasks:
-        with ProcessPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
-            for out_path in pool.map(_plot_single_request, tasks):
-                print(f"Saved {out_path}")
+    # if tasks:
+    #     with ProcessPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+    #         for out_path in pool.map(_plot_single_request, tasks):
+    #             print(f"Saved {out_path}")
     
         # -------------------------------------------------------
     # NEW: PER-JOB + OVERALL CONFIDENCE + STEPS STATS

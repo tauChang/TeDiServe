@@ -1074,8 +1074,8 @@ class ClusterScheduler(SchedulerInterface):
                     scheduler_output.confidence_thresholds[req_id]
                 self.step_estimator.add_data_point(stats)
                 
-                pred_num_steps_left = self.step_estimator.predict(stats)
-                logger.debug(f"predicted num steps: {pred_num_steps_left} for request {request.request_id}")
+                # pred_num_steps_left = self.step_estimator.predict(stats)
+                # logger.debug(f"predicted num steps: {pred_num_steps_left} for request {request.request_id}")
 
 
             # Stop checking for pooler models.

@@ -1312,7 +1312,7 @@ class UrgentOpportunisticWithBudgetScheduler(SchedulerInterface):
                                         self.executor_states[ex_id].remove_request(r_id)
                                         self.request_states[r_id].remove_executor()
                                         self.request_states[r_id].remove_pending_executor()
-                                        requests_in_scheduler_output.add(req_id)
+                                        requests_in_scheduler_output.add(r_id)
 
                                         # if self.request_states[r_id].is_unscheduled:
                                         #     unscheduled_requests.add(r_id)
