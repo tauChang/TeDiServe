@@ -15,12 +15,17 @@ import argparse
 import json
 import os
 import psutil
+import numpy as np
+
 
 from vllm.platforms import current_platform
 
 from llm_proxy_server import launch_proxy
 import logging
 import time
+
+import os
+os.environ["HF_ALLOW_CODE_EVAL"] = "1"
 
 logging.basicConfig(
     level=logging.INFO,  # or INFO
@@ -104,6 +109,18 @@ def parse_arrival_pattern(pattern_str: str, default_cv: float = 1.0):
 
     return phases
 
+def remove_fewshot_samples(results):
+    # print(f"before removal: {results}")
+    configs = results.get("configs", {})
+    for task, cfg in configs.items():
+        # print(f"looking at task: {task}, cfg: {cfg}")
+        few = cfg.get("fewshot_config")
+        if isinstance(few, dict) and "samples" in few:
+            del few["samples"]
+    # print(f"after removal: {results}")
+
+
+
 def run_test(args):
     """Run the end to end accuracy test."""
     logger.info(f"Running test with args: {args}")
@@ -149,13 +166,21 @@ def run_test(args):
         },
         limit=args.limit,
         random_seed=0,
+        confirm_run_unsafe_code=True,
     )
+
+    print(results)
 
     if args.write_results:
         os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
-        
-        with open(args.output_path, "w") as f:
-            json.dump(results, f, indent=2)
+        if args.task == "gsm8k":
+            with open(args.output_path, "w") as f:
+                json.dump(results, f, indent=2)
+        elif args.task == "mbpp":
+            remove_fewshot_samples(results)
+            # print(f"Results after removing fewshot samples: {results}")
+            with open(args.output_path, "w") as f:
+                json.dump(results, f, indent=2)
 
     measured_value = results["results"][args.task]
     print(f"Measured value: {measured_value}")

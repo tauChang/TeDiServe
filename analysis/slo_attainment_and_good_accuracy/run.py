@@ -19,12 +19,18 @@ def analyze_eval_results(path: str, slo: float = 8.0):
     # --- Flatten samples -----------------------------------------------------
     task_name = next(iter(data["samples"].keys()))  # e.g., "gsm8k"
     samples = pd.DataFrame(data["samples"][task_name])
-    samples = samples[samples["filter"] == "flexible-extract"].copy()
+    if task_name == "gsm8k":
+        samples = samples[samples["filter"] == "flexible-extract"].copy()
     samples["doc_id"] = samples["doc_id"].astype(int)
 
     # --- Merge and compute fields -------------------------------------------
     df = pd.merge(samples, response_times, on="doc_id", how="left")
-    df["is_correct"] = df["exact_match"].astype(bool)
+    if task_name == "gsm8k":
+        # gsm8k
+        df["is_correct"] = df["exact_match"].astype(bool)
+    elif task_name == "mbpp":
+        # mbpp
+        df["is_correct"] = df["pass_at_1"].astype(bool)
 
     # --- Compute metrics -----------------------------------------------------
     total = len(df)
@@ -55,6 +61,7 @@ if __name__ == "__main__":
         help="Path to the JSON results file.",
     )
     parser.add_argument("--slo", type=float, default=3.0, help="SLO in seconds.")
+    # add task
     args = parser.parse_args()
 
     analyze_eval_results(args.path, slo=args.slo)
