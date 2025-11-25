@@ -26,22 +26,39 @@ def pass_at_1(
         references=references,
         predictions=predictions,
         k=[1],
+        num_workers=32,
     )[0]["pass@1"]
 
 
 def extract_code_blocks(text: str) -> str:
+    # NEW: remove everything after first [DONE]
+    if "[DONE]" in text:
+        text = text.split("[DONE]", 1)[0]
+    
+    print(f"getting first [DONE] from: {text}")
+
     # Pattern to match ```...``` blocks
     pattern = r"```(?:\w+)?\n?(.*?)\n?```"
+
     # (+ ```) as we add the opening "```python" to the gen_prefix
     matches = re.findall(pattern, r"```" + text, re.DOTALL)
+
     # if no matches, try to match ```...``` blocks (after removing the language)
     if not matches:
         text_without_lang = re.sub(r"```python", "```", text)
         matches = re.findall(pattern, text_without_lang, re.DOTALL)
+
+    # NEW: fallback — if still no fenced code, extract first code-looking block
     if not matches:
+        # try to find the *first function definition*
+        m = re.search(r"(def\s+\w+\(.*?)(?=$|\n\s*\n)", text, re.DOTALL)
+        if m:
+            return m.group(1).strip()
         return ""
-    else:
-        return matches[0]
+
+    print(f"extracted: {matches[0]}")
+    return matches[0]
+
 
 
 def build_predictions(resps: list[list[str]], docs: list[dict]) -> list[list[str]]:
