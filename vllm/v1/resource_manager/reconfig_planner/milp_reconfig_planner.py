@@ -688,8 +688,8 @@ class MILPReconfigPlanner:
         os.makedirs(self.log_dir, exist_ok=True)
 
         # TODO
-        # self.candidate_confidence_thresholds = [.9, .8, .7, .6, .5]
-        self.candidate_confidence_thresholds = [.9]
+        self.candidate_confidence_thresholds = [.9, .8, .7, .6, .5]
+        # self.candidate_confidence_thresholds = [.9]
         # # from "step_data_kiet/gsm8k_100/256/"
         # self.confidence_unmasked_tokens_per_step = {
         #     .9: 3.18, 
@@ -705,6 +705,11 @@ class MILPReconfigPlanner:
             .7: 4.77, 
             .6: 5.65, 
             .5: 6.58
+            # .9: 1.86,
+            # .8: 2.09,
+            # .7: 2.36,
+            # .6: 2.6,
+            # .5: 2.94
             }
         # self.candidate_tp_degree = [4, 2, 1]
         self.candidate_tp_degree = [4,2,1]

@@ -1,0 +1,3 @@
+full_progress
+full_unmask_progress
+confidence_threshold

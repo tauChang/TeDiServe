@@ -11,14 +11,28 @@ ln -sfn "$EXPERIMENT_DIR" ./current_experiment
 # copy this file to experiment dir for record keeping
 cp run_lmeval.sh $EXPERIMENT_DIR/
 
-SLO=5  # seconds
+SLO=6 # seconds
 # VLLM Args
+# MODEL=Dream-org/Dream-v0-Instruct-7B
 MODEL=GSAI-ML/LLaDA-8B-Instruct
+# MODEL=GSAI-ML/LLaDA-8B-Base
 NUM_GPUS_PER_MODEL_EXECUTOR=1
 # NUM_GPUS_PER_MODEL_EXECUTOR=1,1,1,1
 # SCHEDULER_CLASS=vllm.v1.core.sched.cluster_scheduler.ClusterScheduler
-SCHEDULER_CLASS=vllm.v1.core.sched.infaas_scheduler.InFaaSScheduler
+# SCHEDULER_CLASS=vllm.v1.core.sched.infaas_scheduler.InFaaSScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.llumnix_scheduler.LlumnixScheduler
+
+# SCHEDULER_CLASS=vllm.v1.core.sched.infaas_aligned_dynamic_confidence_scheduler.InFaaSAlignedScheduler
+
+# SCHEDULER_CLASS=vllm.v1.core.sched.infaas_aligned_scheduler.InFaaSAlignedScheduler
+# SCHEDULER_CLASS=vllm.v1.core.sched.llumnix_fcfs_scheduler.LlumnixFCFSScheduler
+# SCHEDULER_CLASS=vllm.v1.core.sched.tedi_correct_tput_scheduler.TeDiLightScheduler
+SCHEDULER_CLASS=vllm.v1.core.sched.tedi_new_correct_tput_scheduler.TeDiLightScheduler
+# SCHEDULER_CLASS=vllm.v1.core.sched.tedi_new_correct_tput_step_predict_once_scheduler.TeDiLightScheduler
+
+# SCHEDULER_CLASS=vllm.v1.core.sched.tedi_new_correct_tput_migrate_scheduler.TeDiLightScheduler
+# SCHEDULER_CLASS=vllm.v1.core.sched.llumnix_fcfs_migrate_scheduler.LlumnixFCFSScheduler
+# 
 # SCHEDULER_CLASS=vllm.v1.core.sched.tedi_scheduler.TeDiScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.tedi_light_scheduler.TeDiLightScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.urgent_opportunistic_scheduler_max_best_effort.UrgentOpportunisticScheduler
@@ -51,8 +65,16 @@ if [ "$CACHE_PREFIX" = true ] && [ "$CACHE_SUFFIX" = true ]; then
     # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_1120_256_32/features.txt
     # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_1120_256_32_tiny/model.bin
     # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_1120_256_32_tiny/features.txt
+
     STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_avg/model.bin
     STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_avg/features.txt
+
+    # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/mbpp_1208/model.bin
+    # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/mbpp_1208/features.txt
+
+    # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/1207_ablation_no_confidence/model.bin
+    # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/1207_ablation_no_confidence/features.txt
+
     # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_avg/model.bin
     # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_avg/features.txt
     # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_quantile_0.7/model.bin
@@ -72,16 +94,22 @@ REQUEST_PLOTS_DIR=${EXPERIMENT_DIR}/request_plots
 
 # ----------------------
 # LMEval Args
+# TASK=mbpp_instruct
 TASK=gsm8k
+# TASK=mmlu_pro
 # LIMIT=100
 # AVG_INTER_ARRIVAL_TIME=0.5
 # ARRIVAL_PATTERN="50:1:0,150:0.5:0"
 # ARRIVAL_PATTERN="300:0.5,300:0.2"
 # ARRIVAL_PATTERN="30:3:8"
-# ARRIVAL_PATTERN="100:0.8:1"
-ARRIVAL_PATTERN="200:0.15"
-# ARRIVAL_PATTERN="100:0.1"
-# ARRIVAL_PATTERN="1319:0.3125"
+# ARRIVAL_PATTERN="100:0.15:2"
+# ARRIVAL_PATTERN="10000:0.0555"
+# ARRIVAL_PATTERN="100:0"
+# ARRIVAL_PATTERN="474:0.1111"
+# ARRIVAL_PATTERN="474:0.02272"
+# ARRIVAL_PATTERN="300:0.1"
+# ARRIVAL_PATTERN="1319:0.02272"
+ARRIVAL_PATTERN="100:0.0625"
 # ARRIVAL_PATTERN="5:0"
 # ARRIVAL_PATTERN="100:1:0"
 # Calculate TOTAL_NUM_REQUESTS based on ARRIVAL_PATTERN
@@ -90,9 +118,15 @@ if [ -n "$ARRIVAL_PATTERN" ]; then
 else
     TOTAL_NUM_REQUESTS=$LIMIT
 fi
+
+# Multiply by 14 if task is mmlu_pro
+if [ "$TASK" = "mmlu_pro" ]; then
+    TOTAL_NUM_REQUESTS=$(( TOTAL_NUM_REQUESTS * 14 ))
+fi
+
 NUM_CONCURRENT=$TOTAL_NUM_REQUESTS
-# NUM_CONCURRENT=1
-OUTPUT_LENGTH=256
+# NUM_CONCURRENT=12
+OUTPUT_LENGTH=1024
 WRITE_RESULTS=true
 RESULTS_DIR=$EXPERIMENT_DIR/results
 # make results_dir prefix with confidence
@@ -207,20 +241,23 @@ log_and_send "$SESSION.1" \
 log_and_send "$SESSION.1" \
     "python analysis/confidence_over_time/plot.py --step-data \"$STEP_DATA_FILE\" --workload-history \"$WORKLOAD_FILE\" --output-dir \"$REQUEST_PLOTS_DIR\" 2>&1 | tee \"$LOG_DIR/confidence_over_time.log\""
 
-log_and_send "$SESSION.1" \
-    "python analysis/profiler_analysis/scheduler/run_schedule.py \"$EXPERIMENT_DIR/profiles/scheduler/schedule.jsonl\" 2>&1 | tee \"$LOG_DIR/schedule_analysis.log\""
+# log_and_send "$SESSION.1" \
+#     "python analysis/profiler_analysis/scheduler/run_schedule.py \"$EXPERIMENT_DIR/profiles/scheduler/schedule.jsonl\" 2>&1 | tee \"$LOG_DIR/schedule_analysis.log\""
 
-log_and_send "$SESSION.1" \
-    "python analysis/profiler_analysis/scheduler/run_update.py \"$EXPERIMENT_DIR/profiles/scheduler/update.jsonl\" 2>&1 | tee \"$LOG_DIR/update_analysis.log\""
+# log_and_send "$SESSION.1" \
+#     "python analysis/calculate_num_recompute/run.py --path \"$EXPERIMENT_DIR/system_log.json\" 2>&1 | tee \"$LOG_DIR/num_recompute.log\""
 
-log_and_send "$SESSION.1" \
-    "python analysis/profiler_analysis/model_runner/run.py \"$EXPERIMENT_DIR/profiles/model_runners/\" 2>&1 | tee \"$LOG_DIR/model_runner_analysis.log\""
+# log_and_send "$SESSION.1" \
+#     "python analysis/profiler_analysis/scheduler/run_update.py \"$EXPERIMENT_DIR/profiles/scheduler/update.jsonl\" 2>&1 | tee \"$LOG_DIR/update_analysis.log\""
 
-log_and_send "$SESSION.1" \
-    "python analysis/profiler_analysis/step_estimator/run.py \"$EXPERIMENT_DIR/profiles/step_estimator/predict.jsonl\" 2>&1 | tee \"$LOG_DIR/step_estimator_analysis.log\""
+# log_and_send "$SESSION.1" \
+#     "python analysis/profiler_analysis/model_runner/run.py \"$EXPERIMENT_DIR/profiles/model_runners/\" 2>&1 | tee \"$LOG_DIR/model_runner_analysis.log\""
 
-log_and_send "$SESSION.1" \
-    "python analysis/profiler_analysis/executor/run.py \"$EXPERIMENT_DIR/profiles/executors\" 2>&1 | tee \"$LOG_DIR/executor_analysis.log\""
+# log_and_send "$SESSION.1" \
+#     "python analysis/profiler_analysis/step_estimator/run.py \"$EXPERIMENT_DIR/profiles/step_estimator/predict.jsonl\" 2>&1 | tee \"$LOG_DIR/step_estimator_analysis.log\""
+
+# log_and_send "$SESSION.1" \
+#     "python analysis/profiler_analysis/executor/run.py \"$EXPERIMENT_DIR/profiles/executors\" 2>&1 | tee \"$LOG_DIR/executor_analysis.log\""
 
 log_and_send "$SESSION.1" \
     "python analysis/slo_attainment_and_good_accuracy/run.py --path \"$OUTPUT_PATH\" --slo \"$SLO\" 2>&1 | tee \"$LOG_DIR/result_summary.log\""

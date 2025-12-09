@@ -301,7 +301,7 @@ class ResourceManager:
         self.bundle_to_node: Dict[int, str] = {}
         self.config: Dict[int, List[int]] = {}
 
-        self.workload_monitor = WorkloadMonitor(vllm_config, time_window=120)
+        self.workload_monitor = WorkloadMonitor(vllm_config, time_window=300)
         # delay until first time reconfig planner is called to create, since reconfig planner needs latency profile,
         # which requires vllm_config.cluster_config.placement_group.bundle_specs to be initialized
         self.reconfig_planner = None 

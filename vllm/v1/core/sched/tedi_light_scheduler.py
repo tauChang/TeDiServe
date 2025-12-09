@@ -520,7 +520,7 @@ class TeDiLightScheduler(SchedulerInterface):
         self.update_request_interval = 1.0 # seconds
 
         self.last_update_step_estimates = 0.0
-        self.update_step_estimates_interval = 0.5 # seconds
+        self.update_step_estimates_interval = 1 # seconds
     
     def get_avg_num_tokens_per_req(self) -> float:
         if len(self.requests) == 0:
@@ -585,7 +585,7 @@ class TeDiLightScheduler(SchedulerInterface):
 
         # --- Scatter the predictions back to their requests ---
         for (req_id, conf), pred in zip(index_map, preds):
-            logger.debug(f"Batch updated step estimate for request {req_id} at confidence {conf}: {pred} steps left")
+            # logger.debug(f"Batch updated step estimate for request {req_id} at confidence {conf}: {pred} steps left")
             req = self.request_states[req_id]
             req.pred_num_steps_left[conf] = pred
 
@@ -605,10 +605,10 @@ class TeDiLightScheduler(SchedulerInterface):
     def is_possible_to_meet_slo(self, req_id: str):
         pred_remaining_time = self.get_min_time_left(req_id) * self.request_states[req_id].pred_num_steps_left[self.candidate_confidence_thresholds[-1]]
         remaining_time_lower_bound = pred_remaining_time * 0.7 # assume 30% error
-        logger.debug(f"Request {req_id} possible to meet SLO check: "
-                     f"slo_time_remaining={self.requests[req_id].slo_time_remaining}, "
-                     f"pred_remaining_time={pred_remaining_time}, "
-                     f"remaining_time_lower_bound={remaining_time_lower_bound}")
+        # logger.debug(f"Request {req_id} possible to meet SLO check: "
+        #              f"slo_time_remaining={self.requests[req_id].slo_time_remaining}, "
+        #              f"pred_remaining_time={pred_remaining_time}, "
+        #              f"remaining_time_lower_bound={remaining_time_lower_bound}")
         return self.requests[req_id].slo_time_remaining > remaining_time_lower_bound
         # return self.requests[req_id].slo_time_remaining > self.get_min_time_left(req_id) * self.request_states[req_id].pred_num_steps_left[
 
@@ -653,9 +653,9 @@ class TeDiLightScheduler(SchedulerInterface):
         
         result = (num_recompute_steps_left * recompute_step_latency) + \
                     (num_cache_steps_left * cache_step_latency)
-        logger.debug(f"Estimated time left for request {req_id} with tp_degree {tp_degree} and all_req_ids {all_req_ids}: ")
-        logger.debug(f"recompute_batch_size={recompute_batch_size}, recompute_step_latency={recompute_step_latency}, num_recompute_steps_left={num_recompute_steps_left}")
-        logger.debug(f"cache_batch_size={cache_batch_size}, cache_step_latency={cache_step_latency}, num_cache_steps_left={num_cache_steps_left}")
+        # logger.debug(f"Estimated time left for request {req_id} with tp_degree {tp_degree} and all_req_ids {all_req_ids}: ")
+        # logger.debug(f"recompute_batch_size={recompute_batch_size}, recompute_step_latency={recompute_step_latency}, num_recompute_steps_left={num_recompute_steps_left}")
+        # logger.debug(f"cache_batch_size={cache_batch_size}, cache_step_latency={cache_step_latency}, num_cache_steps_left={num_cache_steps_left}")
         
         return result
     
@@ -664,9 +664,9 @@ class TeDiLightScheduler(SchedulerInterface):
             num_recompute_steps_left, num_cache_steps_left = self.get_num_steps_left_by_type(r_id, confidence)
             tput_demand = (num_recompute_steps_left * self.requests[r_id].num_tokens + \
                 num_cache_steps_left * self.requests[r_id].denoise_block_size) / self.requests[r_id].slo_time_remaining
-            logger.debug(f"unbounded tput demand {tput_demand}")
-            logger.debug(f"slo_time_remaining {self.requests[r_id].slo_time_remaining}")
-            logger.debug(f"max tput_demand_per_req {self.max_throughput_demand_per_req}")
+            # logger.debug(f"unbounded tput demand {tput_demand}")
+            # logger.debug(f"slo_time_remaining {self.requests[r_id].slo_time_remaining}")
+            # logger.debug(f"max tput_demand_per_req {self.max_throughput_demand_per_req}")
             tput_demand = min(tput_demand, self.max_throughput_demand_per_req)
             return tput_demand
 
@@ -694,34 +694,34 @@ class TeDiLightScheduler(SchedulerInterface):
                 min_tput_demand = get_tput_demand(req_id, self.candidate_confidence_thresholds[-1])
             cum_min_tput_suffix[i] = cum_min_tput_suffix[i + 1] + min_tput_demand
         
-        logger.debug(f"cum_min_tput_suffix: {cum_min_tput_suffix}")
+        # logger.debug(f"cum_min_tput_suffix: {cum_min_tput_suffix}")
         
         cum_tput_demand = 0.0
         for i, req_id in enumerate(reqs_by_progress):
-            logger.debug(f"Looking at the {i}-th request {req_id}")
+            # logger.debug(f"Looking at the {i}-th request {req_id}")
             req_state = self.request_states[req_id]
             if not self.is_possible_to_meet_slo(req_id):
                 # req_state.max_confidence_threshold_idx = 0 # highest confidence
                 req_state.max_confidence_threshold_idx = len(self.candidate_confidence_thresholds) - 1 # lowest confidence
-                logger.debug(f"  best effort or cannot meet SLO, set max confidence to {self.candidate_confidence_thresholds[0]}")
+                # logger.debug(f"  best effort or cannot meet SLO, set max confidence to {self.candidate_confidence_thresholds[0]}")
                 continue
             
             for idx, conf in enumerate(self.candidate_confidence_thresholds):
                 tput_demand = get_tput_demand(req_id, conf)
-                logger.debug(f"conf {conf}: tput_demand={tput_demand}, ")
-                logger.debug(f"  cum_tput_demand = {cum_tput_demand}")
-                logger.debug(f"  cum_min_tput_suffix[{i}] = {cum_min_tput_suffix[i]}")
-                logger.debug(f"  total = {cum_tput_demand + tput_demand + cum_min_tput_suffix[i]}")
-                logger.debug(f"  throughput_supply = {self.throughput_supply}")
+                # logger.debug(f"conf {conf}: tput_demand={tput_demand}, ")
+                # logger.debug(f"  cum_tput_demand = {cum_tput_demand}")
+                # logger.debug(f"  cum_min_tput_suffix[{i}] = {cum_min_tput_suffix[i]}")
+                # logger.debug(f"  total = {cum_tput_demand + tput_demand + cum_min_tput_suffix[i]}")
+                # logger.debug(f"  throughput_supply = {self.throughput_supply}")
                 MIN_MAX_CONFIDENCE_THRESHOLD_IDX = max(MIN_MAX_CONFIDENCE_THRESHOLD_IDX, idx)
                 if cum_tput_demand + tput_demand + cum_min_tput_suffix[i] <= self.throughput_supply:
                     req_state.max_confidence_threshold_idx = idx
-                    logger.debug(f"  set max confidence to {req_state.max_confidence_threshold_idx}")
+                    # logger.debug(f"  set max confidence to {req_state.max_confidence_threshold_idx}")
                     cum_tput_demand += tput_demand
                     break
                 elif idx == len(self.candidate_confidence_thresholds) - 1:
                     # last confidence, cannot meet SLO
-                    logger.debug(f"  could not meet SLO with any confidence, set max confidence to {self.candidate_confidence_thresholds[-1]}")
+                    # logger.debug(f"  could not meet SLO with any confidence, set max confidence to {self.candidate_confidence_thresholds[-1]}")
                     req_state.max_confidence_threshold_idx = len(self.candidate_confidence_thresholds) - 1
                     cum_tput_demand += tput_demand
             # else:
@@ -1073,19 +1073,19 @@ class TeDiLightScheduler(SchedulerInterface):
                 # B
                 start_time = time.time()
                 logger.debug(f"Start B (schedule unscheduled requests)")
-                unscheduled_requests = [r_id for r_id in self.request_states if self.request_states[r_id].is_unscheduled]
+                # unscheduled_requests = [r_id for r_id in self.request_states if self.request_states[r_id].is_unscheduled]
                 # first, those that can meet SLO, in increasing slo time remaining order (earliest slo deadline first)
                 # followed by those that already violates SLOs, in increasing slo time remaining order (most late first)
                 # should be like [0.1, 0.5, 1.3, 5.0, and then -5, -1, -0.3]
                 unscheduled_requests = [
                     (self.requests[r_id].slo_time_remaining, r_id)
-                    for r_id in unscheduled_requests
+                    for r_id in self.request_states if self.request_states[r_id].is_unscheduled
                 ]
                 unscheduled_requests.sort(key=lambda x: (x[0] < 0, abs(x[0])))
                 logger.debug(f"Ordered unscheduled requests by SLO time remaining: {unscheduled_requests}")
-                unscheduled_requests = [r_id for _, r_id in unscheduled_requests]
+                # unscheduled_requests = [r_id for _, r_id in unscheduled_requests]
                 
-                for req_id in unscheduled_requests:
+                for _, req_id in unscheduled_requests:
                     request = self.requests[req_id]
                     logger.debug(f"Processing waiting unscheduled request {req_id}.")
                     
@@ -1110,7 +1110,7 @@ class TeDiLightScheduler(SchedulerInterface):
                     else:
                         logger.debug(f"Cannot schedule request {req_id}. Skipping for now.")
                         # This means all executors are full. Skip checking remaining unscheduled requests.
-                        break
+                        # break
                 
                 logger.debug(f"End B\n")
                 logger.debug(f"B took {time.time() - start_time} seconds")

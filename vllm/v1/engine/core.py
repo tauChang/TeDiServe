@@ -744,11 +744,11 @@ class EngineCoreProc(EngineCore):
     async def run_reconfigure_loop(self):
         logger.debug("Starting EngineCore reconfiguration loop.")
         while True:
-            logger.debug(f"Reconfiguration loop sleeping for 20s...")
-            await asyncio.sleep(60)
+            logger.debug(f"Reconfiguration loop sleeping for 5 min...")
+            await asyncio.sleep(300)
             logger.debug(f"Reconfiguration loop woke up.")
             reconfig_cmd = await self.resource_manager.reconfig()
-            await reconfig_cmd.execute(self.executors_manager)
+            # await reconfig_cmd.execute(self.executors_manager)
             logger.debug(f"after reconfig, executors_manager: "
                          f"{self.executors_manager}")
 

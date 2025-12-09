@@ -214,7 +214,7 @@ async def proxy_completions(request: Request):
 
     await asyncio.sleep(delay)
     logger.info(f"Request {req_id} released after waiting {delay:.3f}s")
-    logger.info(f"Prompt (first 200 chars): {data['prompt'][:200]}")
+    # logger.info(f"Prompt (first 200 chars): {data['prompt'][:200]}")
 
     # Forward real request to upstream
     start_time = time.monotonic()
@@ -228,9 +228,9 @@ async def proxy_completions(request: Request):
 
     elapsed = time.monotonic() - start_time
     app.state.resp_time[req_id] = elapsed
-
+    # post again
     resp_json = resp.json()
-    logger.info(f"Request {req_id} got response: {resp_json}")
+    # logger.info(f"Request {req_id} got response: {resp_json}")
     logger.info(f"Time since first request arrival: {time.monotonic() - app.state.first_request_arrival_time:.3f}s")
 
     return resp_json
@@ -277,7 +277,7 @@ def launch_proxy(upstream_url: str,
     app.state.first_request_arrival_time = None
 
     if tokenizer_name:
-        app.state.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        app.state.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
     else:
         app.state.tokenizer = None
 

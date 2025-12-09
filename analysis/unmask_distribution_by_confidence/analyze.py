@@ -14,11 +14,16 @@ from collections import defaultdict
 # dir = "../../step_data_kiet/gsm8k_100/256/"
 # files = [dir + f for f in files]
 files = [
-    "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.9_256.json",
-    "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.8_256.json",
-    "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.7_256.json",
-    "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.6_256.json",
-    "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.5_256.json",
+    "/work2/10446/tchang85/stampede3/dllm/step_data_1130_sharegpt/0_9.json",
+    "/work2/10446/tchang85/stampede3/dllm/step_data_1130_sharegpt/0_8.json",
+    "/work2/10446/tchang85/stampede3/dllm/step_data_1130_sharegpt/0_7.json",
+    "/work2/10446/tchang85/stampede3/dllm/step_data_1130_sharegpt/0_6.json",
+    "/work2/10446/tchang85/stampede3/dllm/step_data_1130_sharegpt/0_5.json",
+    # "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.9_256.json",
+    # "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.8_256.json",
+    # "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.7_256.json",
+    # "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.6_256.json",
+    # "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.5_256.json",
     # "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.9_512.json",
     # "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.8_512.json",
     # "/u/tchang85/dllm/step_data_dual_cache_with_output/dual_0.7_512.json",

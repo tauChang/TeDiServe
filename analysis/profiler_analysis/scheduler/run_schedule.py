@@ -65,7 +65,7 @@ def analyze_and_plot(input_path):
         per_req_stats[num_req] = compute_stats(totals)
 
     # ===============================
-    # Write Summary
+    # Write summary text file
     # ===============================
     with open(out_report, "w") as f:
 
@@ -103,6 +103,7 @@ def analyze_and_plot(input_path):
                     f"{s['median']:8.4f} | {s['p95']:8.4f} | {s['min']:8.4f} | "
                     f"{s['max']:8.4f} | {s['stddev']:8.4f}\n")
 
+
     # ===============================
     # Plot 1: Mean latency vs num_requests
     # ===============================
@@ -120,7 +121,7 @@ def analyze_and_plot(input_path):
     plt.close()
 
     # ===============================
-    # Plot 2: Boxplot total latency each bucket
+    # Plot 2: Boxplot total latency per bucket
     # ===============================
     data = [[sec["total"] for sec in buckets[n]] for n in xs]
 
@@ -135,9 +136,8 @@ def analyze_and_plot(input_path):
     plt.close()
 
     # ===============================
-    # NEW Plot 3: Latency vs Timestamp
+    # Plot 3: Latency vs Timestamp
     # ===============================
-
     timestamps = []
     total_vals = []
 
@@ -164,14 +164,50 @@ def analyze_and_plot(input_path):
     plt.title("Scheduler Total Latency Over Time")
     plt.xlabel("Timestamp")
     plt.ylabel("Total Latency (sec)")
-
     plt.grid(True, linestyle="--", alpha=0.4)
-
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
     plt.gcf().autofmt_xdate()
-
+    plt.ylim(0, 100)
     plt.tight_layout()
     plt.savefig(out_timeplot, dpi=220)
+    plt.close()
+
+
+    # ===============================
+    # NEW Plot 4: num_requests over time
+    # ===============================
+    req_ts = []
+    req_counts = []
+
+    with open(input_path, "r") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            data = json.loads(line)
+
+            ts = data["timestamp"]
+            nreq = data["info"]["num_requests"]
+
+            try:
+                dt = datetime.strptime(ts, "%Y-%m-%d_%H:%M:%S.%f")
+            except ValueError:
+                dt = datetime.strptime(ts, "%Y-%m-%d_%H:%M:%S")
+
+            req_ts.append(dt)
+            req_counts.append(nreq)
+
+    out_reqplot = os.path.join(base_dir, "schedule_requests_over_time.png")
+
+    plt.figure(figsize=(12, 4))
+    plt.plot(req_ts, req_counts, marker="o", linewidth=1.5)
+    plt.title("Number of Requests Over Time")
+    plt.xlabel("Timestamp")
+    plt.ylabel("num_requests")
+    plt.grid(True, linestyle="--", alpha=0.4)
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
+    plt.gcf().autofmt_xdate()
+    plt.tight_layout()
+    plt.savefig(out_reqplot, dpi=220)
     plt.close()
 
 

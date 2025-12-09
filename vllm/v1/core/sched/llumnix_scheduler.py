@@ -871,7 +871,7 @@ class LlumnixScheduler(SchedulerInterface):
 
                     else:
                         logger.debug(f"Cannot schedule request {req_id}. Skipping for now.")
-                        break # avoid overload
+                        # break # avoid overload
                 
                 logger.debug(f"End B\n")
                 logger.debug(f"B took {time.time() - start_time} seconds")

@@ -25,6 +25,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import sys
 import glob
+from tqdm.asyncio import tqdm
+import numpy as np
 
 from scipy.stats import zipf
 from enum import Enum
@@ -34,6 +36,8 @@ from typing import List
 
 num_finished_requests = 0
 server_num_requests = {}
+num_request_in_progress = 0
+finished_pbar = None
 
 
 def get_wait_time(mean_time_between_requests: float, distribution: str, coefficient_variation: float = 0.0) -> float:
@@ -67,23 +71,6 @@ async def async_request_gen(generator, qps: float, distribution="uniform", coeff
         except StopIteration:
             return
 
-class GenerationBackend(str, Enum):
-    vLLM = "vLLM"
-    vLLM_v1 = "vLLM_v1"
-
-def vllm_server_req_func(prompt, output_len):
-    request_dict = {
-        "prompt": prompt,
-        "n": 1,
-        "best_of": 1,
-        "temperature": 0.0,
-        "top_k": 1,
-        "max_tokens": max(output_len, 1),
-        "ignore_eos": True,
-        "stream": False,
-    }
-    return request_dict
-
 def vllm_v1_server_req_func(prompt, output_len):
     request_dict = {
         "messages": [
@@ -96,48 +83,18 @@ def vllm_v1_server_req_func(prompt, output_len):
                 "content": prompt
             }
         ],
-        "temperature": 0.0,
-        "top_p": 0.5,
-        "top_k": 10,
-        "stream": "false",
-        "presence_penalty": 1.1,
-        "repetition_penalty": 1.1,
+        # "temperature": 0.0,
+        # "top_p": 0.5,
+        # "top_k": 10,
+        # "stream": "false",
+        # "presence_penalty": 1.1,
+        # "repetition_penalty": 1.1,
         "max_tokens": max(output_len, 1),
         "ignore_eos": "true",
     }
 
     return request_dict
 
-async def inner_query_model(prompt, verbose, ip_ports, server_req_func):
-    prompt, prompt_len, expected_response_len = prompt
-
-    # Evenly dispatch request to the given api servers.
-    global server_num_requests
-    server_id = min(server_num_requests, key=server_num_requests.get)
-    server_num_requests[server_id] += 1
-    timeout = aiohttp.ClientTimeout(total=4*60*60)
-    global num_finished_requests
-
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        request = server_req_func(prompt, expected_response_len)
-        if verbose:
-            print('Querying model')
-        try:
-            async with session.post(f'http://{ip_ports[server_id]}/generate_benchmark', json=request) as resp:
-                if verbose:
-                    print('Done')
-                output = await resp.json()
-                # necessary for latency calc
-                output['response_len'] = expected_response_len
-                if verbose and 'generated_text' in output:
-                    print(json.dumps(output['generated_text']))
-                num_finished_requests += 1
-                print("num_finised_requests: {}".format(num_finished_requests))
-                return (prompt, output)
-        except aiohttp.ClientError as e:
-            print(f"Connect to {ip_ports[server_id]} failed with: {str(e)}")
-            sys.exit(1)
-            
 async def inner_query_model_vllm_v1(prompt, verbose, ip_ports, server_req_func):
     prompt, prompt_len, expected_response_len = prompt
 
@@ -147,22 +104,30 @@ async def inner_query_model_vllm_v1(prompt, verbose, ip_ports, server_req_func):
     server_num_requests[server_id] += 1
     timeout = aiohttp.ClientTimeout(total=4*60*60)
     global num_finished_requests
+    global num_request_in_progress
+    global finished_pbar
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         request = server_req_func(prompt, expected_response_len)
-        if verbose:
-            print('Querying model')
+        # if verbose:
+            # print('Querying model')
+            # print(f"prompt: {prompt}")
+            # print(f"expected_response_len: {expected_response_len}")
         try:
             async with session.post(f'http://{ip_ports[server_id]}/v1/chat/completions', json=request) as resp:
-                if verbose:
-                    print('Done')
+                # if verbose:
+                #     print('Done')
                 output = await resp.json()
                 # necessary for latency calc
                 output['response_len'] = expected_response_len
-                if verbose and 'choices' in output:
-                    print(json.dumps(output["choices"][0]["message"]["content"]))
+                # if verbose and 'choices' in output:
+                #     print(json.dumps(output["choices"][0]["message"]["content"]))
                 num_finished_requests += 1
-                print("num_finised_requests: {}".format(num_finished_requests))
+                # print("num_finised_requests: {}".format(num_finished_requests))
+                num_request_in_progress -= 1
+
+                if finished_pbar is not None:
+                    finished_pbar.update(1)
                 return (prompt, output)
         except aiohttp.ClientError as e:
             print(f"Connect to {ip_ports[server_id]} failed with: {str(e)}")
@@ -180,7 +145,6 @@ def get_tok_id_lens(tokenizer, batch):
 
 def calculate_throughput(queries,
                          dur_s,
-                         backend,
                          tokenizer,
                          median_token_latency,
                          median_e2e_latency,
@@ -201,19 +165,30 @@ def calculate_throughput(queries,
     ray_gen_lens = []
     cf_gen_lens = []
     for prompt, response in queries:
-        if 'generated_text' in response:
+        # print(response)
+        assistant_text = None
+        if isinstance(response, dict):
+            try:
+                assistant_text = response["choices"][0]["message"]["content"]
+            except:
+                pass
+
+        if assistant_text is not None:
             prompts.append(prompt)
-            responses.append(response['generated_text'])
-        if 'naive_hf_lens' in response:
-            naive_hf_lens.append(response['naive_hf_lens'])
-        if 'ray_gen_len' in response:
-            ray_gen_lens.append(response['ray_gen_len'])
-        if 'num_output_tokens_cf' in response:
-            cf_gen_lens.append(response['num_output_tokens_cf'])
-        if 'response_len' in response:
-            expected_response_lens.append(response['response_len'])
-    prompt_ids = [p for p in tokenizer.batch_encode_plus(prompts)['input_ids']]
-    response_ids = [r for r in tokenizer.batch_encode_plus(responses)['input_ids']]
+            responses.append(assistant_text)
+        # if 'generated_text' in response:
+        #     prompts.append(prompt)
+        #     responses.append(response['generated_text'])
+        # if 'naive_hf_lens' in response:
+        #     naive_hf_lens.append(response['naive_hf_lens'])
+        # if 'ray_gen_len' in response:
+        #     ray_gen_lens.append(response['ray_gen_len'])
+        # if 'num_output_tokens_cf' in response:
+        #     cf_gen_lens.append(response['num_output_tokens_cf'])
+        # if 'response_len' in response:
+        #     expected_response_lens.append(response['response_len'])
+    # prompt_ids = [p for p in tokenizer.batch_encode_plus(prompts)['input_ids']]
+    # response_ids = [r for r in tokenizer.batch_encode_plus(responses)['input_ids']]
 
     # print(f'check_len actual {list(sorted(len(response) for response in response_ids))}')
     # print(f'check_len expect {list(sorted(expected_response_lens))}')
@@ -229,8 +204,8 @@ def calculate_throughput(queries,
         print(responses)
         raise
 
-    if naive_hf_lens:
-        print(f'naive_hf_lens {list(sorted(naive_hf_lens))}')
+    # if naive_hf_lens:
+    #     print(f'naive_hf_lens {list(sorted(naive_hf_lens))}')
     print(f'prompt_lens {list(sorted(prompt_lens))}')
     print(f'response_lens {list(sorted(response_lens))}')
     print(f'expected_response_lens {list(sorted(expected_response_lens))}')
@@ -249,28 +224,23 @@ def calculate_throughput(queries,
     else:
         all_waiting_latencies = []
 
-    if naive_hf_lens:
-        # Manually count naive hf tok len
-        total_resp_tokens = sum(
-            [response_len for _, response_len in naive_hf_lens])
-        total_prompt_tokens = sum(
-            [prompt_len for prompt_len, _ in naive_hf_lens])
-        response_token_count = total_prompt_tokens + total_resp_tokens
-    if ray_gen_lens:
-        response_token_count = sum(ray_gen_lens)
-    if backend == GenerationBackend.NaiveHfPipeline:
-        # It returns the prompt in the output.
-        prompt_token_count = 0
-    if backend == GenerationBackend.FasterTransformer:
-        response_token_count = sum(expected_response_lens)
-    if cf_gen_lens:
-        response_token_count = sum(cf_gen_lens)
+    # if naive_hf_lens:
+    #     # Manually count naive hf tok len
+    #     total_resp_tokens = sum(
+    #         [response_len for _, response_len in naive_hf_lens])
+    #     total_prompt_tokens = sum(
+    #         [prompt_len for prompt_len, _ in naive_hf_lens])
+    #     response_token_count = total_prompt_tokens + total_resp_tokens
+    # if ray_gen_lens:
+    #     response_token_count = sum(ray_gen_lens)
+    # if cf_gen_lens:
+    #     response_token_count = sum(cf_gen_lens)
 
     # print(f'prompt_token_count {prompt_token_count} response_token_count {response_token_count}')
     throughput_tok_s = (prompt_token_count + response_token_count) / dur_s
     print(f'throughput_tok_s {throughput_tok_s:.02f}')
     qps = len(responses) / dur_s
-    msg1 = f'backend {backend} dur_s {dur_s:.04f} tokens_per_s {throughput_tok_s:.02f} qps {qps:.04f}\n'
+    msg1 = f'dur_s {dur_s:.04f} tokens_per_s {throughput_tok_s:.02f} qps {qps:.04f}\n'
     msg2 = f'successful_responses {len(responses)} prompt_token_count {prompt_token_count} response_token_count {response_token_count}\n'
     msg3 = f'{median_token_latency=:.04f}, {median_e2e_latency=:.04f}, {median_inference_latency=:.04f}\n'
     msg = msg1 + msg2 + msg3
@@ -284,7 +254,7 @@ def calculate_throughput(queries,
         assert len(responses) == len(queries), \
             f"{fail_on_response_failure=}, expected number of successful respones to equal number of queries, got {len(responses)} vs {len(queries)}"
 
-    return throughput_tok_s
+    return throughput_tok_s, prompts, responses
 
 def calculate_cdf(latencies):
     hist, bin_edges = np.histogram(latencies, bins=50)
@@ -326,8 +296,8 @@ def plot_latency_cdf(req_latencies, prefill_latencies, decode_latencies, log_fil
         ax.set_ylabel('Cumulative Percentage(%)')
 
     plot_single(ax_req, req_latencies)
-    plot_single(ax_prefill, prefill_latencies, is_prefill=True)
-    plot_single(ax_decode, decode_latencies)
+    # plot_single(ax_prefill, prefill_latencies, is_prefill=True)
+    # plot_single(ax_decode, decode_latencies)
     ax_req.set_xlabel('Latency/req(s)')
     ax_req.set_title('request cdf')
     ax_prefill.set_xlabel('Latency/token(ms)')
@@ -437,15 +407,14 @@ class MeasureLatency:
             start = time.time()
             prompt, output = await f(*args, **kwargs)
             # Do not record latency if request failed.
-            if 'generated_text' in output:
-                latency = time.time() - start
-                self._request_latencies.append(latency)
-                try:
-                    self._per_token_latencies.append(
-                        latency / output['response_len'])
-                except ZeroDivisionError:
-                    # Not currently using this metric..
-                    pass
+            latency = time.time() - start
+            self._request_latencies.append(latency)
+            try:
+                self._per_token_latencies.append(
+                    latency / output['response_len'])
+            except ZeroDivisionError:
+                # Not currently using this metric..
+                pass
             if 'request_id' in output:
                 self._request_ids.append(output['request_id'])
             if 'per_token_latency' in output:
@@ -470,26 +439,20 @@ def get_token_ids(input_str, tokenizer):
 
 
 async def benchmark(
-    backend: GenerationBackend,
     tokenizer,
     prompts: List[str],
-    allow_variable_generation_length: bool,
+    arrival_times: List[float],
     verbose: bool,
     log_filename: str,
     ip_ports: List[int],
-    distribution: str,
-    qps: float,
-    coefficient_variation: float,
     log_latencies: bool,
     fail_on_response_failure: bool,
+    limit: int
 ):
+    # either limit or arrival_times should be set
+    assert (limit is None) != (arrival_times is None)
 
-    if backend == GenerationBackend.vLLM:
-        query_model = partial(inner_query_model, server_req_func=vllm_server_req_func)
-    elif backend == GenerationBackend.vLLM_v1:
-        query_model = partial(inner_query_model_vllm_v1, server_req_func=vllm_v1_server_req_func)
-    else:
-        raise ValueError(f'unknown backend {backend}')
+    query_model = partial(inner_query_model_vllm_v1, server_req_func=vllm_v1_server_req_func)
 
     global server_num_requests
     num_servers = len(ip_ports)
@@ -497,42 +460,70 @@ async def benchmark(
         server_num_requests[server_id] = 0
 
     m = MeasureLatency()
-
     query_model = m.measure(query_model)
 
-    if distribution == "burst":
-        qps = float('inf')
-    if distribution != "gamma":
-        coefficient_variation = 0.0
-
-    print(f'Starting with backend={backend}, num_prompts={len(prompts)}, allow_variable_generation_length={allow_variable_generation_length}')
-    print(f'traffic distribution={distribution}, qps={qps}, coefficient_variation={coefficient_variation}')
+    print(f"Starting with num_prompts={len(prompts)}")
 
     total_requests = len(prompts)
 
-    async_prompts = async_request_gen(
-        iter(prompts), qps=qps, distribution=distribution, coefficient_variation=coefficient_variation)
-
-    start_time = time.time()
     tasks = []
-    async for prompt in async_prompts:
-        tasks.append(asyncio.create_task(query_model(prompt, verbose, ip_ports)))
+    pbar = tqdm(total=len(prompts), desc="Dispatching requests")
+    global finished_pbar
+    finished_pbar = tqdm(total=len(prompts), desc="Finished requests")
+
+    start_wall = time.time()
+
+    if arrival_times:
+        assert len(prompts) == len(arrival_times), "Arrival times length must match prompts"
+        for i, prompt in enumerate(prompts):
+            scheduled_arrival = arrival_times[i]
+
+            # compute real time delta from benchmark start
+            now = time.time()
+            wait = scheduled_arrival - (now - start_wall)
+
+            if wait > 0:
+                await asyncio.sleep(wait)
+
+            # Launch the request
+            tasks.append(asyncio.create_task(
+                query_model(prompt, verbose, ip_ports)
+            ))
+
+            pbar.update(1)
+    elif limit:
+        global num_request_in_progress
+        # at most `limit` concurrent requests
+        for i in range(len(prompts)):
+            prompt = prompts[i]
+
+            while True:
+                if num_request_in_progress < limit:
+                    # Launch the request
+                    tasks.append(asyncio.create_task(
+                        query_model(prompt, verbose, ip_ports)
+                    ))
+                    num_request_in_progress += 1
+                    pbar.update(1)
+                    break
+                else:
+                    await asyncio.sleep(0.1)  # wait a bit before checking again
+
+    pbar.close()
+
+    # ============================================================
+    # Wait for all requests to complete
+    # ============================================================
     queries = await asyncio.gather(*tasks)
-    
-    if backend == GenerationBackend.vLLM_v1:
-        # NOTE(zhaozhiyu): vLLM v1 benchmark interface is not supported yet,
-        # bench test for vLLM v1 is just a stress test now
-        print(f"vLLM v1 has no benchmark api yet, returning None.")
-        return (None,) * 11
-    
-    dur_s = time.time() - start_time
+    finished_pbar.close()
+
+    dur_s = time.time() - start_wall
     median_token_latency = np.median(m._per_token_latencies)
     median_e2e_latency = np.median(m._request_latencies)
     median_inference_latency = np.median(m._inference_latencies)
 
-    throughput = calculate_throughput(queries,
+    throughput, prompts, responses = calculate_throughput(queries,
                                       dur_s,
-                                      backend,
                                       tokenizer,
                                       median_token_latency,
                                       median_e2e_latency,
@@ -561,7 +552,9 @@ async def benchmark(
            m._decode_sum_latencies, \
            m._request_lens, \
            m._all_decode_token_latencies, \
-           m._per_token_latency_breakdown_list
+           m._per_token_latency_breakdown_list, \
+            prompts, \
+            responses
 
 def gen_random_response_lens(distribution: str, len_mean, len_range, num_prompts):
     if distribution == 'uniform':
@@ -618,38 +611,42 @@ def gen_random_response_lens(distribution: str, len_mean, len_range, num_prompts
 
     return response_lens
 
-def gen_random_prompts(tokenizer, len_mean, len_range, num_prompts, vocab_ids_to_exclude=[]):
-    prompts, _ = gen_random_prompts_return_lens(
-        tokenizer, len_mean, len_range, num_prompts, vocab_ids_to_exclude)
-    return prompts
+def fast_sample_sharegpt(dataset_path, num_requests, tokenizer, max_seqlen):
+    print(f"Fast loading ShareGPT dataset from {dataset_path}", flush=True)
+    prompts, responses = [], []
 
-def gen_random_prompts_return_lens(tokenizer, distribution: str, len_mean, len_range, num_prompts, vocab_ids_to_exclude=[]):
-    def gen_prompt_ids(length):
-        return [random.randint(10, tokenizer.vocab_size) for _ in range(length)]
+    with open(dataset_path) as f:
+        for line in f:
+            data = json.loads(line)
+            if len(data["conversations"]) >= 2:
+                prompts.append(data["conversations"][0]["value"])
+                responses.append(data["conversations"][1]["value"])
 
-    # prompt_lens = list(
-    #     map(lambda _: random.randint(low, high), range(num_prompts)))
-    prompt_lens = gen_random_response_lens(distribution, len_mean, len_range, num_prompts)
-    prompts_as_ids = list(
-        map(lambda prompt_len: gen_prompt_ids(prompt_len), prompt_lens))
-    prompts = list(
-        map(lambda prompt_ids: tokenizer.decode(prompt_ids), prompts_as_ids))
+    # batch tokenize instead of one-by-one
+    prompt_ids = tokenizer(
+        prompts, padding=False, truncation=False, add_special_tokens=False
+    )["input_ids"]
 
-    # Because tokens do not map 1:1 to words, sometimes we get more tokens than desired.
-    # This removes the additional tokens by tokenizing the prompt and cutting off additional tokens.
-    # Confusingly, it works with a single iteration per prompt.
-    for i, (p, l) in enumerate(zip(prompts, prompt_lens)):
-        encoded = tokenizer(p)['input_ids']
-        if len(encoded) > l:
-            # I am not sure why l-1 works, but it does..
-            encoded = encoded[:l - 1]
-        decoded = tokenizer.decode(encoded)
-        encoded = tokenizer(decoded)['input_ids']
-        # assert len(
-        #     encoded) == l, f"Expected prompt to contain exactly {l} tokens, got {len(encoded)=}"
-        prompts[i] = decoded
+    response_ids = tokenizer(
+        responses, padding=False, truncation=False, add_special_tokens=False
+    )["input_ids"]
 
-    return prompts, prompt_lens
+    sampled_prompts = []
+    sampled_prompt_lens = []
+    sampled_response_lens = []
+
+    for p, r in zip(prompt_ids, response_ids):
+        rounded_r = ((len(r) + 31) // 32) * 32
+        if len(p) > 0 and rounded_r > 0 and len(p) + rounded_r < max_seqlen:
+            sampled_prompts.append(p)
+            sampled_prompt_lens.append(len(p))
+            sampled_response_lens.append(rounded_r)
+            if len(sampled_prompts) >= num_requests:
+                break
+            
+    print("finish loading dataset", flush=True)
+    return sampled_prompts, sampled_prompt_lens, sampled_response_lens
+
 
 def sample_sharegpt_requests(
     dataset_path: str,
@@ -657,6 +654,7 @@ def sample_sharegpt_requests(
     tokenizer,
     max_seqlen:int,
 ):
+    print(f"Loading ShareGPT dataset from {dataset_path}", flush=True)
     # Load the dataset.
     prompts = []
     prompt_lens = []
@@ -667,69 +665,49 @@ def sample_sharegpt_requests(
             if len(data["conversations"]) >= 2:
                 prompt = data["conversations"][0]["value"]
                 res = data["conversations"][1]["value"]
+                # m = [{"role": "user", "content": prompt}]
+                # prompt = tokenizer.apply_chat_template(
+                #     m,
+                #     add_generation_prompt=True,
+                #     tokenize=False
+                # )
                 prompt_token_ids = tokenizer(prompt).input_ids
                 completion_token_ids = tokenizer(res).input_ids
-                if len(prompt_token_ids) + len(completion_token_ids) < max_seqlen and \
-                    len(prompt_token_ids) > 0 and len(completion_token_ids) > 0:
+                rounded_up_completion_len = ((len(completion_token_ids) + 31) // 32) * 32
+                if len(prompt_token_ids) + rounded_up_completion_len < max_seqlen and \
+                    len(prompt_token_ids) > 0 and rounded_up_completion_len > 0:
                     prompts.append(prompt)
                     prompt_lens.append(len(prompt_token_ids))
-                    response_lens.append(len(completion_token_ids))
-            if len(prompts)>num_requests:
-                break
+                    response_lens.append(rounded_up_completion_len)
+            # if len(prompts)>num_requests:
+            #     break
     sampled_ids = [random.randint(0, len(prompts) - 1) for _ in range(num_requests)]
     sampled_prompts = [prompts[idx] for idx in sampled_ids]
     sampled_prompt_lens = [prompt_lens[idx] for idx in sampled_ids]
     sampled_response_lens = [response_lens[idx] for idx in sampled_ids]
     # print(f"max len:{max(a+b for a,b in zip(prompt_lens, response_lens))}")
+    print("finish loading dataset", flush=True)
     return sampled_prompts, sampled_prompt_lens, sampled_response_lens
 
-def sample_burstgpt_request(
-    dataset_path: str,
-    num_requests: int,
-    tokenizer,
-    max_seqlen:int,
-):
-    data = pd.read_csv(dataset_path)
-    request_tokens = data['Request tokens'].tolist()
-    response_tokens = data['Response tokens'].tolist()
-    num_prompts_sampled = min(num_requests, len(data))
-    sampled_ids = random.sample(range(len(request_tokens)), num_prompts_sampled)
-    random.shuffle(sampled_ids)
-    # sampled_ids = range(num_prompts_sampled)
-    prompt_lens = []
-    response_lens = []
-    for idx in sampled_ids:
-        if request_tokens[idx] + response_tokens[idx] < max_seqlen and \
-            request_tokens[idx] > 0 and response_tokens[idx] > 0:
-            prompt_lens.append(request_tokens[idx])
-            response_lens.append(response_tokens[idx])
-    prompts = [tokenizer.decode([20]*prompt_len) for prompt_len in prompt_lens]
-    return prompts, prompt_lens, response_lens
+import httpx
+def wait_until_up(url: str, 
+                  timeout: float = 600, 
+                  interval: float = 1.0):
+    start = time.monotonic()
+    while True:
+        try:
+            r = httpx.get(url, timeout=1.0)
+            if r.status_code in (200, 404, 405):  # got *some* valid HTTP response
+                print(f"Server at {url} is ready.")
+                return
+            print(f"Server at {url} returned status {r.status_code}, retrying...")
+        except Exception as e:
+            print(f"Server at {url} not ready yet: {e}")
+            pass  # connection refused, keep trying
 
-def sample_arxiv_request(
-    dataset_path: str,
-    num_requests: int,
-    tokenizer,
-    max_seqlen:int,
-):
-    prompts = []
-    prompt_lens = []
-    response_lens = []
-    with open(dataset_path) as f:
-        for id_, row in enumerate(f):
-            data = json.loads(row)
-            prompt = " ".join(data["article_text"])
-            res = " ".join(data["abstract_text"])
-            prompt_token_ids = tokenizer(prompt).input_ids
-            completion_token_ids = tokenizer(res).input_ids
-            if len(prompt_token_ids) + len(completion_token_ids) < max_seqlen and \
-                len(prompt_token_ids) > 0 and len(completion_token_ids) > 0:
-                prompts.append(prompt)
-                prompt_lens.append(len(prompt_token_ids))
-                response_lens.append(len(completion_token_ids))
-            if len(prompts)>num_requests:
-                break
-    return prompts, prompt_lens, response_lens
+        if time.monotonic() - start > timeout:
+            raise TimeoutError(f"Server at {url} not ready after {timeout:.1f} seconds")
+        time.sleep(interval)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -738,84 +716,54 @@ def main():
     parser.add_argument('--trust_remote_code',
                     action='store_true')
     parser.add_argument('-v', '--verbose', action='store_true')
-    parser.add_argument('--backend', type=GenerationBackend,
-                        choices=[e.name for e in GenerationBackend], default='vLLM_v1')
     parser.add_argument('--log_filename', type=str, default='benchmark.log')
     parser.add_argument('--ip_ports', nargs='+', required=True, help='List of ip:port')
-    parser.add_argument('--random_prompt_lens_mean', type=int)
-    parser.add_argument('--random_prompt_lens_range', type=int)
-    parser.add_argument('--variable_prompt_lens_distribution', choices=[
-                        "uniform", "exponential", "capped_exponential", "zipf"], default="uniform")
-    parser.add_argument('--random_prompt_count', type=int)
     parser.add_argument('--max_request_len', type=int, default=8192)
 
-    parser.add_argument(
-        '--distribution', choices=["burst", "uniform", "poisson", "gamma"], default="poisson")
-    parser.add_argument('--qps', type=float, default=4.0)
-    parser.add_argument('--coefficient_variation', type=float, default=0.0)
     parser.add_argument('--log_latencies', action="store_true",
                         help="Whether or not to write all latencies to the log file.")
     parser.add_argument('--fail_on_response_failure', action="store_true",
                         help="Whether or not to fail the benchmarking script if any request fails")
 
-    parser.add_argument('--variable_response_lens_mean', type=int)
-    parser.add_argument('--variable_response_lens_range', type=int)
-    parser.add_argument('--variable_response_lens_distribution', choices=[
-                        "uniform", "exponential", "capped_exponential", "zipf"], default="uniform")
-
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--dataset_type', type=str, choices=['sharegpt', 'burstgpt', 'arxiv'])
-    group.add_argument('--gen_random_prompts', action='store_true')
-
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--allow_variable_generation_length',
-                       action='store_true')
-    group.add_argument('--dataset_path', type=str)
+    parser.add_argument('--dataset_path', type=str)
 
     parser.add_argument('--print_generation_lens_and_exit',
                         action='store_true')
 
-    parser.add_argument('--enable_routine_migration', type=int, default=0)
-    parser.add_argument('--enable_pre_stop_migration', type=int, default=0)
-    parser.add_argument('--priority_ratio', type=float ,default=0.0)
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Max number of concurrent requests. Either limit or arrival_time_file should be set.")
+    parser.add_argument("--arrival_time_file", type=str,
+                        help="Path to arrival time file")
+    parser.add_argument('--num_requests', type=int, default=500,
+                        help='Number of requests to send. Used only if --limit is set.')
 
     args = parser.parse_args()
 
-    if args.gen_random_prompts:
-        assert args.random_prompt_count is not None
-
-    backend = GenerationBackend[args.backend]
+    print("start loading tokenizer")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=args.trust_remote_code)
+    print("finished loading tokenizer")
+    # set seed
 
-    if args.dataset_type:
-        random.seed(0xCADE)
-        np.random.seed(0xCADE)
-        if args.dataset_type=="sharegpt":
-            prompts, prompt_lens, response_lens= sample_sharegpt_requests(args.dataset_path, args.random_prompt_count ,tokenizer, args.max_request_len)
-        elif args.dataset_type=="burstgpt":
-            prompts, prompt_lens, response_lens= sample_burstgpt_request(args.dataset_path, args.random_prompt_count ,tokenizer, args.max_request_len)
-        elif args.dataset_type=="arxiv":
-            prompts, prompt_lens, response_lens= sample_arxiv_request(args.dataset_path, args.random_prompt_count ,tokenizer, args.max_request_len)
-        num_prompts = len(prompts)
-    elif args.gen_random_prompts:
-        num_prompts = args.random_prompt_count
-        random.seed(0xCADE)
-        np.random.seed(0xCADE)
-        prompts, prompt_lens = gen_random_prompts_return_lens(
-            tokenizer,
-            distribution=args.variable_prompt_lens_distribution,
-            len_mean=args.random_prompt_lens_mean,
-            len_range=args.random_prompt_lens_range,
-            num_prompts=num_prompts,
-            vocab_ids_to_exclude=tokenizer.all_special_ids,
-        )
+    # read arrival time file
+    if args.arrival_time_file != "":
+        print(f"start loading file")
+        arrival_times = np.loadtxt(args.arrival_time_file).tolist()
+        print(f"loading finished")
+        num_prompts = len(arrival_times)
     else:
-        raise ValueError("unknown prompts")
-
-    if args.allow_variable_generation_length:
-        response_lens = gen_random_response_lens(
-            args.variable_response_lens_distribution, args.variable_response_lens_mean, args.variable_response_lens_range, num_prompts=num_prompts)
-        args.fixed_max_tokens = -1
+        arrival_times = None
+        num_prompts = args.num_requests
+        print(f"using limit {args.limit}, num_prompts {num_prompts}")
+        
+    # flush
+    print("Flushing stdout", flush=True)
+        
+    random.seed(0xCADE)
+    np.random.seed(0xCADE)
+    prompts, prompt_lens, response_lens= sample_sharegpt_requests(args.dataset_path, 
+                                                                  num_prompts ,tokenizer, args.max_request_len)
+    # prompts, prompt_lens, response_lens= fast_sample_sharegpt(args.dataset_path, 
+    #                                                         num_prompts ,tokenizer, args.max_request_len)
 
     for i, (prompt_len, gen_len) in enumerate(zip(prompt_lens, response_lens)):
         total = prompt_len + gen_len
@@ -831,16 +779,28 @@ def main():
         return
 
     if args.verbose or True:
-        print('prompt lens', sorted(list(prompt_lens)))
-        print('response lens', sorted(list(response_lens)))
+        # print('prompt lens', sorted(list(prompt_lens)))
+        # print('response lens', sorted(list(response_lens)))
         total_tokens = []
         for i, (prompt_len, gen_len) in enumerate(zip(prompt_lens, response_lens)):
             total_tokens.append(prompt_len + gen_len)
-        print('total tokens', sorted(list(total_tokens)))
+        # print('total tokens', sorted(list(total_tokens)))
 
     plot_len_cdf(prompt_lens, response_lens, total_tokens, args.log_filename)
 
+    # print stats (min, p25, p50, p75, p90, p99, max, mean)
+    print(f"Prompt lengths: min {np.min(prompt_lens)}, p25 {np.percentile(prompt_lens, 25)}, p50 {np.percentile(prompt_lens, 50)}, p75 {np.percentile(prompt_lens, 75)}, p90 {np.percentile(prompt_lens, 90)}, p99 {np.percentile(prompt_lens, 99)}, max {np.max(prompt_lens)}, mean {np.mean(prompt_lens):.2f}")
+    print(f"Response lengths: min {np.min(response_lens)}, p25 {np.percentile(response_lens, 25)}, p50 {np.percentile(response_lens, 50)}, p75 {np.percentile(response_lens, 75)}, p90 {np.percentile(response_lens, 90)}, p99 {np.percentile(response_lens, 99)}, max {np.max(response_lens)}, mean {np.mean(response_lens):.2f}")
+    3/0
+    # print('Prompt lengths: min {}, max {}, mean {:.2f}, median {:.2f}'.format(
+    #     min(prompt_lens), max(prompt_lens), np.mean(prompt_lens), np.median(prompt_lens)))
+    # print('Response lengths: min {}, max {}, mean {:.2f}, median {:.2f}'.format(
+    #     min(response_lens), max(response_lens), np.mean(response_lens), np.median(response_lens)))
+
     prompts = list(zip(prompts, prompt_lens, response_lens))
+
+    for ip_port in args.ip_ports:
+        wait_until_up(f'http://{ip_port}/v1/models')
 
     throughput, \
     prefill_token_latencies, \
@@ -852,23 +812,33 @@ def main():
     decode_sum_latencies, \
     request_lens, \
     all_decode_token_latencies, \
-    per_token_latency_breakdown_list = asyncio.run(benchmark(
-        backend,
+    per_token_latency_breakdown_list, \
+    prompts, \
+    responses = asyncio.run(benchmark(
         tokenizer,
         prompts,
-        args.allow_variable_generation_length,
+        arrival_times,
         args.verbose,
         args.log_filename,
         args.ip_ports,
-        args.distribution,
-        args.qps,
-        args.coefficient_variation,
         args.log_latencies,
         args.fail_on_response_failure,
+        args.limit
     ))
     
     if throughput is None:
         return
+
+    instances = {
+        str(i): {
+            "prompt_len": prompt_lens[i],
+            "expected_response_len": response_lens[i],
+            "request_latency": request_latencies[i],
+            "prompt": prompts[i],
+            "response": responses[i],
+        }
+        for i in range(len(prompts))
+    }
 
     file_name = os.path.splitext(args.log_filename)[0] + "_latency_info.json"
     results = []
@@ -883,20 +853,15 @@ def main():
     except FileNotFoundError:
         os.mknod(file_name)
     with open(file_name, 'w') as f:
-        results.append({"qps": args.qps,
-                        "cv": args.coefficient_variation,
+        results.append({
                         "request_ids": request_ids,
                         "request_lens": request_lens,
-                        "request_latencies": request_latencies,
-                        "prefill_token_latencies": prefill_token_latencies,
-                        "decode_token_latencies": decode_token_latencies,
-                        "decode_sum_latencies": decode_sum_latencies,
-                        "all_decode_token_latencies": all_decode_token_latencies,
-                        "inference_latencies": inference_latencies,
-                        "per_token_latency_breakdown_list": per_token_latency_breakdown_list,
                         "throughput": throughput, 
-                        "instance_num": avg_instance_num})
-        json.dump(results, f)
+                        "instance_num": avg_instance_num,
+                        "instances": instances,
+                        })
+        json.dump(results, f,
+                  indent=2)
 
 
 if __name__ == '__main__':

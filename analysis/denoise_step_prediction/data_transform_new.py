@@ -542,6 +542,20 @@ def train_and_evaluate(train_path: Union[str, list[str]],
     plt.tight_layout()
     plt.savefig("denoise_ratio_prediction.png", dpi=300)
 
+    # plot output_avg_confidence vs. y_test_ratio and print correlation
+    plt.figure(figsize=(6,5))
+    plt.scatter(results_df["output_avg_confidence"], results_df["y_test_ratio"], alpha=0.3)
+    plt.xlabel("Output Average Confidence")
+    plt.ylabel("Actual Denoise Ratio")
+    plt.title(f"Output Average Confidence vs Actual Denoise Ratio{title_suffix}")
+    plt.tight_layout()
+    plt.savefig("output_avg_confidence_vs_denoise_ratio.png", dpi=300)
+    
+    # calc correlation between output avg, min, q25, median, q75 confidence and y_test_ratio
+    for col in ["output_avg_confidence", "output_min_confidence", "output_q25_confidence", "output_median_confidence", "output_q75_confidence", "full_progress", "full_unmask_progress"]:
+        corr = results_df[col].corr(results_df["y_test_ratio"])
+        print(f"Correlation between {col} and y_test_ratio: {corr:.4f}")
+
     
 
 # --- Usage ---
@@ -554,38 +568,72 @@ def train_and_evaluate(train_path: Union[str, list[str]],
 #     # "models/lgb/dual_cache_32_1120/features.txt",
 #     # "models/lgb/tmp/model.bin",
 #     # "models/lgb/tmp/features.txt",
-#     "models/lgb/dual_cache_256_32/model.bin",
-#     "models/lgb/dual_cache_256_32/features.txt",
+#     # "models/lgb/dual_cache_256_32/model.bin",
+#     # "models/lgb/dual_cache_256_32/features.txt",
+#     "models/lgb/1121_dual_256_512_1024_avg/model.bin",
+#     "models/lgb/1121_dual_256_512_1024_avg/features.txt",
 #     [
 #         # "/u/tchang85/dllm/experiment_dir/20251120_164011/step_data.json",
 #         # "/u/tchang85/dllm/experiment_dir/20251120_165845/step_data.json"
 #         # "/u/tchang85/dllm/experiment_dir/20251120_165033/step_data.json"
-#         "/u/tchang85/dllm/current_experiment/step_data.json"
+#         "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251126/153014/step_data.json",
+#         "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251126/153704/step_data.json",
+#         "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251126/154226/step_data.json",
+#         "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251126/154854/step_data.json",
+#         "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251126/155412/step_data.json",
 #     ]
 # )
 # 3/0
-cross_test = False
+# evaluate_only(
+#     "models/lgb/1121_dual_256_512_1024_avg/model.bin",
+#     "models/lgb/1121_dual_256_512_1024_avg/features.txt",
+#     [
+#         # ShareGPT
+#         "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251128/233641/step_data.json"
+#         # GSM8K
+#         # "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251127/181908/step_data.json"
+#         # MMLU-PRO
+#         # "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251124/183458/step_data.json"
+#         # MBPP
+#         # "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251127/151437/step_data.json"
+#     ]
+# )
+# 3/0
+cross_test = True
 train_and_evaluate(
     # "GSAI-ML_LLaDA-8B-Base_prefix_step_estimator.json",
     # model_name="1121_dual_256_512_1024_quantile_0.6",
-    model_name="tmp",
+    model_name="mbpp_1208",
     train_path=[
+        # "../../step_data_1130_sharegpt/0_9.json",
+        # "../../step_data_1130_sharegpt/0_8.json",
+        # "../../step_data_1130_sharegpt/0_7.json",
+        # "../../step_data_1130_sharegpt/0_6.json",
+        # "../../step_data_1130_sharegpt/0_5.json",
         # "/u/tchang85/dllm/experiment_dir/20251120_164011/step_data.json",
-        "../../step_data_dual_cache_with_output/dual_0.9_256.json",
-        "../../step_data_dual_cache_with_output/dual_0.8_256.json",
-        "../../step_data_dual_cache_with_output/dual_0.7_256.json",
-        "../../step_data_dual_cache_with_output/dual_0.6_256.json",
-        "../../step_data_dual_cache_with_output/dual_0.5_256.json",
-        "../../step_data_dual_cache_with_output/dual_0.9_512.json",
-        "../../step_data_dual_cache_with_output/dual_0.8_512.json",
-        "../../step_data_dual_cache_with_output/dual_0.7_512.json",
-        "../../step_data_dual_cache_with_output/dual_0.6_512.json",
-        "../../step_data_dual_cache_with_output/dual_0.5_512.json",
-        "../../step_data_dual_cache_with_output/dual_0.9_1024.json",
-        "../../step_data_dual_cache_with_output/dual_0.8_1024.json",
-        "../../step_data_dual_cache_with_output/dual_0.7_1024.json",
-        "../../step_data_dual_cache_with_output/dual_0.6_1024.json",
-        "../../step_data_dual_cache_with_output/dual_0.5_1024.json",
+        # "../../step_data_dual_cache_with_output/dual_0.9_256.json",
+        # "../../step_data_dual_cache_with_output/dual_0.8_256.json",
+        # "../../step_data_dual_cache_with_output/dual_0.7_256.json",
+        # "../../step_data_dual_cache_with_output/dual_0.6_256.json",
+        # "../../step_data_dual_cache_with_output/dual_0.5_256.json",
+        # "../../step_data_dual_cache_with_output/dual_0.9_512.json",
+        # "../../step_data_dual_cache_with_output/dual_0.8_512.json",
+        # "../../step_data_dual_cache_with_output/dual_0.7_512.json",
+        # "../../step_data_dual_cache_with_output/dual_0.6_512.json",
+        # "../../step_data_dual_cache_with_output/dual_0.5_512.json",
+        # "../../step_data_dual_cache_with_output/dual_0.9_1024.json",
+        # "../../step_data_dual_cache_with_output/dual_0.8_1024.json",
+        # "../../step_data_dual_cache_with_output/dual_0.7_1024.json",
+        # "../../step_data_dual_cache_with_output/dual_0.6_1024.json",
+        # "../../step_data_dual_cache_with_output/dual_0.5_1024.json",
+
+        # for mbpp
+        "../../experiment_dir/20251126/173606/step_data.json",
+        "../../experiment_dir/20251126/174027/step_data.json",
+        "../../experiment_dir/20251126/174417/step_data.json",      
+        "../../experiment_dir/20251126/174854/step_data.json",      
+        "../../experiment_dir/20251126/175315/step_data.json",      
+
         # "../../step_pred_data_dual_cache/dual_0.9_256.json",
         # "../../step_pred_data_dual_cache/dual_0.8_256.json",
         # "../../step_pred_data_dual_cache/dual_0.7_256.json",
@@ -653,6 +701,13 @@ train_and_evaluate(
         # "../../step_data/GSAI-ML_LLaDA-8B-Base_prefix_suffix_block32_conf0.9_out512.json",
     ],
     test_path = [
+        "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251126/153014/step_data.json",
+        "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251126/153704/step_data.json",
+        "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251126/154226/step_data.json",
+        "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251126/154854/step_data.json",
+        "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251126/155412/step_data.json",
+
+        # "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251128/233641/step_data.json"
         # "../../step_data_dual_cache_with_output/dual_0.9_256.json",
         # "../../step_data_dual_cache_with_output/dual_0.8_256.json",
         # "../../step_data_dual_cache_with_output/dual_0.7_256.json",

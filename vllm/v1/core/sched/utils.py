@@ -145,6 +145,7 @@ class SystemSnapshot:
     executor_to_requests: Dict[str, List[str]]
     num_tokens: int
     request_confidence_thresholds: Dict[str, float]
+    request_num_recompute: Optional[Dict[str, int]] = None
     timestamp: str = field(default_factory=get_cur_timestamp)
 
     @staticmethod
@@ -164,6 +165,7 @@ class SystemSnapshot:
             executor_to_requests=executor_to_requests,
             num_tokens=num_tokens,
             request_confidence_thresholds=request_confidence_thresholds,
+            request_num_recompute={r.request_id: r.num_recompute for r in scheduler.requests.values()}
         )
     
     def __str__(self) -> str:

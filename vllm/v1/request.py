@@ -147,7 +147,11 @@ class Request:
 
         # self.last_recompute_avg_output_confidence = None
         # TODO: fix SLO
-        self.latency_slo = 3.2 
+        # self.latency_slo = 4.446
+        self.latency_slo = 7.41
+
+        # for ablation study
+        self.num_recompute = 0
 
 
     @classmethod
@@ -325,7 +329,8 @@ class Request:
         if self.latency_slo is None:
             return float("inf")
         elapsed = time.time() - self.arrival_time
-        return self.latency_slo - elapsed
+        return self.latency_slo * 0.8 - elapsed
+        # return self.latency_slo * 0.9 - elapsed
     
 class RequestStatus(enum.IntEnum):
     """Status of a request."""
