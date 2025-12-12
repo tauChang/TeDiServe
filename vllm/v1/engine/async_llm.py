@@ -117,6 +117,7 @@ class AsyncLLM(EngineClient):
         )
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
+        logger.info(f"mask_token_id: {self.model_config.mask_token_id}")
         self.output_processor = OutputProcessor(self.tokenizer,
                                                 mask_token_id= \
                                                 self.model_config.mask_token_id,
@@ -263,9 +264,11 @@ class AsyncLLM(EngineClient):
                            queue: RequestOutputCollector):
 
         # Add the request to OutputProcessor (this process).
+        logger.info(f"adding request to output processor")
         self.output_processor.add_request(request, prompt, parent_req, index,
                                           queue)
 
+        logger.info(f"adding request to engine core")
         # Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
 
@@ -338,6 +341,10 @@ class AsyncLLM(EngineClient):
         # we abort the request if we end up here.
         except (asyncio.CancelledError, GeneratorExit):
             await self.abort(request_id)
+            import traceback
+            traceback.print_exc()
+            raise
+
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise

@@ -791,7 +791,6 @@ def main():
     # print stats (min, p25, p50, p75, p90, p99, max, mean)
     print(f"Prompt lengths: min {np.min(prompt_lens)}, p25 {np.percentile(prompt_lens, 25)}, p50 {np.percentile(prompt_lens, 50)}, p75 {np.percentile(prompt_lens, 75)}, p90 {np.percentile(prompt_lens, 90)}, p99 {np.percentile(prompt_lens, 99)}, max {np.max(prompt_lens)}, mean {np.mean(prompt_lens):.2f}")
     print(f"Response lengths: min {np.min(response_lens)}, p25 {np.percentile(response_lens, 25)}, p50 {np.percentile(response_lens, 50)}, p75 {np.percentile(response_lens, 75)}, p90 {np.percentile(response_lens, 90)}, p99 {np.percentile(response_lens, 99)}, max {np.max(response_lens)}, mean {np.mean(response_lens):.2f}")
-    3/0
     # print('Prompt lengths: min {}, max {}, mean {:.2f}, median {:.2f}'.format(
     #     min(prompt_lens), max(prompt_lens), np.mean(prompt_lens), np.median(prompt_lens)))
     # print('Response lengths: min {}, max {}, mean {:.2f}, median {:.2f}'.format(

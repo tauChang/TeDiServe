@@ -120,7 +120,7 @@ async def wait_upstream_ready(url, timeout=30000, interval=2.0):
 @app.post("/v1/completions")
 async def proxy_completions(request: Request):
     data = await request.json()
-    logger.info(f"Received request data: {data}")
+    # logger.info(f"Received request data: {data}")
 
     req_id = int(data["request_id"])
 
@@ -168,7 +168,7 @@ async def proxy_completions(request: Request):
                         logger.warning(f"Warmup request {i} failed: {e}")
 
             # Launch 30 warmup requests concurrently
-            tasks = [asyncio.create_task(send_one(i)) for i in range(30)]
+            tasks = [asyncio.create_task(send_one(i)) for i in range(3)]
             # tasks = [asyncio.create_task(send_one(i)) for i in range(3)]
             await asyncio.gather(*tasks)
 
@@ -207,13 +207,13 @@ async def proxy_completions(request: Request):
         - time.monotonic()
     )
 
-    logger.info(
-        f"Request {req_id}: scheduled after {delay:.3f}s "
-        f"(gap={app.state.request_arrival_time[req_id]:.3f}s)"
-    )
+    # logger.info(
+    #     f"Request {req_id}: scheduled after {delay:.3f}s "
+    #     f"(gap={app.state.request_arrival_time[req_id]:.3f}s)"
+    # )
 
     await asyncio.sleep(delay)
-    logger.info(f"Request {req_id} released after waiting {delay:.3f}s")
+    # logger.info(f"Request {req_id} released after waiting {delay:.3f}s")
     # logger.info(f"Prompt (first 200 chars): {data['prompt'][:200]}")
 
     # Forward real request to upstream
@@ -228,6 +228,22 @@ async def proxy_completions(request: Request):
 
     elapsed = time.monotonic() - start_time
     app.state.resp_time[req_id] = elapsed
+
+    # count num output tokens
+    num_tokenized = 0
+    if app.state.tokenizer is not None:
+        output_text = resp.json()["choices"][0]["text"]
+        tokenized = app.state.tokenizer(
+            output_text,
+            return_tensors="pt",
+            truncation=False,
+        )
+        num_tokenized = tokenized.input_ids.shape[1]
+        
+    logger.info(f"num_output_tokens: {num_tokenized}")
+    app.state.token_count += num_tokenized
+
+    logger.info(f"tput so far: {app.state.token_count / (time.monotonic() - app.state.first_request_arrival_time):.2f} tokens/s")
     # post again
     resp_json = resp.json()
     # logger.info(f"Request {req_id} got response: {resp_json}")
@@ -288,6 +304,7 @@ def launch_proxy(upstream_url: str,
     app.state.resp_time = {}
     app.state.does_warmup = warmup
     app.state.warmup_done = False
+    app.state.token_count = 0
 
      
     def _run():

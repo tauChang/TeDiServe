@@ -11,12 +11,13 @@ ln -sfn "$EXPERIMENT_DIR" ./current_experiment
 # copy this file to experiment dir for record keeping
 cp run_lmeval.sh $EXPERIMENT_DIR/
 
-SLO=6 # seconds
+SLO=10
 # VLLM Args
 # MODEL=Dream-org/Dream-v0-Instruct-7B
+# MODEL=Dream-org/Dream-v0-Base-7B
 MODEL=GSAI-ML/LLaDA-8B-Instruct
 # MODEL=GSAI-ML/LLaDA-8B-Base
-NUM_GPUS_PER_MODEL_EXECUTOR=1
+NUM_GPUS_PER_MODEL_EXECUTOR=1,
 # NUM_GPUS_PER_MODEL_EXECUTOR=1,1,1,1
 # SCHEDULER_CLASS=vllm.v1.core.sched.cluster_scheduler.ClusterScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.infaas_scheduler.InFaaSScheduler
@@ -24,10 +25,10 @@ NUM_GPUS_PER_MODEL_EXECUTOR=1
 
 # SCHEDULER_CLASS=vllm.v1.core.sched.infaas_aligned_dynamic_confidence_scheduler.InFaaSAlignedScheduler
 
-# SCHEDULER_CLASS=vllm.v1.core.sched.infaas_aligned_scheduler.InFaaSAlignedScheduler
+SCHEDULER_CLASS=vllm.v1.core.sched.infaas_aligned_scheduler.InFaaSAlignedScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.llumnix_fcfs_scheduler.LlumnixFCFSScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.tedi_correct_tput_scheduler.TeDiLightScheduler
-SCHEDULER_CLASS=vllm.v1.core.sched.tedi_new_correct_tput_scheduler.TeDiLightScheduler
+# SCHEDULER_CLASS=vllm.v1.core.sched.tedi_new_correct_tput_scheduler.TeDiLightScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.tedi_new_correct_tput_step_predict_once_scheduler.TeDiLightScheduler
 
 # SCHEDULER_CLASS=vllm.v1.core.sched.tedi_new_correct_tput_migrate_scheduler.TeDiLightScheduler
@@ -38,7 +39,7 @@ SCHEDULER_CLASS=vllm.v1.core.sched.tedi_new_correct_tput_scheduler.TeDiLightSche
 # SCHEDULER_CLASS=vllm.v1.core.sched.urgent_opportunistic_scheduler_max_best_effort.UrgentOpportunisticScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.urgent_opportunistic_scheduler_min_best_effort.UrgentOpportunisticScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.urgent_opportunistic_with_budget_scheduler.UrgentOpportunisticWithBudgetScheduler
-DEFAULT_CONFIDENCE_THRESHOLD=0.9
+DEFAULT_CONFIDENCE_THRESHOLD=0.7
 NUM_PROFILE_RUNS=8
 NUM_PROFILE_WARMUP_RUNS=3
 STEP_ESTIMATOR_MODEL_CLASS=vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine.LightGradientBoostMachine
@@ -50,10 +51,10 @@ LOG_DIR=$EXPERIMENT_DIR/logs
 mkdir -p $LOG_DIR
 
 DENOISE_BLOCK_SIZE=32
-# CACHE_PREFIX=false
-# CACHE_SUFFIX=false
-CACHE_PREFIX=true
-CACHE_SUFFIX=true
+CACHE_PREFIX=false
+CACHE_SUFFIX=false
+# CACHE_PREFIX=true
+# CACHE_SUFFIX=true
 
 if [ "$CACHE_PREFIX" = true ] && [ "$CACHE_SUFFIX" = true ]; then
     # use dual_cache_256_32 model
@@ -94,6 +95,7 @@ REQUEST_PLOTS_DIR=${EXPERIMENT_DIR}/request_plots
 
 # ----------------------
 # LMEval Args
+# TASK=mbpp
 # TASK=mbpp_instruct
 TASK=gsm8k
 # TASK=mmlu_pro
@@ -103,13 +105,13 @@ TASK=gsm8k
 # ARRIVAL_PATTERN="300:0.5,300:0.2"
 # ARRIVAL_PATTERN="30:3:8"
 # ARRIVAL_PATTERN="100:0.15:2"
-# ARRIVAL_PATTERN="10000:0.0555"
+# ARRIVAL_PATTERN="10000:0.03571"
 # ARRIVAL_PATTERN="100:0"
 # ARRIVAL_PATTERN="474:0.1111"
-# ARRIVAL_PATTERN="474:0.02272"
+# ARRIVAL_PATTERN="474:0.03333"
 # ARRIVAL_PATTERN="300:0.1"
-# ARRIVAL_PATTERN="1319:0.02272"
-ARRIVAL_PATTERN="100:0.0625"
+ARRIVAL_PATTERN="100:0"
+# ARRIVAL_PATTERN="100:0.0625"
 # ARRIVAL_PATTERN="5:0"
 # ARRIVAL_PATTERN="100:1:0"
 # Calculate TOTAL_NUM_REQUESTS based on ARRIVAL_PATTERN
@@ -124,9 +126,9 @@ if [ "$TASK" = "mmlu_pro" ]; then
     TOTAL_NUM_REQUESTS=$(( TOTAL_NUM_REQUESTS * 14 ))
 fi
 
-NUM_CONCURRENT=$TOTAL_NUM_REQUESTS
-# NUM_CONCURRENT=12
-OUTPUT_LENGTH=1024
+# NUM_CONCURRENT=$TOTAL_NUM_REQUESTS
+NUM_CONCURRENT=1
+OUTPUT_LENGTH=256
 WRITE_RESULTS=true
 RESULTS_DIR=$EXPERIMENT_DIR/results
 # make results_dir prefix with confidence
@@ -204,7 +206,7 @@ fi
 
 # ----------------------
 # Start tmux session with two panes
-SESSION=eval_session
+SESSION=eval_session0
 tmux new-session -d -s $SESSION
 
 # Pane 1: vllm serve
@@ -239,7 +241,15 @@ log_and_send "$SESSION.1" \
     "$EVAL_CMD 2>&1 | tee \"$LOG_DIR/lmeval_run.log\""
 
 log_and_send "$SESSION.1" \
-    "python analysis/confidence_over_time/plot.py --step-data \"$STEP_DATA_FILE\" --workload-history \"$WORKLOAD_FILE\" --output-dir \"$REQUEST_PLOTS_DIR\" 2>&1 | tee \"$LOG_DIR/confidence_over_time.log\""
+    "python analysis/slo_attainment_and_good_accuracy/run.py --path \"$OUTPUT_PATH\" --slo \"$SLO\" 2>&1 | tee \"$LOG_DIR/result_summary.log\""
+
+# log_and_send "$SESSION.1" \
+#     "python analysis/confidence_over_time/plot.py --step-data \"$STEP_DATA_FILE\" --workload-history \"$WORKLOAD_FILE\" --output-dir \"$REQUEST_PLOTS_DIR\" 2>&1 | tee \"$LOG_DIR/confidence_over_time.log\""
+if [[ "$SCHEDULER_CLASS" == *TeDi* ]]; then
+    log_and_send "$SESSION.1" \
+        "python analysis/confidence_over_time/plot.py --step-data \"$STEP_DATA_FILE\" --workload-history \"$WORKLOAD_FILE\" --output-dir \"$REQUEST_PLOTS_DIR\" 2>&1 | tee \"$LOG_DIR/confidence_over_time.log\""
+fi
+
 
 # log_and_send "$SESSION.1" \
 #     "python analysis/profiler_analysis/scheduler/run_schedule.py \"$EXPERIMENT_DIR/profiles/scheduler/schedule.jsonl\" 2>&1 | tee \"$LOG_DIR/schedule_analysis.log\""
@@ -258,10 +268,6 @@ log_and_send "$SESSION.1" \
 
 # log_and_send "$SESSION.1" \
 #     "python analysis/profiler_analysis/executor/run.py \"$EXPERIMENT_DIR/profiles/executors\" 2>&1 | tee \"$LOG_DIR/executor_analysis.log\""
-
-log_and_send "$SESSION.1" \
-    "python analysis/slo_attainment_and_good_accuracy/run.py --path \"$OUTPUT_PATH\" --slo \"$SLO\" 2>&1 | tee \"$LOG_DIR/result_summary.log\""
-
 
 # Pane 3: nvidia-smi monitor
 tmux send-keys -t $SESSION.2 "watch -n 0.1 nvidia-smi" C-m

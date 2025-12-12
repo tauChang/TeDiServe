@@ -4,6 +4,7 @@ from typing import Union
 import evaluate as hf_evaluate
 
 
+
 try:
     pass_at_k = hf_evaluate.load("code_eval")
 
@@ -13,8 +14,163 @@ try:
     results = pass_at_k.compute(references=test_cases, predictions=candidates, k=[1])
 except Exception as e:
     raise e
+# Copyright 2025 NVIDIA CORPORATION & AFFILIATES
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+# Modified from Dream repos: https://github.com/HKUNLP/Dream
+"""Post-processing LLM-generated Python code implemented using tree-sitter."""
 
+import os
+import sys
+import pathlib
 
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.extend([os.path.dirname(ROOT), os.path.dirname(os.path.dirname(ROOT))])
+
+import ast
+import traceback
+
+from typing import Dict, List, Optional, Set, Tuple
+
+def refine_text(text: str) -> str:
+    text =  text.replace("\t", "    ")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return text.strip() + "\n"
+
+def syntax_check(code, verbose = False):
+    try:
+        ast.parse(code)
+        return True
+    except (SyntaxError, MemoryError):
+        if verbose:
+            traceback.print_exc()
+        return False
+
+def extract_longest_valid_code(text: str) -> str:
+    lines = text.splitlines()
+
+    if len(lines) > 100:
+        lines = lines[:100]
+    max_valid_lines = 0
+    max_valid_snippet = ""
+
+    for i in range(len(lines)):
+        for j in range(i, len(lines)):
+            current_snippet = "\n".join(lines[i:j+1])
+            if lines[i].lstrip().startswith("def ") and syntax_check(current_snippet):
+                # print(current_snippet)
+                valid_line_count = sum(1 for line in lines[i:j+1] if line.strip())
+                if valid_line_count > max_valid_lines:
+                    max_valid_lines = valid_line_count
+                    max_valid_snippet = current_snippet
+
+    return max_valid_snippet
+
+def get_deps(nodes: List[Tuple[str, ast.AST]]) -> Dict[str, Set[str]]:
+    name2deps = {}
+    for name, node in nodes:
+        deps = set()
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            for child in ast.iter_child_nodes(current):
+                if isinstance(child, ast.Name):
+                    deps.add(child.id)
+                elif isinstance(child, ast.Attribute):
+                    deps.add(child.attr)
+                else:
+                    stack.append(child)
+        name2deps[name] = deps
+    return name2deps
+
+def get_function_dependency(entrypoint: str, call_graph: Dict[str, Set[str]]) -> Set[str]:
+    visited = set()
+    to_visit = [entrypoint]
+
+    while to_visit:
+        current = to_visit.pop(0)
+        if current not in visited:
+            visited.add(current)
+            to_visit.extend(call_graph.get(current, set()) - visited)
+
+    return visited
+
+def get_definition_name(node: ast.AST) -> Optional[str]:
+    if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+        return node.name
+    elif isinstance(node, ast.Assign):
+        targets = node.targets
+        if targets and isinstance(targets[0], ast.Name):
+            return targets[0].id
+    return None
+
+def has_return_statement(node: ast.AST) -> bool:
+    return any(isinstance(n, ast.Return) for n in ast.walk(node))
+
+def sanitize(text: str, entrypoint: Optional[str] = None) -> str:
+
+    text = refine_text(text)
+
+    # text = python_extract(text)
+
+    code = extract_longest_valid_code(text)
+    tree = ast.parse(code)
+    
+    definitions = {}
+
+    imports = []
+
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            imports.append(node)
+        elif isinstance(node, ast.ClassDef):
+            name = node.name
+            definitions[name] = ('class', node)
+        elif isinstance(node, ast.FunctionDef):
+            name = node.name
+            if has_return_statement(node):
+                definitions[name] = ('function', node)
+        elif isinstance(node, ast.Assign):
+            name = get_definition_name(node)
+            if name:
+                definitions[name] = ('variable', node)
+
+    if entrypoint:
+        name2deps = get_deps([(name, node) for name, (_, node) in definitions.items()])
+        reachable = get_function_dependency(entrypoint, name2deps)
+
+    sanitized_output = []
+
+    for node in imports:
+        sanitized_output.append(ast.unparse(node))
+
+    for name, (_, node) in definitions.items():
+        if not entrypoint or name in reachable:
+            sanitized_output.append(ast.unparse(node))
+
+    return "\n".join(sanitized_output)
+
+# def pass_at_1(references, predictions):
+#     print(references[0])
+#     print(predictions[0])
+#     return pass_at_k.compute(
+#         references=references,
+#         predictions=predictions,
+#         k=[1],
+#     )[0]["pass@1"]
+    
 def pass_at_1(
     references: Union[str, list[str]], predictions: Union[str, list[list[str]]]
 ) -> float:
@@ -29,41 +185,22 @@ def pass_at_1(
         num_workers=32,
     )[0]["pass@1"]
 
-
-def extract_code_blocks(text: str) -> str:
-    # NEW: remove everything after first [DONE]
-    if "[DONE]" in text:
-        text = text.split("[DONE]", 1)[0]
-    
-    print(f"getting first [DONE] from: {text}")
-
-    # Pattern to match ```...``` blocks
-    pattern = r"```(?:\w+)?\n?(.*?)\n?```"
-
-    # (+ ```) as we add the opening "```python" to the gen_prefix
-    matches = re.findall(pattern, r"```" + text, re.DOTALL)
-
-    # if no matches, try to match ```...``` blocks (after removing the language)
-    if not matches:
-        text_without_lang = re.sub(r"```python", "```", text)
-        matches = re.findall(pattern, text_without_lang, re.DOTALL)
-
-    # NEW: fallback — if still no fenced code, extract first code-looking block
-    if not matches:
-        # try to find the *first function definition*
-        m = re.search(r"(def\s+\w+\(.*?)(?=$|\n\s*\n)", text, re.DOTALL)
-        if m:
-            return m.group(1).strip()
-        return ""
-
-    print(f"extracted: {matches[0]}")
-    return matches[0]
-
-
-
 def build_predictions(resps: list[list[str]], docs: list[dict]) -> list[list[str]]:
-    return [[extract_code_blocks(r) for r in resp] for resp in resps]
+    return [extract_ref_pred(resp) for resp in resps]
 
+def extract_ref_pred(samples):
+    references = []
+    predictions = []
+
+    for sample in samples:
+        # sanitized model output extraction
+        pred_code = sanitize(
+            sample.split("```python\n", 1)[-1].split("```")[0],
+        )
+
+        predictions.append([pred_code])
+
+    return predictions[0]
 
 def list_fewshot_samples():
     return [

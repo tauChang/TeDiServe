@@ -214,9 +214,9 @@ class AutoWeightsLoader:
 
         if isinstance(module, PPMissingLayer):
             return
-        logger.warning(
-            "Loading weights for module %s with class %s",
-            base_prefix, type(module).__name__)
+        # logger.warning(
+        #     "Loading weights for module %s with class %s",
+        #     base_prefix, type(module).__name__)
         
         # Avoid infinite recursion since this function is typically
         # called inside load_weights of the module itself
@@ -241,15 +241,15 @@ class AutoWeightsLoader:
         # that aren't registered as params, e.g., batchnorm statistics.
         self._add_loadable_non_param_tensors(module, child_params)
 
-        logger.warning(
-            "Found %d child modules and %d child parameters in module %s",
-            len(child_modules), len(child_params), base_prefix
-        )
+        # logger.warning(
+        #     "Found %d child modules and %d child parameters in module %s",
+        #     len(child_modules), len(child_params), base_prefix
+        # )
 
-        logger.warning(
-            "Child modules are: %s",
-            str(list(child_modules.keys()))
-        )
+        # logger.warning(
+        #     "Child modules are: %s",
+        #     str(list(child_modules.keys()))
+        # )
 
 
         for child_prefix, child_weights in self._groupby_prefix(weights):

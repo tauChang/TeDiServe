@@ -15,16 +15,16 @@ import numpy as np
 CACHE_DIR = Path(".plot_cache")
 CACHE_DIR.mkdir(exist_ok=True)
 
-SYSTEMS = ["TeDiServe", "Llumnix", "InFaaS"]
+SYSTEMS = ["TeDiServe", "Llumnix", "INFaaS"]
 COLORS = {
-    "InFaaS": "#134686",
+    "INFaaS": "#134686",
     "Llumnix": "#B89000",
     "TeDiServe": "#FF4F0F",
 }
 MARKERS = {
     "TeDiServe": "o",
     "Llumnix": "s",
-    "InFaaS": "d",
+    "INFaaS": "d",
 }
 
 NUM_GPUS = 16  # for per-GPU RPS
@@ -389,16 +389,16 @@ def plot_multi_benchmarks(
             cfg["base_slo"],
         )
         # print(curves)
-        # for each rps, print the accuracy gap and SLO attainment gap betweeen TeDiServe and InFaaS
-        print(f"infaas")
+        # for each rps, print the accuracy gap and SLO attainment gap betweeen TeDiServe and INFaaS
+        print(f"INFaaS")
         for i in range(len(curves["rps_vals"]["TeDiServe"])):
             tediserve_acc = curves["overall_rps"]["TeDiServe"][i]
-            infaas_acc = curves["overall_rps"]["InFaaS"][i]
-            acc_gap = tediserve_acc - infaas_acc
+            INFaaS_acc = curves["overall_rps"]["INFaaS"][i]
+            acc_gap = tediserve_acc - INFaaS_acc
 
             tediserve_slo = curves["slo_att_rps"]["TeDiServe"][i]
-            infaas_slo = curves["slo_att_rps"]["InFaaS"][i]
-            slo_gap = tediserve_slo - infaas_slo
+            INFaaS_slo = curves["slo_att_rps"]["INFaaS"][i]
+            slo_gap = tediserve_slo - INFaaS_slo
 
             print(f"RPS {curves['rps_vals']['TeDiServe'][i]:.2f}: Acc Gap {acc_gap:.4f}, SLO Gap {slo_gap:.4f}")
         
@@ -414,16 +414,16 @@ def plot_multi_benchmarks(
 
             print(f"RPS {curves['rps_vals']['TeDiServe'][i]:.2f}: Acc Gap {acc_gap:.4f}, SLO Gap {slo_gap:.4f}")
 
-        # for each slo, print the accuracy gap and SLO attainment gap betweeen TeDiServe and InFaaS
-        print(f"infaas")
+        # for each slo, print the accuracy gap and SLO attainment gap betweeen TeDiServe and INFaaS
+        print(f"INFaaS")
         for i in range(len(curves["slo_multipliers"])):
             tediserve_acc = curves["overall_slo"]["TeDiServe"][i]
-            infaas_acc = curves["overall_slo"]["InFaaS"][i]
-            acc_gap = tediserve_acc - infaas_acc
+            INFaaS_acc = curves["overall_slo"]["INFaaS"][i]
+            acc_gap = tediserve_acc - INFaaS_acc
 
             tediserve_slo = curves["slo_att_slo"]["TeDiServe"][i]
-            infaas_slo = curves["slo_att_slo"]["InFaaS"][i]
-            slo_gap = tediserve_slo - infaas_slo
+            INFaaS_slo = curves["slo_att_slo"]["INFaaS"][i]
+            slo_gap = tediserve_slo - INFaaS_slo
 
             print(f"SLO Mult {curves['slo_multipliers'][i]:.2f}: Acc Gap {acc_gap:.4f}, SLO Gap {slo_gap:.4f}")
         
@@ -609,7 +609,7 @@ if __name__ == "__main__":
                     "20251127/181908", "20251127/183426", "20251127/184703",
                     "20251127/181510", "20251208/080918" #"20251127/181021",
                 ],
-                "InFaaS": [
+                "INFaaS": [
                     "20251127/182256", "20251127/183818", "20251127/184316",
                     "20251127/142544", "20251208/080515" #"20251127/180516",
                 ],
@@ -622,7 +622,7 @@ if __name__ == "__main__":
                     # "20251127/190703", "20251127/190217",
                 ],
                 "Llumnix": ["20251127/181908"],
-                "InFaaS": ["20251127/182256"],
+                "INFaaS": ["20251127/182256"],
             },
             "slo_values": [9.5, 7.6, 5.7, 4.75, 3.8],
             "base_slo": 1.9,
@@ -638,7 +638,7 @@ if __name__ == "__main__":
                     "20251124/185130", "20251125/132058", "20251125/122827",
                     "20251125/112844", "20251125/130719",
                 ],
-                "InFaaS": [
+                "INFaaS": [
                     "20251124/183458", "20251124/210259", "20251125/103451",
                     "20251125/104806", "20251125/125359",
                 ],
@@ -649,7 +649,7 @@ if __name__ == "__main__":
                     "20251125/142511", "20251125/143948",
                 ],
                 "Llumnix": ["20251125/132058"],
-                "InFaaS": ["20251124/210259"],
+                "INFaaS": ["20251124/210259"],
             },
             "slo_values": [12, 9.6, 8.4, 7.2, 6],
             "base_slo": 2.4,
@@ -671,7 +671,7 @@ if __name__ == "__main__":
                     "20251127/163425", "20251127/163859", "20251127/165244",
                     "20251127/165721", "20251127/170216",
                 ],
-                "InFaaS": [
+                "INFaaS": [
                     "20251127/162553", "20251127/161647", "20251127/151437",
                     "20251127/160716", "20251127/152353",
                 ],
@@ -688,7 +688,7 @@ if __name__ == "__main__":
                     "20251208/093543"
                 ],
                 "Llumnix": ["20251127/163425"],
-                "InFaaS": ["20251127/162553"],
+                "INFaaS": ["20251127/162553"],
             },
             "slo_values": [7.41, 5.928, 4.446, 2.964],
             "base_slo": 1.482,

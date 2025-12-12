@@ -66,7 +66,7 @@ class IncrementalDetokenizer:
             return FastIncrementalDetokenizer(tokenizer, mask_token_id, request)
 
         # Fall back to slow python-based incremental detokenization.
-        return SlowIncrementalDetokenizer(tokenizer, request)
+        return SlowIncrementalDetokenizer(tokenizer, mask_token_id, request)
 
 
 class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
@@ -91,6 +91,8 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         # Generation data
         self.prompt_length = len(request.prompt_token_ids)
         self.output_length = request.sampling_params.max_tokens
+        self.mask_token_id = mask_token_id
+        # Initialize all output positions with mask tokens (Dream diffusion approach)
         self.token_ids: dict[int, int] = {i: mask_token_id
                                           for i in range(self.output_length)}
         self.num_unmasked_tokens = 0
@@ -100,95 +102,68 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
                stop_terminated: bool) -> Optional[str]:
         """
         Update RequestState for the request_id by:
-            1) Detokenize the new token ids incrementally.
-            2) Evaluate stop criteria.
+            1) Track newly unmasked token ids.
+            2) When all tokens are unmasked, decode the entire sequence.
+            3) Evaluate stop criteria.
 
         Return matched stop string or None.
+        
+        For Dream diffusion models:
+        - Tokens are updated position-by-position as masks are replaced
+        - We only decode once ALL mask tokens have been replaced
+        - This matches the official Dream implementation behavior
         """
         if not new_token_ids:
-            # Skip detokenization if no new token ids.
+            # Skip if no new token ids.
             return None
 
-        # if stop_terminated and not self.include_stop_str_in_output:
-        #     # If stop-terminated, exclude last token from detokenization
-        #     # based on include_stop_str_in_output parameter.
-        #     skipped_stop_token_id = new_token_ids[-1]
-        #     new_token_ids = new_token_ids[:-1]
-        # else:
-        #     skipped_stop_token_id = None
-
-        # 1) Detokenize the new token ids incrementally.
-        # TODO(woosuk): This method becomes very inefficient when the number of
-        # new_token_ids is more than 1. We need to optimize this.
-        offset_before = len(self.output_text)
-        # for new_token_id in new_token_ids:
-        #     self.token_ids.append(new_token_id)
-        #     self.output_text += self.decode_next(new_token_id)
+        # Track unmasked tokens by position
         for pos, token_id in new_token_ids:
             pos -= self.prompt_length
-            self.token_ids[pos] = token_id
-            # logger.debug(
-            #     f"updating token_ids at position {pos} with token_id {token_id}")
-            self.num_unmasked_tokens += 1
-        # logger.debug(
-        #     f"self.token_ids: {self.token_ids}, "
-        #     f"self.num_unmasked_tokens: {self.num_unmasked_tokens}, ")
+            if 0 <= pos < self.output_length:
+                # Only count if this position was previously a mask token
+                if self.token_ids[pos] == self.mask_token_id:
+                    self.num_unmasked_tokens += 1
+                self.token_ids[pos] = token_id
         
+        # Check if all positions have been unmasked
+        # For Dream: we decode ONLY when generation is complete
         if self.num_unmasked_tokens == self.output_length:
-            for i in range(self.output_length):
-                next_token = self.decode_next(self.token_ids[i])
-                self.output_text += next_token
-                # logger.debug(
-                #     f"Decoding next token at position {i}: {next_token}"
-                #     f" self.output_text: {self.output_text}")
-
+            # Call subclass-specific method to decode complete sequence
+            self.output_text = self._decode_complete()
+            
+            # Generation complete - trigger stop
             return "stop"
-        else:
-            return None
-
-        if stop_terminated:
-            if skipped_stop_token_id is not None:
-                # Cleanup after skipping detokenization.
-                self.token_ids.append(skipped_stop_token_id)
-            # Stop token triggered; skip stop string check.
-            return None
-
-        # 2) Evaluate stop strings.
-        stop_string = None
-        if self.stop:
-            stop = StopChecker.check_stop_strings(
-                output_text=self.output_text,
-                new_char_count=len(self.output_text) - offset_before,
-                stop=self.stop,
-                include_in_output=self.include_stop_str_in_output,
-            )
-            if stop is not None:
-                stop_string, truncate_to = stop
-                if truncate_to != -1:
-                    self.output_text = self.output_text[:truncate_to]
-
-        return stop_string
+        
+        # Generation still in progress - no text output yet
+        return None
 
     @abstractmethod
     def decode_next(self, next_token_id: int) -> str:
+        """Decode a single token incrementally."""
+        raise NotImplementedError
+    
+    @abstractmethod
+    def _decode_complete(self) -> str:
+        """Decode the complete sequence when all tokens are unmasked.
+        
+        Called when num_unmasked_tokens == output_length.
+        Different implementations for different models:
+        - FastIncrementalDetokenizer: decode one-by-one for Llada
+        - SlowIncrementalDetokenizer: decode entire sequence at once for Dream
+        """
         raise NotImplementedError
 
     def get_next_output_text(self, finished: bool, delta: bool) -> str:
-        """If delta is True, only new text since the last call to
-        this method is returned"""
+        """Return the output text.
+        
+        For Dream diffusion models:
+        - Text is only available once all tokens are decoded (when update() returns "stop")
+        - No incremental streaming since all tokens are generated together
+        """
+        # Simply return the accumulated output text
+        # For Dream, this will be empty until all tokens are decoded
         return self.output_text
-
-        # We return the full output text if the sequence is finished.
-        buffer_length = 0 if finished else self.stop_buffer_length
-        if not delta:
-            return self.output_text[:-buffer_length] if buffer_length else (
-                self.output_text)
-        length = len(self.output_text) - buffer_length
-        last_offset = self._last_output_text_offset
-        if last_offset < length:
-            self._last_output_text_offset = length
-            return self.output_text[last_offset:length]
-        return ""
 
 
 class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
@@ -273,12 +248,24 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
             self.stream = DecodeStream(self.skip_special_tokens)
             token = self.stream.step(self.tokenizer, next_token_id)
         return token
+    
+    def _decode_complete(self) -> str:
+        """Decode complete sequence token-by-token using DecodeStream.
+        
+        For Llada diffusion model: processes tokens one at a time through
+        the DecodeStream which maintains proper streaming context.
+        """
+        output_text = ""
+        for i in range(self.output_length):
+            next_token = self.decode_next(self.token_ids[i])
+            output_text += next_token
+        return output_text
 
 
 class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
-    def __init__(self, tokenizer: AnyTokenizer, request: EngineCoreRequest):
-        super().__init__(request)
+    def __init__(self, tokenizer: AnyTokenizer, mask_token_id: int, request: EngineCoreRequest):
+        super().__init__(request, mask_token_id)
 
         self.tokenizer = tokenizer
         params = request.sampling_params
@@ -292,7 +279,6 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
                 skip_special_tokens=params.skip_special_tokens,
             ))
 
-        self.token_ids.extend(request.prompt_token_ids)
         self.prompt_len = len(request.prompt_token_ids)
 
         self.skip_special_tokens = params.skip_special_tokens
@@ -301,14 +287,15 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
     @property
     def output_token_ids(self) -> list[int]:
-        return self.token_ids if not self.prompt_len else (
-            self.token_ids[self.prompt_len:])
+        return [self.token_ids[i] for i in sorted(self.token_ids.keys())]
 
     def decode_next(self, next_token_id: int) -> str:
+        all_input_ids = [self.token_ids[i] for i in sorted(self.token_ids.keys())]
+
         new_tokens, decoded_text, prefix_offset, read_offset = (
             detokenize_incrementally(
                 tokenizer=self.tokenizer,
-                all_input_ids=self.token_ids,
+                all_input_ids=all_input_ids,
                 prev_tokens=self.tokens,
                 prefix_offset=self.prefix_offset,
                 read_offset=self.read_offset,
@@ -322,3 +309,20 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
         self.read_offset = read_offset
 
         return decoded_text
+    
+    def _decode_complete(self) -> str:
+        """Decode entire sequence at once using tokenizer.decode().
+        
+        For Dream diffusion model: tokens are generated out-of-order by 
+        confidence, so we decode the complete sequence in one call rather 
+        than incrementally. This matches the official Dream implementation.
+        """
+        # Build complete token sequence in order
+        all_output_tokens = [self.token_ids[i] for i in range(self.output_length)]
+        
+        # Decode entire sequence at once
+        return self.tokenizer.decode(
+            all_output_tokens,
+            skip_special_tokens=self.skip_special_tokens,
+            spaces_between_special_tokens=self.spaces_between_special_tokens,
+        )

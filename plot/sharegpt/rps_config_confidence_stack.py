@@ -13,10 +13,10 @@ import os
 plt.rcParams.update({
         "font.family": "serif",
         "font.size": 28,
-        "axes.labelsize": 28,
+        "axes.labelsize": 26,
         "xtick.labelsize": 26,
         "ytick.labelsize": 26,
-        "legend.fontsize": 26,
+        "legend.fontsize": 22,
         "lines.linewidth": 3.5,
     })
     
@@ -65,7 +65,7 @@ def load_reconfig_trace(json_file):
     t0 = timestamps[0]
     rel_times = [(t - t0).total_seconds() / 60. for t in timestamps]
 
-    tp1, tp2, tp4 = [], [], []
+    TP1, TP2, TP4 = [], [], []
     for e in trace:
         c = e["config"]
         c1 = c2 = c4 = 0
@@ -74,11 +74,11 @@ def load_reconfig_trace(json_file):
             if tp == 1: c1 += 1
             elif tp == 2: c2 += 1
             elif tp == 4: c4 += 1
-        tp1.append(c1)
-        tp2.append(c2)
-        tp4.append(c4)
+        TP1.append(c1)
+        TP2.append(c2)
+        TP4.append(c4)
 
-    return pd.DataFrame({"time": rel_times, "TP1": tp1, "TP2": tp2, "TP4": tp4})
+    return pd.DataFrame({"time": rel_times, "TP-1": TP1, "TP-2": TP2, "TP-4": TP4})
 
 # ======================================================================
 # RAW CACHE BUILDER FOR CONFIDENCE
@@ -182,10 +182,11 @@ def compute_confidence_timeline(cache_path, workload_file, bucket_seconds=60):
 def plot_full_figure(qps_time, qps_vals, cfg_df,
                      conf_time, avg_conf, avg_maxc):
     fig, axs = plt.subplots(
-        3, 1, figsize=(14, 12),
+        3, 1, figsize=(14, 8),
         sharex=True,
-        gridspec_kw={"height_ratios": [1.0, 1.3, 1.2]}
+        gridspec_kw={"height_ratios": [1, 1, 1]}
     )
+    plt.subplots_adjust(hspace=0.15)
 
     # ------------------------------------------------------
     # TOP: QPS
@@ -206,10 +207,10 @@ def plot_full_figure(qps_time, qps_vals, cfg_df,
         dt = 1
     edges = np.append(cfg_time, cfg_time[-1] + dt)
 
-    tp_colors = {"TP1": "#FFCF71", "TP2": "#B6771D", "TP4": "#7B542F"}
+    tp_colors = {"TP-1": "#FFCF71", "TP-2": "#B6771D", "TP-4": "#7B542F"}
     bottom = np.zeros(len(cfg_time))
 
-    for tp in ["TP4", "TP2", "TP1"]:
+    for tp in ["TP-4", "TP-2", "TP-1"]:
         if tp not in df.columns:
             continue
         y = df[tp].to_numpy()
@@ -222,24 +223,29 @@ def plot_full_figure(qps_time, qps_vals, cfg_df,
             step="post",
             color=tp_colors[tp],
             alpha=0.85,
-            label=tp
+            label=tp,
+            edgecolor=None
         )
         bottom = y_top
 
-    axs[1].set_ylabel("# Model Instances")
+    axs[1].set_ylabel("# Instances")
     axs[1].grid(True, linestyle="--", alpha=0.5)
     axs[1].set_ylim(0, bottom.max() * 1.1)
     # axs[1].legend(loc="upper left")
     handles, labels = axs[1].get_legend_handles_labels()
 
-    order = ["TP1", "TP2", "TP4"]
+    order = ["TP-1", "TP-2", "TP-4"]
     sorted_handles = [handles[labels.index(tp)] for tp in order]
     sorted_labels  = order
 
     axs[1].legend(
         sorted_handles,
         sorted_labels,
-        bbox_to_anchor=(0.15, 0.99),
+        bbox_to_anchor=(0.175, 1.02),
+        labelspacing=0.13,
+        borderpad=0.2,
+        handletextpad=0.4,
+        handlelength=1.3,
         loc="upper left"
     )
 
@@ -257,11 +263,18 @@ def plot_full_figure(qps_time, qps_vals, cfg_df,
     axs[2].grid(True, linestyle="--", alpha=0.5)
     axs[2].legend(handles,
                   ["Max Confidence Threshold", "Confidence Threshold Used"],
+                  labelspacing=0.13,
+                  borderpad=0.2,
+                  handlelength=1,
+                  handletextpad=0.4,
                   loc="lower left")
     axs[2].set_ylim(0.6, 0.92)
     axs[2].set_xlim(0, 120)
+    # ytick at 0.9, 0.8, 0.7
+    axs[2].set_yticks([0.6, 0.7, 0.8, 0.9])
+    # fig.subplots_adjust(hspace=0.01)
 
-    plt.tight_layout()
+    # plt.tight_layout()
     plt.savefig("full_timeline.pdf", bbox_inches="tight")
     plt.savefig("full_timeline.png", dpi=300, bbox_inches="tight")
     print("Saved full_timeline.png")

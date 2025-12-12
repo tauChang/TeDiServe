@@ -148,7 +148,7 @@ class Request:
         # self.last_recompute_avg_output_confidence = None
         # TODO: fix SLO
         # self.latency_slo = 4.446
-        self.latency_slo = 7.41
+        self.latency_slo = 12.5
 
         # for ablation study
         self.num_recompute = 0

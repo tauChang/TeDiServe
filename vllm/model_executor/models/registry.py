@@ -259,6 +259,7 @@ _TRANSFORMERS_MODELS = {
 
 _DIFFUSION_LANGUAGE_MODELS = {
     "LLaDAModelLM": ("llada", "LLaDAModelLM"),
+    "DreamModel": ("dream", "DreamModelLM"),
 }
 # yapf: enable
 

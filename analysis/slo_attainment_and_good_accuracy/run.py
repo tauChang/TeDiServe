@@ -29,6 +29,10 @@ def process_gsm8k(data: dict, samples: pd.DataFrame) -> pd.DataFrame:
     samples = samples[samples["filter"] == "flexible-extract"].copy()
     samples["is_correct"] = samples["exact_match"].astype(bool)
     return samples
+# def process_gsm8k(data: dict, samples: pd.DataFrame) -> pd.DataFrame:
+#     samples = samples[samples["filter"] == "strict-match"].copy()
+#     samples["is_correct"] = samples["exact_match"].astype(bool)
+#     return samples
 
 
 def process_mbpp(data: dict, samples: pd.DataFrame) -> pd.DataFrame:

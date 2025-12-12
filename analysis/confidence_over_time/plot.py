@@ -211,6 +211,7 @@ def main(step_data_path: str, workload_history_path: str, output_dir: str):
         json.dump(out_json, f, indent=2)
 
     print(f"Saved aggregated confidence stats: {output_path}")
+    return
 
 
     # -------------------------------------------------------

@@ -555,6 +555,12 @@ class ModelConfig:
         self.attention_chunk_size = getattr(self.hf_text_config,
                                             "attention_chunk_size", None)
         self.encoder_config = self._get_encoder_config()
+        if hasattr(self.hf_config, 'mask_token_id'):
+            self.mask_token_id = self.hf_config.mask_token_id
+            logger.info(f"Loaded mask_token_id={self.mask_token_id} from hf_config")
+        else:
+            logger.info(f"No mask_token_id in hf_config, using default={self.mask_token_id}")
+        logger.info(f"hf_config has pad_token_id={getattr(self.hf_config, 'pad_token_id', 'NOT SET')}")
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, hf_token=self.hf_token, revision=self.revision)
 

@@ -226,16 +226,39 @@ class RequestState:
         self.executors_to_free: OrderedSet[int] = OrderedSet()
         self.pending_executor_id = None # executor to be set in the next scheduling step
         self.pred_num_steps_left = {
-            # 0.9: request.output_length / 3.02,
-            # 0.8: request.output_length / 3.89,
-            # 0.7: request.output_length / 4.77,
-            # 0.6: request.output_length / 5.65,
-            # 0.5: request.output_length / 6.58,
-            0.9: 109,
-            0.8: 91,
-            0.7: 79,
-            0.6: 69,
-            0.5: 62
+            0.9: request.output_length / 3.02,
+            0.8: request.output_length / 3.89,
+            0.7: request.output_length / 4.77,
+            0.6: request.output_length / 5.65,
+            0.5: request.output_length / 6.58,
+
+            # Dream GSM8K
+            # 0.9: 68.49,
+            # 0.85: 62,
+            # 0.8: 56.41,
+            # 0.75: 52,
+
+            # Dream MBPP
+            # 0.8: 87.31,
+            # 0.75: 79.83,
+            # 0.7: 73.43,
+            # 0.65: 67.88,
+            # 0.6: 62.73
+
+            # Dream MMLU
+            # 0.9: 126.2,
+            # 0.8: 109.59,
+            # 0.7: 94.9,
+            # 0.6: 83.16,
+            # 0.5: 69.48
+            
+            
+            # 0.7: 48.17,
+            # 0.9: 109,
+            # 0.8: 91,
+            # 0.7: 79,
+            # 0.6: 69,
+            # 0.5: 62
             # 0.9: 65.83,
             # 0.8: 55.95,
             # 0.7: 50.31,
@@ -498,7 +521,13 @@ class TeDiLightScheduler(SchedulerInterface):
 
         self.default_confidence_threshold = \
             self.scheduler_config.default_confidence_threshold
-        self.candidate_confidence_thresholds = [0.9, 0.8, 0.7]
+        # Dream GSM8K
+        # self.candidate_confidence_thresholds = [0.9, 0.85, 0.8, 0.75]
+        # Dream MBPP
+        # self.candidate_confidence_thresholds = [0.8, 0.75, 0.7, 0.65]
+        # Dream MMLU
+        self.candidate_confidence_thresholds = [0.9, 0.8, 0.7, 0.6, 0.5]
+        # self.candidate_confidence_thresholds = [0.9]
         # self.candidate_confidence_thresholds = [0.9, 0.8, 0.7]
         
         self.cache_prefix = vllm_config.model_config.cache_prefix
@@ -510,6 +539,7 @@ class TeDiLightScheduler(SchedulerInterface):
         self.tp_degree_to_throughput_supply: dict[int, float] = {}
         # read in latency profiles
         for tp_degree in [1, 2, 4]:
+        # for tp_degree in [1]:
             path = get_latency_profile_path(vllm_config, tp_degree)
             self.latency_profiles[tp_degree] = LatencyProfile(path)
             self.tp_degree_to_throughput_supply[tp_degree] = self.latency_profiles[tp_degree].get_throughput(
@@ -737,7 +767,7 @@ class TeDiLightScheduler(SchedulerInterface):
         #             f"{5*(avg_tput_demand_per_req_using_max_conf / self.tp_degree_to_throughput_supply[1])}")
         # logger.info(f"throughput_supply: {self.throughput_supply}")
         # total_throughput_budget = 4.446 * self.throughput_supply * 0.8
-        total_throughput_budget = 16.5 * self.throughput_supply * 0.8
+        total_throughput_budget = 12.5 * self.throughput_supply * 0.8
         # logger.debug(
         #     f"throughput supply: {self.throughput_supply}, "
         #     f"rps: {self.get_rps()}, "

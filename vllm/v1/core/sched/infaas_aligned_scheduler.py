@@ -489,6 +489,7 @@ class InFaaSAlignedScheduler(SchedulerInterface):
         self.latency_profiles: dict[int, LatencyProfile] = {}
         # read in latency profiles
         for tp_degree in [1, 2, 4]:
+        # for tp_degree in [1]:
             path = get_latency_profile_path(vllm_config, tp_degree)
             self.latency_profiles[tp_degree] = LatencyProfile(path)
         self.throughput_supply: float = 0
@@ -914,7 +915,7 @@ class InFaaSAlignedScheduler(SchedulerInterface):
                         logger.debug(f"Executor {executor_id} has no requests scheduled to run, and no finished requests. skip")
                         # not scheduled to run at all, and no finished reqs. skip
                         # executor should not be in idle_not_accepting_executors
-                        assert executor_id not in idle_not_accepting_executors
+                        # assert executor_id not in idle_not_accepting_executors
                         async with self.executors_manager.cond[executor_id]:
                             logger.debug(f"Executor {executor_id} status transition: CONSIDERED_FOR_SCHEDULING -> IDLE")
                             self.executors_manager.executors[executor_id].set_idle()

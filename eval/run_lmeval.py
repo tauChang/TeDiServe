@@ -38,6 +38,7 @@ SHOULD_APPLY_CHAT_TEMPLATE = {
     "GSAI-ML/LLaDA-8B-Instruct": True,
     "GSAI-ML/LLaDA-8B-Base": False,
     "Dream-org/Dream-v0-Instruct-7B": True,
+    "Dream-org/Dream-v0-Base-7B": False,
 }
 
 def get_slurm_assigned_cpus():
@@ -229,6 +230,7 @@ def run_test(args):
 
     model_args = (
         f"model={args.model},"
+        f"trust_remote_code=True,"
         f"base_url={proxy_url},"
         f"num_concurrent={args.num_concurrent},"
         f"tokenized_requests=False,"

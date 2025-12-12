@@ -97,40 +97,40 @@ class LoggingStatLogger(StatLoggerBase):
 
     def log(self):
         now = time.monotonic()
-        prompt_throughput = self._get_throughput(self.num_prompt_tokens, now)
-        generation_throughput = self._get_throughput(
-            self.num_generation_tokens, now)
+        # prompt_throughput = self._get_throughput(self.num_prompt_tokens, now)
+        # generation_throughput = self._get_throughput(
+        #     self.num_generation_tokens, now)
 
-        self._reset(now)
+        # self._reset(now)
 
-        scheduler_stats = self.last_scheduler_stats
+        # scheduler_stats = self.last_scheduler_stats
 
-        log_fn = logger.info
-        if not any(
-            (prompt_throughput, generation_throughput,
-             self.last_prompt_throughput, self.last_generation_throughput)):
-            # Avoid log noise on an idle production system
-            log_fn = logger.debug
-        self.last_generation_throughput = generation_throughput
-        self.last_prompt_throughput = prompt_throughput
+        # log_fn = logger.info
+        # if not any(
+        #     (prompt_throughput, generation_throughput,
+        #      self.last_prompt_throughput, self.last_generation_throughput)):
+        #     # Avoid log noise on an idle production system
+        #     log_fn = logger.debug
+        # self.last_generation_throughput = generation_throughput
+        # self.last_prompt_throughput = prompt_throughput
 
-        # Format and print output.
-        log_fn(
-            "Engine %03d: "
-            "Avg prompt throughput: %.1f tokens/s, "
-            "Avg generation throughput: %.1f tokens/s, "
-            "Running: %d reqs, Waiting: %d reqs, "
-            "GPU KV cache usage: %.1f%%, "
-            "Prefix cache hit rate: %.1f%%",
-            self.engine_index,
-            prompt_throughput,
-            generation_throughput,
-            scheduler_stats.num_running_reqs,
-            scheduler_stats.num_waiting_reqs,
-            scheduler_stats.kv_cache_usage * 100,
-            self.prefix_caching_metrics.hit_rate * 100,
-        )
-        self.spec_decoding_logging.log(log_fn=log_fn)
+        # # Format and print output.
+        # log_fn(
+        #     "Engine %03d: "
+        #     "Avg prompt throughput: %.1f tokens/s, "
+        #     "Avg generation throughput: %.1f tokens/s, "
+        #     "Running: %d reqs, Waiting: %d reqs, "
+        #     "GPU KV cache usage: %.1f%%, "
+        #     "Prefix cache hit rate: %.1f%%",
+        #     self.engine_index,
+        #     prompt_throughput,
+        #     generation_throughput,
+        #     scheduler_stats.num_running_reqs,
+        #     scheduler_stats.num_waiting_reqs,
+        #     scheduler_stats.kv_cache_usage * 100,
+        #     self.prefix_caching_metrics.hit_rate * 100,
+        # )
+        # self.spec_decoding_logging.log(log_fn=log_fn)
 
     def log_engine_initialized(self):
         if self.vllm_config.cache_config.num_gpu_blocks:
