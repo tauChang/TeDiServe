@@ -311,6 +311,7 @@ class Worker(WorkerBase):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
         if not self.model_config.enforce_eager:
+            logger.info("Capturing model with cudagraph...")
             self.model_runner.capture_model()
 
         # Warm up sampler and preallocate memory buffer for logits and other

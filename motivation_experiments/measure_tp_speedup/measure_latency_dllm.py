@@ -1,14 +1,22 @@
 import time
 import asyncio
 import httpx
+import random
 
 SERVER_URL = "http://localhost:8000/v1/completions"   # <-- change if needed
-N_REQUESTS = 5
+N_REQUESTS = 3
 N_WARMUP = 1
-OUTPUT_TOKENS = 512
+OUTPUT_TOKENS = 256
+INPUT_TOKENS = 1792
 
-# Synthetic prompt of ~512 tokens
-BASE_PROMPT = " ".join(["hello"] * 1536)
+random.seed(42)
+
+# List of random words to choose from
+WORDS = ["apple", "banana", "computer", "dragon", "elephant", "forest", "guitar", "helicopter", "island", "jungle",
+            "kangaroo", "lemon", "mountain", "notebook", "ocean", "piano", "quilt", "rainbow", "sunflower", "tiger",
+            "umbrella", "violin", "waterfall", "xylophone", "yacht", "zebra"]
+def generate_prompt():
+    return " ".join([random.choice(WORDS) for _ in range(INPUT_TOKENS)])
 
 
 async def measure_one(prompt: str):
@@ -41,7 +49,8 @@ async def main():
     # -----------------------------
     print(f"Running {N_WARMUP} warmup requests...")
     for _ in range(N_WARMUP):
-        await measure_one(BASE_PROMPT)
+        # await measure_one(BASE_PROMPT)
+        await measure_one(generate_prompt())
     print("Warmup complete.\n")
 
     # -----------------------------
@@ -51,7 +60,7 @@ async def main():
 
     for i in range(N_REQUESTS):
         print(f"Request {i+1}/{N_REQUESTS}")
-        t = await measure_one(BASE_PROMPT)
+        t = await measure_one(generate_prompt())
         total_times.append(t)
 
         print(f"  total={t:.4f}s")

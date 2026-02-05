@@ -332,6 +332,7 @@ class FlashAttentionMetadataBuilder(
             max_num_splits=max_num_splits,
             use_cache=self.use_cache
         )
+        # logger.info(attn_metadata)
         return attn_metadata
 
     def can_run_in_cudagraph(
@@ -498,6 +499,21 @@ class FlashAttentionImpl(AttentionImpl):
             #     attn_metadata.slot_mapping.shape[0],
             #     dtype=attn_metadata.slot_mapping.dtype,
             #     device=attn_metadata.slot_mapping.device)
+            # logger.info(f"slot_mapping: {attn_metadata.slot_mapping}")
+
+            # slot = attn_metadata.slot_mapping[0]
+            # logger.info(f"slot: {slot}")
+            # block_size = key_cache.shape[1]
+            
+            # block_id = slot // block_size
+            # block_off = slot % block_size
+            # logger.info(f"block_id: {block_id}, block_off: {block_off}")
+            
+            # logger.info(f"key_cache shape: {key_cache.shape}")
+            # k_vec = key_cache[block_id, block_off, 0]
+            # logger.info(f"k_vec[:10]: {k_vec[:10]}")
+            # logger.info(f"k_vec shape: {k_vec.shape}")
+
             reshape_and_cache_flash(
                 key,
                 value,

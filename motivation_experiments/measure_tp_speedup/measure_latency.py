@@ -1,15 +1,22 @@
 import time
 import asyncio
 import httpx
+import random
 
 SERVER_URL = "http://localhost:8007/v1/completions"
-N_REQUESTS = 5     # number of measured requests
+N_REQUESTS = 3     # number of measured requests
 N_WARMUP = 1        # ignored warmups
 OUTPUT_TOKENS = 256
+INPUT_TOKENS = 512
 
-# Synthetic prompt of ~512 tokens
-BASE_PROMPT = " ".join(["fuck"] * 1792)
+random.seed(42)
 
+# List of random words to choose from
+WORDS = ["apple", "banana", "computer", "dragon", "elephant", "forest", "guitar", "helicopter", "island", "jungle",
+            "kangaroo", "lemon", "mountain", "notebook", "ocean", "piano", "quilt", "rainbow", "sunflower", "tiger",
+            "umbrella", "violin", "waterfall", "xylophone", "yacht", "zebra"]
+def generate_prompt():
+    return " ".join([random.choice(WORDS) for _ in range(INPUT_TOKENS)])
 
 async def measure_one(prompt: str):
     """Measure prefill, per-token decode latency, and total latency."""
@@ -58,7 +65,7 @@ async def main():
     # -----------------------------
     print(f"Running {N_WARMUP} warm-up requests...")
     for i in range(N_WARMUP):
-        await measure_one(BASE_PROMPT)
+        await measure_one(generate_prompt())
     print("Warmup complete.\n")
 
     # -----------------------------
@@ -70,7 +77,7 @@ async def main():
 
     for i in range(N_REQUESTS):
         print(f"Request {i+1}/{N_REQUESTS}")
-        p, d, t = await measure_one(BASE_PROMPT)
+        p, d, t = await measure_one(generate_prompt())
         prefill_times.append(p)
         decode_times.append(d)
         total_times.append(t)

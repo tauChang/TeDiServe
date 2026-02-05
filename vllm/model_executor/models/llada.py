@@ -15,6 +15,7 @@ from .configuration_llada import LLaDAConfig, ModelConfig
 from vllm.logger import init_logger
 
 from vllm.attention import Attention, AttentionType
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.sequence import IntermediateTensors
@@ -464,6 +465,13 @@ class LLaDATransformer(nn.Module):
 
 
 
+@support_torch_compile(
+dynamic_arg_dims={
+    "input_ids": 0,
+    "positions": -1,
+    "intermediate_tensors": 0,
+    "input_embeds": 0,
+})
 class LLaDAModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

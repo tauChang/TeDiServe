@@ -2401,10 +2401,6 @@ class SchedulerConfig:
 
     step_data_dir: Optional[str] = "./step_data"
     """Directory of the collected step data."""
-    eval_task: Optional[str] = "gsm8k"
-    """Eval task name. Only for saving step data. Not actually used in engine."""
-    gen_len: Optional[int] = None
-    """Generation length. Only for saving step data. Not actually used in engine."""
 
     def compute_hash(self) -> str:
         """

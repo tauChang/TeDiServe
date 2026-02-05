@@ -1,0 +1,135 @@
+{
+  "model": "GSAI-ML/LLaDA-8B-Instruct",
+  "config": {
+    "max_tokens": 128,
+    "temperature": 0.0,
+    "top_p": 1.0
+  },
+  "data": [
+    {
+      "id": 0,
+      "prompt": "You are given the following problem. Solve it step by step and provide only the final numerical answer on the last line.\n\nA company has 3 warehouses. The first ships 120 items per day, the second ships 95 items per day, and the third ships twice as many items per day as the second. Each item generates $1.75 in revenue. The company operates 6 days per week. What is the total weekly revenue?\n\n",
+      "response": "1. Calculate the number of items shipped per day by each warehouse.\n2. Calculate the total number of items shipped per day by all warehouses.\n3. Calculate the total daily revenue.\n4. Calculate the total weekly revenue.\n\n1. First warehouse: 120 items/day\n2. Second warehouse: 95 items/day\n3. Third warehouse: 190 items/day\n4. Total items/day: 405 items/day\n5. Total daily revenue: $678.75\n6. Total weekly revenue: $4072.50"
+    },
+    {
+      "id": 1,
+      "prompt": "Explain why the sky appears blue during the daytime. Your explanation must:\n1. Be exactly three paragraphs.\n2. Each paragraph must contain exactly two sentences.\n3. Do not use bullet points or equations.\n4. Do not mention the words 'physics' or 'wavelength'.\n\nBegin your explanation below:",
+      "response": "\n\nThe sky appears blue during the daytime because sunlight passes through the Earth's atmosphere. This scattering causes blue light to be dispersed in all directions. The blue light is more easily scattered than other colors, which is why the sky appears blue.\n\nThis scattering effect is more pronounced near the horizon, where the sun's light passes through a greater thickness of the atmosphere. As a result, the blue light is scattered in all directions, making the sky appear blue even at the horizon.\n\nThe scattering of blue light by the Earth's atmosphere creates a blue sky, which is why the sky appears blue during the daytime."
+    },
+    {
+      "id": 2,
+      "prompt": "Read the following paragraph and extract structured information.\n\nParagraph:\nIn 1813, Jane Austen published Pride and Prejudice, a novel that was well received in London and later adapted into multiple films, including a 2005 adaptation starring Keira Knightley.\n\nOutput the result strictly in JSON with the following fields:\n- author\n- title\n- publication_year\n- notable_adaptation_year\n- notable_actor\n\nJSON:",
+      "response": "\n```json\n{\n  \"author\": \"Jane Austen\",\n  \"title\": \"Pride and Prejudice\",\n  \"publication_year\": 1813,\n  \"notable_adaptation_year\": 2005,\n  \"notable_actor\": \"Keira Knightley\"\n}\n```"
+    },
+    {
+      "id": 3,
+      "prompt": "Consider the following pseudocode:\n\nfunction f(n):\n  if n <= 1: return 1\n  return n * f(n - 1)\n\nAnswer the following questions:\n1. What mathematical function does f compute?\n2. What is the value of f(7)?\n3. What is the time complexity in Big-O notation?\n\nProvide your answers as:\nFunction:\nValue:\nComplexity:",
+      "response": "\n\nFunction:\nValue:\nComplexity:"
+    },
+    {
+      "id": 4,
+      "prompt": "Translate the following English text into Spanish.\n\nText:\nHello! I hope you are doing well. Today is a good day to learn something new.\n\nConstraints:\n- Use neutral Latin American Spanish.\n- Keep punctuation consistent with the original.\n- Do not add or remove sentences.\n\nTranslation:",
+      "response": "\n\u00a1Hola! Espero que est\u00e9s bien. Hoy es un buen d\u00eda para aprender algo nuevo."
+    },
+    {
+      "id": 5,
+      "prompt": "Answer the following question concisely but completely.\n\nQuestion:\nWhat is entropy in information theory, and how does it differ from the everyday use of the word 'entropy'?\n\nAnswer in exactly five sentences:",
+      "response": "\n\nIn information theory, entropy is a measure of the uncertainty or randomness in a data set. It differs from the everyday use of the word 'entropy' in that it is a mathematical concept used to quantify the amount of information required to describe a system. Entropy in information theory is often referred to as the amount of information needed to encode a message. In everyday language, entropy is often associated with disorder or chaos, but in information theory, it is a precise concept that measures the amount of information required to convey a message. This distinction is crucial in fields such as data compression, communication theory, and quantum information theory."
+    },
+    {
+      "id": 6,
+      "prompt": "Given the sequence below, identify the rule and determine the next two numbers.\n\nSequence:\n2, 4, 8, 16, 32\n\nExplain the rule in one sentence, then list the next two numbers on a single line separated by a comma.",
+      "response": "\n\nThe rule of the sequence is that each number is obtained by multiplying the previous number by 2. The next two numbers in the sequence are 64, 128."
+    },
+    {
+      "id": 7,
+      "prompt": "Summarize the following text in exactly four bullet points.\n\nText:\nMachine learning systems are increasingly deployed at scale, requiring careful consideration of efficiency, latency, and resource utilization. Modern systems often rely on GPUs to accelerate computation, but GPU resources are expensive and shared across workloads. Efficient scheduling and batching can significantly improve throughput, but may introduce fairness and tail-latency concerns. System designers must balance these trade-offs carefully.\n\nSummary:",
+      "response": "\n- Machine learning systems are deployed at scale, requiring careful consideration of efficiency, latency, and resource utilization.\n- Modern systems rely on GPUs to accelerate computation, but GPU resources are expensive and shared across workloads.\n- Efficient scheduling and batching can improve throughput, but may introduce fairness and tail-latency concerns.\n- System designers must balance these trade-offs carefully."
+    },
+    {
+      "id": 8,
+      "prompt": "Produce a table with exactly three rows (excluding the header) and three columns.\n\nColumns:\nName | Square | Cube\n\nRows should correspond to the integers 2, 3, and 4.\nUse plain text with pipes ('|') as separators.\nDo not include any extra whitespace or commentary.",
+      "response": "\n| Name | Square | Cube |\n|------|-------|------|\n| 2    | 4     | 8    |\n| 3    | 9     | 27   |\n| 4    | 16    | 64   |"
+    },
+    {
+      "id": 9,
+      "prompt": "Write a haiku about winter.\n\nConstraints:\n- Exactly 3 lines\n- Syllable pattern: 5-7-5\n- Do not use the words 'snow', 'cold', or 'ice'\n- The final line must contain a verb\n\nHaiku:",
+      "response": "\nSilent night"
+    },
+    {
+      "id": 10,
+      "prompt": "Write a Python function that takes a list of integers and returns a new list containing only the even integers from the original list. \n\nConstraints:\n- Use list comprehensions.\n- Include type hints.\n- Add a docstring explaining the function.\n\nFunction:",
+      "response": "\n```python\ndef filter_even_integers(numbers: List[int]) -> List[int]:\n    \"\"\"\n    Filters a list of integers to return only the even integers.\n\n    Args:\n        numbers (List[int]): A list of integers.\n\n    Returns:\n        List[int]: A list containing only the even integers from the original list.\n    \"\"\"\n    return [num for num in numbers if num % 2 == 0]\n```"
+    },
+    {
+      "id": 11,
+      "prompt": "Analyze the causes and consequences of the fall of the Roman Empire.\n\nYour analysis must:\n1. Be structured into an introduction, body, and conclusion.\n2. Each section must contain at least two paragraphs.\n3. Avoid using the words 'decline' or 'collapse'.\n\nBegin your analysis below:",
+      "response": "\n\nIntroduction:\nThe fall of the Roman Empire is one of the most significant events in human history, marking the end of a powerful civilization and the beginning of the Middle Ages. This analysis will explore the causes and consequences of the fall of the Roman Empire, examining the complex interplay of factors that contributed to its demise and the far-reaching implications of its collapse.\n\nBody:\n"
+    },
+    {
+      "id": 12,
+      "prompt": "The following Python code contains a bug. Identify and fix the bug.\n\nCode:\ndef divide(a, b):\n    return a / b\n\nprint(divide(10, 0))\n\nProvide the corrected code and explain the fix in one sentence:",
+      "response": "\n\n```python\ndef divide(a, b):\n    if b == 0:\n        return \"Error: Division by zero\"\n    return a / b\n\nprint(divide(10, 0))\n```\n\nThe corrected code includes a check to handle the division by zero error."
+    },
+    {
+      "id": 13,
+      "prompt": "Transform the following CSV data into JSON format.\n\nCSV:\nname,age,city\nAlice,30,New York\nBob,25,Los Angeles\nCharlie,35,Chicago\n\nJSON:",
+      "response": "\n```json\n{\n  \"name\": \"Alice\",\n  \"age\": 30,\n  \"city\": \"New York\"\n},\n{\n  \"name\": \"Bob\",\n  \"age\": 25,\n  \"city\": \"Los Angeles\"\n},\n{\n  \"name\": \"Charlie\",\n  \"age\": 35,\n  \"city\": \"Chicago\"\n}\n```\n\nThis JSON format is an array of objects, where each object represents a row in the CSV data, with keys corresponding to the columns in the CSV."
+    },
+    {
+      "id": 14,
+      "prompt": "Solve the following logical puzzle:\n\nThree people (Alice, Bob, and Charlie) are wearing hats. Each hat is either red or blue. They can see the hats of the other two people but not their own. Alice says, 'I don't know my hat color.' Bob says, 'I don't know my hat color.' Charlie says, 'I know my hat color.'\n\nWhat is Charlie's hat color? Explain your reasoning in two sentences:",
+      "response": "\n\nCharlie's hat color is red. \n\nCharlie knows his hat color because he can see that Alice and Bob both don't know their hat colors, so his hat is red."
+    },
+    {
+      "id": 15,
+      "prompt": "Write an SQL query to retrieve the names of employees who earn more than $50,000 per year from a table named 'employees'. The table has the following columns: id, name, salary, department.\n\nQuery:",
+      "response": "\n\n```sql\nSELECT name\nFROM employees\nWHERE salary > 50000;\n```"
+    },
+    {
+      "id": 16,
+      "prompt": "Create a regular expression pattern to match email addresses. The pattern must:\n- Allow alphanumeric characters, dots, underscores, and hyphens before the '@'.\n- Require a domain name with only alphanumeric characters and dots.\n- End with a top-level domain of 2 to 6 letters.\n\nRegex:",
+      "response": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,6}$\n\nExplanation:\n- ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,6}$: This pattern matches email addresses that have alphanumeric characters, dots, underscores, and hyphens before the '@', followed by a domain name with only alphanumeric characters and dots, and ending with a top-level domain of 2 to 6 letters."
+    },
+    {
+      "id": 17,
+      "prompt": "Write a short story in exactly 50 words about a mysterious door. The story must:\n- Include dialogue\n- End with a question\n- Use past tense throughout\n\nStory:",
+      "response": "\n\nIn the heart of the abandoned mansion, Sarah found an old, dusty door. She whispered, \"Who's there?\" The door creaked open, revealing a dark, empty room. Sarah screamed, \"What's happening?\" The room grew colder, and she felt a chill run down her spine.\n\n"
+    },
+    {
+      "id": 18,
+      "prompt": "Prove that the sum of the first n positive integers equals n(n+1)/2.\n\nRequirements:\n- Use mathematical induction\n- Clearly state the base case and inductive step\n- Show all algebraic work\n\nProof:",
+      "response": "\n\nBase case: For n = 1, the sum of the first 1 positive integer is 1, which is equal to 1(1+1)/2 = 1.\n\nInductive step: Assume that the sum of the first k positive integers is k(k+1)/2. Then the sum of the first k+1 positive integers is k(k+1)/2 + (k+1) = (k+1)(k+2)/2.\n\nTherefore, by the principle of mathematical induction, the sum of the first n positive integers equals n(n+1)/2."
+    },
+    {
+      "id": 19,
+      "prompt": "Explain how the QuickSort algorithm works.\n\nYour explanation must:\n1. Describe the partitioning process in detail\n2. Explain the recursive structure\n3. Analyze best and worst-case time complexity\n4. Use exactly 4 paragraphs\n\nExplanation:",
+      "response": "\n\nQuickSort is a divide-and-conquer algorithm that works by partitioning an array into smaller sub-arrays. The partitioning process involves selecting a pivot element and rearranging the other elements in the array such that elements less than the pivot are on the left and elements greater than the pivot are on the right. The recursive structure of QuickSort is achieved by applying the same process to the sub-arrays. The best-case time complexity of QuickSort is O(n log n), while the worst-case time complexity is O(n^2). QuickSort is efficient for real-world data but can perform poorly on sorted or nearly sorted arrays."
+    },
+    {
+      "id": 20,
+      "prompt": "Create a JSON schema that validates objects with the following properties:\n- 'name': required string, minimum 2 characters\n- 'age': required integer between 0 and 120\n- 'email': optional string in valid email format\n\nSchema:",
+      "response": "\n{\n  \"$schema\": \"http://json-schema.org/draft-07/schema#\",\n  \"type\": \"object\",\n  \"properties\": {\n    \"name\": {\n      \"type\": \"string\",\n      \"minLength\": 2\n    },\n    \"age\": {\n      \"type\": \"integer\",\n      \"minimum\": 0,\n      \"maximum\": 120\n    },\n    \"email\": {\n      \"type\": \"string\",\n      \"format\": \"email\"\n    }\n  }\n}"
+    },
+    {
+      "id": 21,
+      "prompt": "Write a Python function that reads a file and handles potential errors gracefully.\n\nRequirements:\n- Handle FileNotFoundError and PermissionError specifically\n- Return appropriate error messages\n- Include proper exception logging\n- Add type hints and docstring\n\nFunction:",
+      "response": "\n```python\ndef read_file(file_path: str) -> str:\n    \"\"\"\n    Reads a file and handles potential errors gracefully.\n\n    Args:\n        file_path (str): The path to the file to read.\n\n    Returns:\n        str: The content of the file or an error message.\n    \"\"\"\n    try:\n        with open(file_path, 'r') as file:\n            return file.read()\n    except FileNotFoundError:\n        return \"File not found\"\n    except PermissionError:\n        return \"Permission denied\"\n```"
+    },
+    {
+      "id": 22,
+      "prompt": "Simplify the following Boolean expression using Boolean algebra rules:\n\nExpression: (A AND B) OR (NOT A AND B) OR (A AND NOT B)\n\nShow each step of simplification and state which rule you applied.\nProvide the final simplified form on the last line.",
+      "response": "\n\n1. (A AND B) OR (NOT A AND B) OR (A AND NOT B)\n2. Apply De Morgan's Law: (A AND B) OR (NOT A AND B) OR (A AND NOT B)\n3. Apply De Morgan's Law: (A AND B) OR (NOT A AND B) OR (A AND NOT B)\n4. Apply De Morgan's Law: (A AND B) OR (NOT A AND B) OR (A AND NOT B)\n\nFinal Simplified Expression: (A AND B) OR (A AND NOT B)"
+    },
+    {
+      "id": 23,
+      "prompt": "Design a REST API endpoint for managing user profiles.\n\nSpecify:\n- HTTP method and URL pattern\n- Request body format (JSON)\n- Response format for success and error cases\n- HTTP status codes\n\nAPI Specification:",
+      "response": "\n\nHTTP Method: POST\nURL Pattern: /api/user_profiles\n\nRequest Body: JSON\n\nResponse Body: JSON\n\nResponse Format:\n- Success: 201 Created\n- Error: 400 Bad Request\n- Error: 401 Unauthorized\n- Error: 404 Not Found\n- Error: 500 Internal Server Error\n\nHTTP Status Codes:\n- 201 Created\n- 400 Bad Request\n- 401 Unauthorized\n- 404 Not Found\n- 500 Internal Server Error"
+    },
+    {
+      "id": 24,
+      "prompt": "Implement a stack data structure in Python with the following methods:\npush(), pop(), peek(), is_empty(), and size().\n\nRequirements:\n- Use a list as the underlying storage\n- Handle edge cases (empty stack operations)\n- Include comprehensive docstrings\n\nImplementation:",
+      "response": "\n\nclass Stack:\n    def __init__(self):\n        self.items = []\n\n    def push(self, item):\n        self.items.append(item)\n\n    def pop(self):\n        if not self.is_empty():\n            return self.items.pop()\n        else:\n            raise IndexError(\"pop from an empty stack\")\n\n    def peek(self):\n        return self.items[-1]\n\n    def is_empty(self):\n        return len(self.items) == 0\n\n    def size(self):\n        return len(self.items)"
+    }
+  ]
+}

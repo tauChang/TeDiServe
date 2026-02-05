@@ -451,8 +451,6 @@ class EngineArgs:
     step_estimator_features_path: Optional[str] = SchedulerConfig.step_estimator_features_path
     step_estimator_features: Optional[List[str]] = SchedulerConfig.step_estimator_features
     step_data_dir: Optional[str] = SchedulerConfig.step_data_dir
-    eval_task: Optional[str] = SchedulerConfig.eval_task
-    gen_len: Optional[int] = SchedulerConfig.gen_len
     denoise_block_size: int = ModelConfig.denoise_block_size
     cache_prefix: bool = ModelConfig.cache_prefix
     cache_suffix: bool = ModelConfig.cache_suffix
@@ -910,10 +908,6 @@ class EngineArgs:
                                      **scheduler_kwargs["step_estimator_features"])
         scheduler_group.add_argument("--step-data-dir",
                                      **scheduler_kwargs["step_data_dir"])
-        scheduler_group.add_argument("--eval-task",
-                                     **scheduler_kwargs["eval_task"])
-        scheduler_group.add_argument("--gen-len",
-                                     **scheduler_kwargs["gen_len"])
         # Experiment arguments
         experiment_kwargs = get_kwargs(ExperimentConfig)
         experiment_group = parser.add_argument_group(
@@ -1328,8 +1322,6 @@ class EngineArgs:
             step_estimator_features_path=self.step_estimator_features_path,
             step_estimator_features=self.step_estimator_features,
             step_data_dir=self.step_data_dir,
-            eval_task=self.eval_task,
-            gen_len=self.gen_len,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:

@@ -20,7 +20,7 @@ async def main(args):
         return await client.completions.create(
             model=model,
             prompt=prompt,
-            max_tokens=256,
+            max_tokens=32,
             extra_body={"confidence_threshold": 0.9},
         )
 

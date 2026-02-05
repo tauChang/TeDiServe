@@ -619,7 +619,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             blk_table = self.input_batch.block_table[kv_cache_group_id]
             blk_table_tensor = blk_table.get_device_tensor()[:num_reqs]
-            slot_mapping = blk_table.slot_mapping[:total_num_scheduled_tokens]
             # logger.debug(
             #     f"in _prepare_inputs, "
             #     f"blk_tabler: {blk_table}, "
@@ -628,6 +627,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Fill unused with -1. Needed for reshape_and_cache in full cuda
             # graph mode.
             blk_table.slot_mapping[total_num_scheduled_tokens:].fill_(-1)
+            slot_mapping = blk_table.slot_mapping[:total_num_scheduled_tokens]
 
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=self.query_start_loc[:num_reqs + 1],
@@ -876,13 +876,45 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         #             f"intermediate_tensors: {intermediate_tensors}, ")
                         self._sync_device()
                         model_start_time = time.time()
+                        # logger.debug(f"input_ids: {input_ids}")
+                        # logger.debug(f"positions: {positions}")
+                        # logger.debug(f"intermediate_tensors: {intermediate_tensors}")
+                        # logger.debug(f"inputs_embeds: {inputs_embeds}")
+                        # # look at the first layer of the model kv cache
+                        # # logger.info(f"kv cache shape: {self.model.model.transformer.layers[0].self_attn.attn.kv_cache[0].shape}")
+                        # # logger.info(self.model.model.transformer.layers[0].self_attn.attn.kv_cache[0][:1])
+
+                        # # layer 0
+                        # logger.info(f"number of layers: {len(self.model.model.transformer.layers)}")
+                        # layer = self.model.model.transformer.layers[0]
+
+                        # # key cache tensor
+                        # key_cache = layer.self_attn.attn.kv_cache[0][0]
+                        # logger.info(f"key_cache shape: {key_cache.shape}")
+
+                        # # slot to inspect
+                        # for slot in [85, 293, 501, 709]:
+                        #     block_size = key_cache.shape[1]
+
+                        #     block_id = slot // block_size
+                        #     block_off = slot % block_size
+                        #     logger.info(f"block_id: {block_id}, block_off: {block_off}")
+
+                        #     # first KV head
+                        #     k_vec = key_cache[block_id, block_off, 0]
+
+                        #     logger.info(f"k_vec[:8] = {k_vec[:8]}")
+
+                        # logger.info(f"attn_metadata: {attn_metadata}")
                         model_output = self.model(
                             input_ids=input_ids,
                             positions=positions,
                             intermediate_tensors=intermediate_tensors,
                             inputs_embeds=inputs_embeds,
                         )
-                        self._sync_device()
+                        # logger.info(f"model_output shape: {model_output.shape}")
+                        # logger.info(f"model_output: {model_output}")
+                        # self._sync_device()
                         logger.debug(f"Model forward took {time.time() - model_start_time} "
                                     f"seconds")
 
@@ -920,9 +952,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
                         # sample_hidden_states = hidden_states[logits_indices]
                         # logits = self.model.compute_logits(sample_hidden_states, None)
-                        self._sync_device()
+                        # self._sync_device()
                         logits = self.model.compute_logits(hidden_states, None)
-                        self._sync_device()
+                        # self._sync_device()
                     if broadcast_pp_output:
                         model_output_broadcast_data = {
                             "logits": logits.contiguous(),
@@ -1321,7 +1353,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
         assert num_tokens <= self.scheduler_config.max_num_batched_tokens
-        max_num_reqs = self.scheduler_config.max_num_seqs
         # num_reqs = min(num_tokens, max_num_reqs)
         # if (self.model_config.cache_prefix and \
         #     self.model_config.cache_suffix) and \
@@ -1335,10 +1366,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # With more num_reqs, the attention computation becomes cheaper.
         # So here we use the worst case seq_len (least num_reqs) to profile
         # the worst case latency.
-        seq_len = min(num_tokens, self.max_model_len)
+        # seq_len = min(num_tokens, self.max_model_len)
         # num_reqs = max(1, num_tokens // seq_len)
-        num_reqs = max(1, -(-num_tokens // seq_len))  # Ceiling division
-        logger.debug(f"Dummy run with num_reqs: {num_reqs} and seq_len: {seq_len}")
+        # num_reqs = max(1, -(-num_tokens // seq_len))  # Ceiling division
+        # num_reqs = max(1, num_tokens // 32)
+        max_num_reqs = self.scheduler_config.max_num_seqs
+        num_reqs = min(num_tokens , max_num_reqs)
+        logger.debug(f"Dummy run with num_reqs: {num_reqs} and num_tokens: {num_tokens}")
         min_tokens_per_req = num_tokens // num_reqs
         num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
         num_scheduled_tokens_list[-1] += num_tokens % num_reqs
@@ -1349,14 +1383,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         attn_metadata: Optional[dict[str, Any]] = None
         # if capture_attn_cudagraph:
-        if use_attn_metadata:
+        # if use_attn_metadata:
+        if capture_attn_cudagraph or use_attn_metadata:
             attn_metadata = {}
 
             # Make sure max_model_len is used at the graph capture time.
-            # self.seq_lens_np[:num_reqs] = self.max_model_len
-            self.seq_lens_np[:num_reqs] = seq_len
+            self.seq_lens_np[:num_reqs] = self.max_model_len
+            self.seq_lens_np[num_reqs:] = 0
             self.seq_lens[:num_reqs].copy_(self.seq_lens_cpu[:num_reqs],
                                            non_blocking=True)
+            seq_lens = self.seq_lens[:num_reqs]
 
             cu_num_tokens, arange = self._get_cumsum_and_arange(
             num_scheduled_tokens)
@@ -1383,7 +1419,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_computed_tokens_cpu_tensor[:num_reqs],
                     num_reqs=num_reqs,
                     num_actual_tokens=num_tokens,
-                    max_query_len=seq_len,
+                    max_query_len=num_tokens,
                     block_table_tensor=self.input_batch.block_table[
                         kv_cache_group_id].get_device_tensor()[:num_reqs],
                     slot_mapping=self.input_batch.

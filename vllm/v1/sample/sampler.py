@@ -166,8 +166,152 @@ class Sampler(nn.Module):
 
         noise = torch.rand_like(logits, dtype=torch.float32)
         # gumbel_noise = (-torch.log(noise)) ** temperature
-        
+    
     def unmask(
+        self,
+        is_mask: torch.Tensor,
+        logits: torch.Tensor,
+        exec_start_pos: torch.Tensor,
+        num_exec_tokens: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        confidence_thresholds: list[float],
+        confidences: torch.Tensor,
+        req_ids: list[str],
+        req_id_to_index: dict[str, int],
+    ):
+        """
+        GPU-first unmasking (equivalent semantics to original):
+        - no early .cpu()
+        - no .item() in hot path
+        - avoids Python branching on GPU values for the fallback path
+        - returns the same Python structures as before
+        """
+        device = logits.device
+        assert logits.shape[0] == is_mask.shape[0]
+
+        # ---- GPU computation ----
+        logits_with_noise = self.add_noise_to_logits(logits, sampling_metadata)
+
+        x_0 = torch.argmax(logits_with_noise, dim=-1)              # [N]
+        p = torch.softmax(logits_with_noise, dim=-1)               # [N, V]
+        confidence = p.gather(-1, x_0.unsqueeze(-1)).squeeze(-1)   # [N]
+
+        unmasked_pairs_padded_gpu: list[torch.Tensor] = []   # each: [k+1, 2]
+        unmasked_keep_mask_gpu: list[torch.Tensor] = []      # each: [k+1] bool
+        confidence_stats_gpu: list[torch.Tensor] = []        # each: [5]
+
+        output_ranges = self.get_output_range(
+            sampling_metadata, exec_start_pos, num_exec_tokens
+        )
+
+        for i, ranges in enumerate(output_ranges):
+            start, end = ranges["unmask_range"]
+            block_start = ranges["block_start"]
+            output_start, output_end = ranges["output_confidence_range"]
+            output_pos_start, output_pos_end = ranges["output_pos_range"]
+
+            x_0_slice = x_0[start:end]                    # [T]
+            confidence_slice = confidence[start:end]      # [T]
+            is_mask_slice = is_mask[start:end]            # [T] (bool)
+
+            # Same invariant as original: there must be at least one masked token.
+            # NOTE: using this assert on a GPU tensor can sync; keep if you want safety.
+            # assert is_mask_slice.any(), f"No masked tokens in range {start}:{end}"
+
+            # Masked positions relative to this slice: [M]
+            masked_indices = is_mask_slice.nonzero(as_tuple=False).squeeze(1)
+            masked_confidences = confidence_slice[masked_indices]  # [M]
+
+            # Threshold on GPU (scalar)
+            thresh = torch.tensor(
+                confidence_thresholds[i],
+                device=device,
+                dtype=masked_confidences.dtype,
+            )
+
+            selected_mask = masked_confidences > thresh            # [M] bool
+            selected_indices = masked_indices[selected_mask]       # [k] (k may be 0)
+
+            # Fallback: best masked token index (scalar)
+            best_idx = masked_indices[masked_confidences.argmax()]  # []
+            fallback = best_idx.view(1)                              # [1]
+
+            # Always append fallback to ensure non-empty candidate list: [k+1]
+            indices_with_fallback = torch.cat([selected_indices, fallback], dim=0)
+
+            # Keep first k if k>0 else keep first 1 (fallback only)
+            k = selected_mask.sum()  # scalar int tensor
+            keep_n = torch.where(
+                k > 0,
+                k,
+                torch.ones((), device=device, dtype=k.dtype),
+            )  # scalar int tensor, either k or 1
+
+            # Boolean keep mask over [k+1]
+            pos = torch.arange(
+                indices_with_fallback.numel(),
+                device=device,
+                dtype=keep_n.dtype,
+            )
+            keep_mask = pos < keep_n  # [k+1] bool
+
+            # Tokens and absolute positions for all candidates [k+1]
+            selected_tokens_all = x_0_slice[indices_with_fallback]         # [k+1]
+            abs_positions_all = indices_with_fallback + block_start        # [k+1]
+
+            # Store padded pairs + keep mask (no CPU conversion yet)
+            pairs_padded = torch.stack([abs_positions_all, selected_tokens_all], dim=-1)  # [k+1, 2]
+            unmasked_pairs_padded_gpu.append(pairs_padded)
+            unmasked_keep_mask_gpu.append(keep_mask)
+
+            # ---- confidence copy (GPU) ----
+            req_id = req_ids[i]
+            req_index = req_id_to_index[req_id]
+
+            output_conf_slice = confidence[output_start:output_end]
+            confidences[req_index, output_pos_start:output_pos_end] = output_conf_slice
+
+            # ---- confidence stats (GPU) ----
+            num_prompt_tokens = sampling_metadata.num_prompt_tokens[i]
+            num_tokens = sampling_metadata.num_tokens[i]
+            output_conf = confidences[req_index, num_prompt_tokens:num_tokens]
+
+            output_min = output_conf.min()
+            output_avg = output_conf.mean()
+            q25, med, q75 = torch.quantile(
+                output_conf,
+                torch.tensor([0.25, 0.5, 0.75], device=device, dtype=output_conf.dtype),
+            )
+            confidence_stats_gpu.append(torch.stack([output_avg, output_min, q25, med, q75]))
+
+        # ---- SINGLE synchronization boundary before Python materialization ----
+        torch.cuda.synchronize()
+
+        # ---- CPU conversion (cold path) ----
+        unmasked_tokens: list[list[tuple[int, int]]] = []
+        for pairs_padded, keep_mask in zip(unmasked_pairs_padded_gpu, unmasked_keep_mask_gpu):
+            pairs_cpu = pairs_padded.cpu()
+            mask_cpu = keep_mask.cpu()
+            kept = pairs_cpu[mask_cpu]  # shape [k,2] or [1,2]
+            unmasked_tokens.append([(int(pos), int(tok)) for pos, tok in kept.tolist()])
+
+        confidence_stats = [
+            {
+                "output_avg": stats[0].item(),
+                "output_min": stats[1].item(),
+                "output_q25": stats[2].item(),
+                "output_median": stats[3].item(),
+                "output_q75": stats[4].item(),
+            }
+            for stats in confidence_stats_gpu
+        ]
+        # logger.info(f"unmasked_tokens: {unmasked_tokens}")
+
+        return unmasked_tokens, confidence_stats
+
+
+        
+    def unmask_old(
         self,
         is_mask: torch.Tensor,
         logits: torch.Tensor,
@@ -191,7 +335,7 @@ class Sampler(nn.Module):
         
         logits_with_noise = self.add_noise_to_logits(logits, sampling_metadata)
         x_0 = torch.argmax(logits_with_noise, dim=-1)
-        # logger.debug(f"x_0: {x_0}")
+        logger.debug(f"x_0: {x_0}")
         p = F.softmax(logits_with_noise, dim=-1)
         confidence = p.gather(-1, x_0.unsqueeze(-1)).squeeze(-1)
 
@@ -216,7 +360,7 @@ class Sampler(nn.Module):
             confidence_slice = confidence[start:end]
             is_mask_slice = is_mask[start:end]
 
-            # logger.debug(f"confidence slice: {confidence_slice}")
+            logger.debug(f"confidence slice: {confidence_slice}")
             # logger.debug(f"is mask slice: {is_mask_slice}")
             
             assert is_mask_slice.any(), f"No masked tokens in range {start}:{end}"

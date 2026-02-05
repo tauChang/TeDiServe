@@ -39,7 +39,7 @@ SCHEDULER_CLASS=vllm.v1.core.sched.infaas_aligned_scheduler.InFaaSAlignedSchedul
 # SCHEDULER_CLASS=vllm.v1.core.sched.urgent_opportunistic_scheduler_max_best_effort.UrgentOpportunisticScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.urgent_opportunistic_scheduler_min_best_effort.UrgentOpportunisticScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.urgent_opportunistic_with_budget_scheduler.UrgentOpportunisticWithBudgetScheduler
-DEFAULT_CONFIDENCE_THRESHOLD=0.7
+DEFAULT_CONFIDENCE_THRESHOLD=0.9
 NUM_PROFILE_RUNS=8
 NUM_PROFILE_WARMUP_RUNS=3
 STEP_ESTIMATOR_MODEL_CLASS=vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine.LightGradientBoostMachine
@@ -51,10 +51,10 @@ LOG_DIR=$EXPERIMENT_DIR/logs
 mkdir -p $LOG_DIR
 
 DENOISE_BLOCK_SIZE=32
-CACHE_PREFIX=false
-CACHE_SUFFIX=false
-# CACHE_PREFIX=true
-# CACHE_SUFFIX=true
+# CACHE_PREFIX=false
+# CACHE_SUFFIX=false
+CACHE_PREFIX=true
+CACHE_SUFFIX=true
 
 if [ "$CACHE_PREFIX" = true ] && [ "$CACHE_SUFFIX" = true ]; then
     # use dual_cache_256_32 model
@@ -127,7 +127,7 @@ if [ "$TASK" = "mmlu_pro" ]; then
 fi
 
 # NUM_CONCURRENT=$TOTAL_NUM_REQUESTS
-NUM_CONCURRENT=1
+NUM_CONCURRENT=100
 OUTPUT_LENGTH=256
 WRITE_RESULTS=true
 RESULTS_DIR=$EXPERIMENT_DIR/results
@@ -152,20 +152,18 @@ OUTPUT_PATH="${RESULTS_DIR}/${TASK}_${LIMIT}/${OUTPUT_LENGTH}/${SAFE_MODEL_NAME}
 # Build the commands
 VLLM_CMD="vllm serve --trust-remote-code ${MODEL} \
     --distributed-executor-backend ray \
-    --enforce-eager \
     --num-gpus-per-model-executor ${NUM_GPUS_PER_MODEL_EXECUTOR} \
     --scheduler_cls ${SCHEDULER_CLASS} \
     --default-confidence-threshold ${DEFAULT_CONFIDENCE_THRESHOLD} \
     --num-profile-runs ${NUM_PROFILE_RUNS} \
     --num-profile-warmup-runs ${NUM_PROFILE_WARMUP_RUNS} \
-    --eval-task ${TASK}_${LIMIT} \
-    --gen-len ${OUTPUT_LENGTH} \
     --step-estimator-model-class ${STEP_ESTIMATOR_MODEL_CLASS} \
     --step-estimator-model-path ${STEP_ESTIMATOR_MODEL_PATH} \
     --step-estimator-features-path ${STEP_ESTIMATOR_FEATURES_PATH} \
     --step-data-dir ${STEP_DATA_DIR} \
     --experiment-dir ${EXPERIMENT_DIR} \
     --total-num-requests ${TOTAL_NUM_REQUESTS} \
+    --compilation-config '{\"full_cuda_graph\": true}' \
     "
 
 if [ "$CACHE_PREFIX" = "true" ]; then

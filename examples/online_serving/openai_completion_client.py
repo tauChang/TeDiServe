@@ -29,16 +29,23 @@ def main(args):
     model = models.data[0].id
 
     # Completion API
+    import time
+    start_time = time.time()
     completion = client.completions.create(
         model=model,
-        prompt="Who am I?",
+        # prompt="Hello " * 1791,
+        prompt="Hello " * 511,
+        # prompt="Question: Janet\u2019s ducks lay 168 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?\nAnswer:",
+        # prompt="You are given the following problem. Solve it step by step and provide only the final numerical answer on the last line.\n\nA company has 3 warehouses. The first ships 120 items per day, the second ships 95 items per day, and the third ships twice as many items per day as the second. Each item generates $1.75 in revenue. The company operates 6 days per week. What is the total weekly revenue?\n\nExplain.",
+        # prompt="Why is PhD so hard?",
         echo=False,
-        n=2,
+        n=1,
         # min_tokens=16,
-        max_tokens=1024,
+        max_tokens=128,
         # stream=args.stream,
         # logprobs=3,
     )
+    print(f"Time taken: {time.time() - start_time} seconds")
 
     print("-" * 50)
     print("Completion results:")
@@ -47,6 +54,11 @@ def main(args):
             print(c)
     else:
         print(completion)
+        for x in completion.choices:
+            print(f"Choice {x.index}:")
+            print(x.text)
+            print(f"length: {len(x.text)}")
+            print()
     print("-" * 50)
 
 
