@@ -4,14 +4,13 @@
 from __future__ import annotations
 
 import bisect
-from collections import defaultdict, OrderedDict
+from collections import defaultdict, OrderedDict, deque
 from collections.abc import Iterable
 import heapq
 import itertools
 import json
 import os
 import time
-import copy
 from typing import Any, Optional, Union
 from enum import Enum, IntEnum
 
@@ -95,12 +94,12 @@ class ExecutorState:
     
     def add_request(self, request: Request) -> None:
         req_id = request.request_id
-        logger.debug(f"Executor {self.executor_id} adding request {req_id}.")
+        logger.debug('Executor %s adding request %s.', self.executor_id, req_id)
         self.req_ids.add(req_id)
         self.req_to_tokens_needed[req_id] = request.num_tokens
 
     def remove_request(self, req_id: str) -> None:
-        logger.debug(f"Executor {self.executor_id} removing request {req_id}.")
+        logger.debug('Executor %s removing request %s.', self.executor_id, req_id)
         self.req_ids.discard(req_id)
         self.req_to_tokens_needed.pop(req_id)
         if req_id in self.pending_request_removals:
@@ -108,34 +107,34 @@ class ExecutorState:
     
     def mark_pending_request_addition(self, request: Request) -> None:
         req_id = request.request_id
-        logger.debug(f"Executor {self.executor_id} marking pending addition of request {req_id}.")
+        logger.debug('Executor %s marking pending addition of request %s.', self.executor_id, req_id)
         self.pending_request_additions.add(req_id)
         self.req_to_tokens_needed[req_id] = request.num_tokens
     
     def mark_pending_request_removal(self, req_id: str) -> None:
-        logger.debug(f"Executor {self.executor_id} marking pending removal of request {req_id}.")
+        logger.debug('Executor %s marking pending removal of request %s.', self.executor_id, req_id)
         self.pending_request_removals.add(req_id)
     
     def unmark_pending_request_addition(self, req_id: str) -> None:
-        logger.debug(f"Executor {self.executor_id} unmarking pending addition of request {req_id}.")
+        logger.debug('Executor %s unmarking pending addition of request %s.', self.executor_id, req_id)
         assert req_id in self.pending_request_additions
         self.pending_request_additions.discard(req_id)
         self.req_to_tokens_needed.pop(req_id, None)
     
     def unmark_pending_request_removal(self, req_id: str) -> None:
-        logger.debug(f"Executor {self.executor_id} unmarking pending removal of request {req_id}.")
+        logger.debug('Executor %s unmarking pending removal of request %s.', self.executor_id, req_id)
         assert req_id in self.pending_request_removals
         self.pending_request_removals.discard(req_id)
     
     def commit_pending_request_addition(self, req_id: str) -> None:
-        logger.debug(f"Executor {self.executor_id} committing pending addition of request {req_id}.")
+        logger.debug('Executor %s committing pending addition of request %s.', self.executor_id, req_id)
         assert req_id in self.pending_request_additions
         assert req_id not in self.req_ids
         self.pending_request_additions.discard(req_id)
         self.req_ids.add(req_id)
     
     def commit_pending_request_removal(self, req_id: str) -> None:
-        logger.debug(f"Executor {self.executor_id} committing pending removal of request {req_id}.")
+        logger.debug('Executor %s committing pending removal of request %s.', self.executor_id, req_id)
         assert req_id in self.pending_request_removals
         assert req_id in self.req_ids
         self.pending_request_removals.discard(req_id)
@@ -509,6 +508,39 @@ class InFaaSAlignedScheduler(SchedulerInterface):
 
         self.request_added_or_removed = False
         self.requests_need_update_step_estimates: list[str] = []
+        self.max_num_unfinished_requests = (
+            self.scheduler_config.max_num_unfinished_requests)
+        self.deferred_requests: deque[Request] = deque()
+
+    def _admit_request(self, request: Request) -> None:
+        logger.debug('Scheduler adding request %s', request.request_id)
+        self.requests[request.request_id] = request
+        self.request_states[request.request_id] = RequestState(request)
+        self.requests_need_update_step_estimates.append(request.request_id)
+        if self.log_stats:
+            request.record_event(EngineCoreEventType.QUEUED)
+        self.system_logger.log()
+        self.request_added_or_removed = True
+
+    def _admit_deferred_requests(self) -> None:
+        while self.deferred_requests and (
+                self.max_num_unfinished_requests is None or
+                self.get_num_unfinished_requests() <
+                self.max_num_unfinished_requests):
+            request = self.deferred_requests.popleft()
+            self._admit_request(request)
+
+    def _drop_deferred_requests(self, request_ids: set[str]) -> None:
+        if not self.deferred_requests:
+            return
+        kept_requests: deque[Request] = deque()
+        for request in self.deferred_requests:
+            if request.request_id in request_ids:
+                logger.debug("Dropping deferred request %s due to abort.",
+                             request.request_id)
+                continue
+            kept_requests.append(request)
+        self.deferred_requests = kept_requests
     
     def get_profile_latency(self, tp_degree: int, batch_size: int) -> float:
         ceiling_batch_size, per_step_latency = self.latency_profiles[tp_degree].lookup(batch_size)
@@ -526,14 +558,13 @@ class InFaaSAlignedScheduler(SchedulerInterface):
     def is_possible_to_meet_slo(self, req_id: str):
         pred_remaining_time = self.get_min_time_left(req_id) * self.request_states[req_id].pred_num_steps_left[self.candidate_confidence_thresholds[-1]]
         remaining_time_lower_bound = pred_remaining_time * 0.7 # assume 30% error
-        logger.debug(f"Request {req_id} possible to meet SLO check: "
-                     f"slo_time_remaining={self.requests[req_id].slo_time_remaining}, "
-                     f"pred_remaining_time={pred_remaining_time}, "
-                     f"remaining_time_lower_bound={remaining_time_lower_bound}")
+        logger.debug('Request %s possible to meet SLO check: slo_time_remaining=%s, pred_remaining_time=%s, remaining_time_lower_bound=%s', req_id, self.requests[req_id].slo_time_remaining, pred_remaining_time, remaining_time_lower_bound)
         return self.requests[req_id].slo_time_remaining > remaining_time_lower_bound
         # return self.requests[req_id].slo_time_remaining > self.get_min_time_left(req_id) * self.request_states[req_id].pred_num_steps_left[
     
     async def schedule(self) -> SchedulerOutput:
+        self._admit_deferred_requests()
+
         # utils
         def determine_new_exec_tokens(request: Request) -> int:
             request.exec_start_pos = 0
@@ -547,10 +578,7 @@ class InFaaSAlignedScheduler(SchedulerInterface):
             request.num_exec_tokens = request.denoise_block_size if \
                 (self.cache_suffix and not request.is_start_of_new_block) \
                     else len(request._all_token_ids) - request.exec_start_pos
-            logger.debug(f"determining running exec tokens for request {request.request_id}: "
-                         f"exec_start_pos={request.exec_start_pos}, "
-                         f"num_exec_tokens={request.num_exec_tokens}"
-                         f"is_start_of_new_block={request.is_start_of_new_block}")
+            logger.debug('determining running exec tokens for request %s: exec_start_pos=%s, num_exec_tokens=%sis_start_of_new_block=%s', request.request_id, request.exec_start_pos, request.num_exec_tokens, request.is_start_of_new_block)
             
             return request.num_exec_tokens
         
@@ -572,7 +600,7 @@ class InFaaSAlignedScheduler(SchedulerInterface):
                     request.num_tokens,
                 )
                 assert new_blocks is not None
-                logger.debug(f"request {request.request_id} allocated new blocks {new_blocks} on executor {executor_id}")
+                logger.debug('request %s allocated new blocks %s on executor %s', request.request_id, new_blocks, executor_id)
 
             req_to_new_block_ids[executor_id][request.request_id] = \
                 self.kv_cache_managers[executor_id].get_block_ids(
@@ -606,17 +634,14 @@ class InFaaSAlignedScheduler(SchedulerInterface):
                     req_to_new_block_ids.pop(executor_id)
             
             self._free_request_on_executor(request, executor_id, False, False)
-            logger.debug(f"Request {request.request_id} removed from executor {executor_id} and freed.")
+            logger.debug('Request %s removed from executor %s and freed.', request.request_id, executor_id)
 
             request.status = RequestStatus.WAITING
             
         
         def find_best_executor(candidate_executors: list[int], req_id: str, 
                                cur_executor_id: Optional[int] = None) -> Optional[int]:
-            logger.debug(f"in find_best_executor."
-                         f"request {req_id}, "
-                            f"candidate_executors: {candidate_executors}, "
-                            f"cur_executor_id: {cur_executor_id}")
+            logger.debug('in find_best_executor.request %s, candidate_executors: %s, cur_executor_id: %s', req_id, candidate_executors, cur_executor_id)
             if cur_executor_id is not None:
                 cur_batch_size = self.executor_states[cur_executor_id].get_projected_batch_size()
                 cur_step_latency = self.get_profile_latency(
@@ -633,25 +658,25 @@ class InFaaSAlignedScheduler(SchedulerInterface):
             candidate_executors.sort(
                 key=lambda ex_id: self.executor_states[ex_id].get_projected_batch_size(),
             )
-            logger.debug(f"Sorted candidate executors by projected batch size: {candidate_executors}")
-            logger.debug(f"their projected batch sizes: {[self.executor_states[ex_id].get_projected_batch_size() for ex_id in candidate_executors]}")
+            logger.debug('Sorted candidate executors by projected batch size: %s', candidate_executors)
+            logger.debug('their projected batch sizes: %s', [self.executor_states[ex_id].get_projected_batch_size() for ex_id in candidate_executors])
 
             for ex_id in candidate_executors:
                 if ex_id == cur_executor_id:
                     continue
-                logger.debug(f"looking at executor {ex_id}")
+                logger.debug('looking at executor %s', ex_id)
                 projected_batch_size = self.executor_states[ex_id].get_projected_batch_size()
                 if projected_batch_size + num_tokens > self.max_num_scheduled_tokens:
-                    logger.debug(f"Can't consider executor {ex_id} due to projected batch size {projected_batch_size + num_tokens} > max {self.max_num_scheduled_tokens}. Skipping.")
+                    logger.debug("Can't consider executor %s due to projected batch size %s > max %s. Skipping.", ex_id, projected_batch_size + num_tokens, self.max_num_scheduled_tokens)
                     # later executors will only have larger projected batch sizes
                     break
                 migrated_step_latency = self.get_profile_latency(
                     self.executor_states[ex_id].tp_degree,
                     projected_batch_size + num_tokens)[1]
-                logger.debug(f"migrated_step_latency: {migrated_step_latency}")
-                logger.debug(f"cur_step_latency: {cur_step_latency}")
+                logger.debug('migrated_step_latency: %s', migrated_step_latency)
+                logger.debug('cur_step_latency: %s', cur_step_latency)
                 if migrated_step_latency < best_step_latency:
-                    logger.debug(f"Better latency found on executor {ex_id}: {migrated_step_latency} < current {cur_step_latency}")
+                    logger.debug('Better latency found on executor %s: %s < current %s', ex_id, migrated_step_latency, cur_step_latency)
                     best_executor_id = ex_id
                     best_step_latency = migrated_step_latency
             return best_executor_id
@@ -674,28 +699,31 @@ class InFaaSAlignedScheduler(SchedulerInterface):
                 self.update_executors()
 
             with self.schedule_profiler.section("copy"):
-                old_request_states = copy.deepcopy(self.request_states)
+                old_executor_by_req_id = {
+                    req_id: req_state.executor_id
+                    for req_id, req_state in self.request_states.items()
+                }
 
             with self.schedule_profiler.section("init"):
-                logger.debug(f"start of schedule, executors manager: {self.executors_manager}")
+                logger.debug('start of schedule, executors manager: %s', self.executors_manager)
                 idle_executors = []
                 idle_not_accepting_executors = []
 
                 for executor_id in self.executors_manager.executors:
                     if self.executors_manager.executors[executor_id].is_idle():
-                        logger.debug(f"executor {executor_id} is idle. Status transition: IDLE -> CONSIDERED_FOR_SCHEDULING")
+                        logger.debug('executor %s is idle. Status transition: IDLE -> CONSIDERED_FOR_SCHEDULING', executor_id)
                         self.executors_manager.executors[executor_id].set_considered_for_scheduling()
                         idle_executors.append(executor_id)
                     elif self.executors_manager.executors[executor_id].is_idle_not_accepting_new_requests():
-                        logger.debug(f"executor {executor_id} is idle_not_accepting_new_requests. Status transition: IDLE_NOT_ACCEPTING_NEW_REQUESTS -> CONSIDERED_FOR_SCHEDULING")
+                        logger.debug('executor %s is idle_not_accepting_new_requests. Status transition: IDLE_NOT_ACCEPTING_NEW_REQUESTS -> CONSIDERED_FOR_SCHEDULING', executor_id)
                         self.executors_manager.executors[executor_id].set_considered_for_scheduling()
                         idle_not_accepting_executors.append(executor_id)
                     else:
-                        logger.debug(f"executor {executor_id} is not idle. Skip.")
+                        logger.debug('executor %s is not idle. Skip.', executor_id)
 
                 # idle_executors are guranteed not killed from now on
-                logger.debug(f"idle executors: {idle_executors}")
-                logger.debug(f"idle not accepting executors: {idle_not_accepting_executors}")
+                logger.debug('idle executors: %s', idle_executors)
+                logger.debug('idle not accepting executors: %s', idle_not_accepting_executors)
 
                 scheduled_new_reqs: dict[int, list[Request]] = defaultdict(list)
                 scheduled_resumed_reqs: dict[int, list[Request]] = defaultdict(list)
@@ -709,7 +737,7 @@ class InFaaSAlignedScheduler(SchedulerInterface):
                 requests_in_scheduler_output = set()
 
                 if len(idle_executors) == 0 and len(idle_not_accepting_executors) == 0:
-                    logger.debug(f"No idle executors available for scheduling. Exiting schedule.")
+                    logger.debug('No idle executors available for scheduling. Exiting schedule.')
                     return {}
 
                 schedulable_executors = [e_id for e_id in self.executor_states \
@@ -718,11 +746,11 @@ class InFaaSAlignedScheduler(SchedulerInterface):
 
             with self.schedule_profiler.section("stage 0"):
                 # Deal with all pending changes
-                logger.debug(f"Start pending remove changes")
+                logger.debug('Start pending remove changes')
                 for executor_id in idle_executors + idle_not_accepting_executors:
                     # note that req_ids_to_remove changes sizes during execution
                     for req_id in list(self.executor_states[executor_id].pending_request_removals):
-                        logger.debug(f"Removing pending request {req_id} from its executor {executor_id}")
+                        logger.debug('Removing pending request %s from its executor %s', req_id, executor_id)
                         assert self.request_states[req_id].is_running
                         assert self.request_states[req_id].executor_id == executor_id
                         assert self.request_states[req_id].pending_executor_id is None
@@ -736,7 +764,7 @@ class InFaaSAlignedScheduler(SchedulerInterface):
 
                     logger.debug("\n")
                             
-                logger.debug(f"Start pending add changes")
+                logger.debug('Start pending add changes')
                 for executor_id in idle_executors + idle_not_accepting_executors:
                     # note that pending_request_additions changes sizes during execution
                     for req_id in list(self.executor_states[executor_id].pending_request_additions):
@@ -744,14 +772,14 @@ class InFaaSAlignedScheduler(SchedulerInterface):
                             self.request_states[req_id].is_running
                         if self.request_states[req_id].is_scheduled:
                             # the request is done being removed.
-                            logger.debug(f"Adding pending request {req_id} to its executor {executor_id}")
+                            logger.debug('Adding pending request %s to its executor %s', req_id, executor_id)
                             self.executor_states[executor_id].commit_pending_request_addition(req_id)
                             self.request_states[req_id].commit_pending_executor()
                             # requests_changed.add(req_id)
                             requests_in_scheduler_output.add(req_id)
                         elif self.request_states[req_id].is_running:
                             3/0 # should not happen
-                            logger.debug(f"Request {req_id} still on executor {self.request_states[req_id].executor_id}. Cannot add to executor {executor_id} yet.")
+                            logger.debug('Request %s still on executor %s. Cannot add to executor %s yet.', req_id, self.request_states[req_id].executor_id, executor_id)
                             # remains in running_snapshot
                         else:
                             raise Exception(f"Request {req_id} shouldn't be in unscheduled_snapshot.")
@@ -762,11 +790,11 @@ class InFaaSAlignedScheduler(SchedulerInterface):
                     self.executor_states[executor_id].has_no_pending_changes()
                     for executor_id in idle_executors + idle_not_accepting_executors
                 )
-                logger.debug(f"End pending changes\n")
+                logger.debug('End pending changes\n')
             
             with self.schedule_profiler.section("stage 1"):
                 # A (keep request on executor if possible)
-                logger.debug(f"Start A (Looking at running requests)")
+                logger.debug('Start A (Looking at running requests)')
                 start_time = time.time()
                 # for executor_id in idle_executors + idle_not_accepting_executors:
                 # increaasing load
@@ -774,31 +802,31 @@ class InFaaSAlignedScheduler(SchedulerInterface):
                     idle_executors + idle_not_accepting_executors,
                     key=lambda e_id: self.executor_states[e_id].get_batch_size()
                 ):
-                    logger.debug(f"Processing executor {executor_id}")
+                    logger.debug('Processing executor %s', executor_id)
                     for req_id in list(self.executor_states[executor_id].req_ids):
-                        logger.debug(f"Checking request {req_id} on executor {executor_id}.")
-                        logger.debug(f"keeping request {req_id} on executor {executor_id} if possible.")
+                        logger.debug('Checking request %s on executor %s.', req_id, executor_id)
+                        logger.debug('keeping request %s on executor %s if possible.', req_id, executor_id)
                         if executor_id in idle_not_accepting_executors:
-                            logger.debug(f"Executor {executor_id} not accepting new requests. Removing request {req_id}.")
+                            logger.debug('Executor %s not accepting new requests. Removing request %s.', executor_id, req_id)
                             self.executor_states[executor_id].remove_request(req_id)
                             self.request_states[req_id].remove_executor()
                             self.request_states[req_id].remove_pending_executor()
                             requests_in_scheduler_output.add(req_id)
                             continue
                         else:
-                            logger.debug(f"keep it")
+                            logger.debug('keep it')
                             requests_in_scheduler_output.add(req_id)
                             
                     if executor_id in idle_executors:
                         schedulable_executors.append(executor_id)
-                logger.debug(f"End A\n")
-                logger.debug(f"A took {time.time() - start_time} seconds")
+                logger.debug('End A\n')
+                logger.debug('A took %s seconds', time.time() - start_time)
                 # finished A for all executors
 
             with self.schedule_profiler.section("stage 2"):
                 # B
                 start_time = time.time()
-                logger.debug(f"Start B (schedule unscheduled requests)")
+                logger.debug('Start B (schedule unscheduled requests)')
                 unscheduled_requests = [r_id for r_id in self.request_states if self.request_states[r_id].is_unscheduled]
                 # first, those that can meet SLO, in increasing slo time remaining order (earliest slo deadline first)
                 # followed by those that already violates SLOs, in increasing slo time remaining order (most late first)
@@ -825,14 +853,14 @@ class InFaaSAlignedScheduler(SchedulerInterface):
                 
                 for req_id in unscheduled_requests:
                     request = self.requests[req_id]
-                    logger.debug(f"Processing waiting unscheduled request {req_id}.")
+                    logger.debug('Processing waiting unscheduled request %s.', req_id)
                     
                     best_executor_id = find_best_executor(
                         schedulable_executors, req_id, None)
                     if best_executor_id is not None:
                         # scheduling this request to this executor
                         if best_executor_id in idle_executors:
-                            logger.debug(f"Executor {best_executor_id} is idle, so adding request {req_id} to it.")
+                            logger.debug('Executor %s is idle, so adding request %s to it.', best_executor_id, req_id)
                             self.executor_states[best_executor_id].add_request(request)
                             self.request_states[req_id].set_executor(best_executor_id, RequestStatePriority.NORMAL,
                                                                         self.default_confidence_threshold)
@@ -840,17 +868,17 @@ class InFaaSAlignedScheduler(SchedulerInterface):
                                                                              self.default_confidence_threshold)
                             requests_in_scheduler_output.add(req_id)
                         else:
-                            logger.debug(f"Executor {best_executor_id} is not idle, so marking request {req_id} for pending addition.")
+                            logger.debug('Executor %s is not idle, so marking request %s for pending addition.', best_executor_id, req_id)
                             self.executor_states[best_executor_id].mark_pending_request_addition(request)
                             self.request_states[req_id].set_pending_executor(best_executor_id, RequestStatePriority.NORMAL,
                                                                              self.default_confidence_threshold)
 
                     else:
-                        logger.debug(f"Cannot schedule request {req_id}. Skipping for now.")
+                        logger.debug('Cannot schedule request %s. Skipping for now.', req_id)
                         break # avoid overload
                 
-                logger.debug(f"End B\n")
-                logger.debug(f"B took {time.time() - start_time} seconds")
+                logger.debug('End B\n')
+                logger.debug('B took %s seconds', time.time() - start_time)
             
             with self.schedule_profiler.section("stage 5"):
                 start_time = time.time()
@@ -859,27 +887,28 @@ class InFaaSAlignedScheduler(SchedulerInterface):
                 unscheduled_requests = set(
                     [r_id for r_id in self.request_states if self.request_states[r_id].is_unscheduled]
                 )
-                logger.debug(f"Unscheduled requests after scheduling: {unscheduled_requests}")
+                logger.debug('Unscheduled requests after scheduling: %s', unscheduled_requests)
 
                 # Actually add and remove requests
-                logger.debug(f"Finalizing scheduling decisions and updating states.")
+                logger.debug('Finalizing scheduling decisions and updating states.')
                 for req_id in requests_in_scheduler_output:
-                    if old_request_states[req_id].executor_id != self.request_states[req_id].executor_id:
-                        logger.debug(f"Request {req_id} changed executor from {old_request_states[req_id].executor_id} to {self.request_states[req_id].executor_id}.")
+                    old_executor_id = old_executor_by_req_id.get(req_id)
+                    if old_executor_id != self.request_states[req_id].executor_id:
+                        logger.debug('Request %s changed executor from %s to %s.', req_id, old_executor_id, self.request_states[req_id].executor_id)
                         # None -> Some
                         # Some -> None
                         # Some -> Some (different)
                         
                         # remove from old
-                        if old_request_states[req_id].executor_id is not None:
+                        if old_executor_id is not None:
                             remove_request(
-                                self.requests[req_id], old_request_states[req_id].executor_id)
+                                self.requests[req_id], old_executor_id)
                         if self.request_states[req_id].executor_id is not None:
                             add_new_request(
                                 self.requests[req_id], self.request_states[req_id].executor_id)
                     else:
                         # if it's a future change, don't do anything
-                        logger.debug(f"Request {req_id} remains on the same executor {self.request_states[req_id].executor_id}.")
+                        logger.debug('Request %s remains on the same executor %s.', req_id, self.request_states[req_id].executor_id)
                         if self.request_states[req_id].executor_id is None:
                             # None -> None
                             # do nothing
@@ -892,7 +921,7 @@ class InFaaSAlignedScheduler(SchedulerInterface):
                         #     # Some -> Some (same, but pending change)
                         #     # do nothing for now
                         #     pass
-                        # if old_request_states[req_id].pending_executor_id not in idle_executors:
+                        # if old_executor_by_req_id.get(req_id) not in idle_executors:
                         #     pass
                         # if self.request_states[req_id].executor_id is None:
                         #     # None -> None
@@ -901,7 +930,7 @@ class InFaaSAlignedScheduler(SchedulerInterface):
                         add_running_request(
                             self.requests[req_id], self.request_states[req_id].executor_id)
                         
-                logger.debug(f"E took {time.time() - start_time} seconds")
+                logger.debug('E took %s seconds', time.time() - start_time)
             
             with self.schedule_profiler.section("stage 6"):
                 start_time = time.time()
@@ -912,17 +941,17 @@ class InFaaSAlignedScheduler(SchedulerInterface):
                 for executor_id in idle_executors + idle_not_accepting_executors:
                     if executor_id not in num_scheduled_tokens and \
                         not self.free_req_ids[executor_id]:
-                        logger.debug(f"Executor {executor_id} has no requests scheduled to run, and no finished requests. skip")
+                        logger.debug('Executor %s has no requests scheduled to run, and no finished requests. skip', executor_id)
                         # not scheduled to run at all, and no finished reqs. skip
                         # executor should not be in idle_not_accepting_executors
                         # assert executor_id not in idle_not_accepting_executors
                         async with self.executors_manager.cond[executor_id]:
-                            logger.debug(f"Executor {executor_id} status transition: CONSIDERED_FOR_SCHEDULING -> IDLE")
+                            logger.debug('Executor %s status transition: CONSIDERED_FOR_SCHEDULING -> IDLE', executor_id)
                             self.executors_manager.executors[executor_id].set_idle()
                             self.executors_manager.cond[executor_id].notify()
                         continue
 
-                    logger.debug(f"Executor {executor_id} status transition: CONSIDERED_FOR_SCHEDULING -> SCHEDULED")
+                    logger.debug('Executor %s status transition: CONSIDERED_FOR_SCHEDULING -> SCHEDULED', executor_id)
                     self.executors_manager.executors[executor_id].set_scheduled()
                     # logger.debug(f"req_to_new_block_ids: {req_to_new_block_ids[executor_id]}")
                     
@@ -981,10 +1010,10 @@ class InFaaSAlignedScheduler(SchedulerInterface):
 
                     self._update_after_schedule(executor_id, scheduler_output)
                 # self._update_after_schedule(0, scheduler_output)
-                logger.debug(f"returning scheduler output: {scheduler_outputs}")
+                logger.debug('returning scheduler output: %s', scheduler_outputs)
 
                 self.system_logger.log()
-                logger.debug(f"last part took {time.time() - start_time} seconds")
+                logger.debug('last part took %s seconds', time.time() - start_time)
         
         self.schedule_profiler.add_info(f"num_executors", len(self.executor_states))
         self.schedule_profiler.add_info(f"num_idle_executors", len(idle_executors))
@@ -1044,8 +1073,7 @@ class InFaaSAlignedScheduler(SchedulerInterface):
             req_ids.append(req_id)
 
             logger.debug(
-                f"making cached request data for req_id: {req_id}, "
-                f"use_pp: {self.use_pp}, use_connector: {use_connector}"
+                'making cached request data for req_id: %s, use_pp: %s, use_connector: %s', req_id, self.use_pp, use_connector
             )
             if self.use_pp:
                 # When using PP, the scheduler sends the sampled tokens back,
@@ -1055,7 +1083,7 @@ class InFaaSAlignedScheduler(SchedulerInterface):
                 # will cache them.
                 token_ids = req.unmasked_token_ids[-req.num_last_unmasked_tokens:]
                 new_token_ids.append(token_ids)
-                logger.debug(f"using pp, new_token_ids: {new_token_ids}")
+                logger.debug('using pp, new_token_ids: %s', new_token_ids)
             elif use_connector:
                 # When using a KVConnector, we add a placeholder to avoid index
                 # out of bounds errors. TODO: Remove this once the KVConnector
@@ -1117,7 +1145,7 @@ class InFaaSAlignedScheduler(SchedulerInterface):
                     req_index = model_runner_output.req_id_to_index[req_id]
                     generated_token_ids = sampled_token_ids[
                         req_index] if sampled_token_ids else []
-                    logger.debug(f"generated_token_ids for req {req_id}: {generated_token_ids}")
+                    logger.debug('generated_token_ids for req %s: %s', req_id, generated_token_ids)
 
                     stopped = False
                     kv_transfer_params = None
@@ -1127,7 +1155,7 @@ class InFaaSAlignedScheduler(SchedulerInterface):
                     # Check for stop and update request status.
                     if new_token_ids:
                         max_conf_idx = self.request_states[req_id].max_confidence_threshold_idx
-                        logger.debug(f"in update from output max_conf_idx  {req_id}: {max_conf_idx}")
+                        logger.debug('in update from output max_conf_idx  %s: %s', req_id, max_conf_idx)
                         max_conf = self.candidate_confidence_thresholds[max_conf_idx]
                         with self.update_profiler.event("update_request_with_output",
                                                         req_id=req_id):
@@ -1147,7 +1175,7 @@ class InFaaSAlignedScheduler(SchedulerInterface):
                     with self.update_profiler.event("rest",
                                                     req_id=req_id):
                         if stopped:
-                            logger.debug(f"Request {req_id} is stopped.")
+                            logger.debug('Request %s is stopped.', req_id)
                             kv_transfer_params = self._free_request(request, True)
                             if status_before_stop == RequestStatus.RUNNING:
                                 stopped_running_reqs.add(request)
@@ -1218,7 +1246,7 @@ class InFaaSAlignedScheduler(SchedulerInterface):
             with self.update_profiler.section("set_executor_idle"):
                 # now that we have updated everything, set executor to IDLE
                 async with self.executors_manager.cond[executor_id]:
-                    logger.debug(f"In update_from_output, executor {executor_id} status transition: OUTPUT_READY -> IDLE")
+                    logger.debug('In update_from_output, executor %s status transition: OUTPUT_READY -> IDLE', executor_id)
                     if self.cache_prefix or self.cache_suffix:
                         if self.executors_manager.waiting_to_be_killed[executor_id] and not self.executor_states[executor_id].is_drained():
                             self.executors_manager.executors[executor_id].set_idle_not_accepting_new_requests()
@@ -1275,19 +1303,19 @@ class InFaaSAlignedScheduler(SchedulerInterface):
         return running_reqs, scheduled_reqs + unscheduled_reqs
 
     def add_request(self, request: Request) -> None:
-        # if len(self.executor_states) == 0:
-        #     # we need this for update_request_max_confidence_thresholds
-        #     self.update_executors()
-        logger.debug(f"Scheduler adding request {request.request_id}")
-        # self.unscheduled.append(request.request_id)
-        self.requests[request.request_id] = request
-        self.request_states[request.request_id] = RequestState(request)
-        self.requests_need_update_step_estimates.append(request.request_id)
-        if self.log_stats:
-            request.record_event(EngineCoreEventType.QUEUED)
-        self.system_logger.log()
+        if (self.max_num_unfinished_requests is not None and
+                self.get_num_unfinished_requests() >=
+                self.max_num_unfinished_requests):
+            logger.debug(
+                "Deferring request %s because scheduler already has %d unfinished requests (limit=%d)",
+                request.request_id,
+                self.get_num_unfinished_requests(),
+                self.max_num_unfinished_requests,
+            )
+            self.deferred_requests.append(request)
+            return
 
-        self.request_added_or_removed = True
+        self._admit_request(request)
 
     def finish_requests(
         self,
@@ -1304,6 +1332,8 @@ class InFaaSAlignedScheduler(SchedulerInterface):
             request_ids = (request_ids, )
         else:
             request_ids = set(request_ids)
+
+        self._drop_deferred_requests(set(request_ids))
 
         running_requests_to_remove = []
         waiting_requests_to_remove = []
@@ -1340,12 +1370,14 @@ class InFaaSAlignedScheduler(SchedulerInterface):
         for request in valid_requests:
             request.status = finished_status
             self._free_request(request, True)
+
+        self._admit_deferred_requests()
         
         self.request_added_or_removed = True
         
     def _free_request_on_executor(self, request: Request, executor_id: int, 
                       finished: bool, prune: bool = True) -> Optional[dict[str, Any]]:
-        logger.debug(f"in _free_request_on_executor, request: {request.request_id}, executor_id: {executor_id}, finished: {finished}")
+        logger.debug('in _free_request_on_executor, request: %s, executor_id: %s, finished: %s', request.request_id, executor_id, finished)
         request_id = request.request_id
 
         self.free_req_ids[executor_id].add(request_id)
@@ -1388,7 +1420,7 @@ class InFaaSAlignedScheduler(SchedulerInterface):
 
     def _free_request(self, request: Request, 
                       finished: bool) -> Optional[dict[str, Any]]:
-        logger.debug(f"in _free_request, request: {request}, finished: {finished}")
+        logger.debug('in _free_request, request: %s, finished: %s', request, finished)
 
         # assert request.request_id in self.running
         assert self.request_states[request.request_id].is_running
@@ -1415,7 +1447,7 @@ class InFaaSAlignedScheduler(SchedulerInterface):
         # executor_id = self.request_to_executor.get(request.request_id)
         self.kv_cache_managers[executor_id].free(request)
         self.kv_cache_managers[executor_id].free_block_hashes(request)
-        logger.debug(f"Freed blocks for request {request.request_id} on executor {executor_id}")
+        logger.debug('Freed blocks for request %s on executor %s', request.request_id, executor_id)
         # del self.requests[request.request_id]
 
     def get_num_unfinished_requests(self) -> int:
@@ -1425,15 +1457,15 @@ class InFaaSAlignedScheduler(SchedulerInterface):
     def has_finished_requests(self) -> bool:
         # logger.debug(f"in has_finished_requests, finished_req_ids: {self.finished_req_ids}")
         # return any(len(finished) > 0 for finished in self.finished_req_ids.values())
-        logger.debug(f"in has_finished_requests, free_req_ids: {self.free_req_ids}")
+        logger.debug('in has_finished_requests, free_req_ids: %s', self.free_req_ids)
         return any(len(free) > 0 for free in self.free_req_ids.values())
         # return len(self.finished_req_ids) > 0
 
     def has_not_in_execution_requests(self) -> bool:
         """Returns True if there are requests that are not in execution."""
         for req in self.requests.values():
-            logger.debug(f"request: {req}, is_in_execution: {req.is_in_execution}")
-        logger.debug(f"in has_not_in_execution_requests, result is {any(not req.is_in_execution for req in self.requests.values())}")
+            logger.debug('request: %s, is_in_execution: %s', req, req.is_in_execution)
+        logger.debug('in has_not_in_execution_requests, result is %s', any((not req.is_in_execution for req in self.requests.values())))
         return any(not req.is_in_execution for req in self.requests.values())
     
     def reset_prefix_cache(self) -> bool:
@@ -1590,7 +1622,7 @@ class InFaaSAlignedScheduler(SchedulerInterface):
         if executor_id in self.free_req_ids:
             del self.free_req_ids[executor_id]
         
-        logger.debug(f"Removed executor {executor_id} from scheduler.")
+        logger.debug('Removed executor %s from scheduler.', executor_id)
         # recompute max tp degree
         self.max_tp_degree = max([exec_state.tp_degree for exec_state in self.executor_states.values()])
 

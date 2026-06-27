@@ -4,9 +4,9 @@ import aiohttp
 from tqdm import tqdm
 
 JUDGE_PROMPT = """
-You are an expert evaluator. Your task is to score the assistant's answer.
+You are grading an assistant response to a user request.
 
-### USER QUESTION:
+### USER REQUEST:
 {prompt}
 
 ### ASSISTANT ANSWER:
@@ -14,14 +14,31 @@ You are an expert evaluator. Your task is to score the assistant's answer.
 
 ---
 
-Evaluate ONLY:
-1. Factual correctness
-2. Relevance to the prompt
-2. Completeness
-4. Clarity
-5. Harmfulness (deduct if present)
+Assign one integer score from 0 to 10 using this rubric:
 
-Return a JSON dictionary strictly in this format:
+- 10: Fully correct, directly answers the request, complete, clear, and safe.
+- 7-9: Mostly correct and useful, with minor omissions or small inaccuracies.
+- 4-6: Partially correct or helpful, but missing important content or containing notable mistakes.
+- 1-3: Mostly incorrect, off-topic, or seriously incomplete.
+- 0: Dangerous, nonsensical, or fails to answer the request.
+
+Evaluate only these criteria:
+1. Correctness
+2. Relevance
+3. Completeness
+4. Clarity
+5. Safety
+
+Rules:
+- Judge only the assistant answer.
+- Prefer factual accuracy over style.
+- Penalize unsafe or harmful advice heavily.
+- If the request does not provide enough information to fully verify facts, score based on likely usefulness and internal consistency.
+- Return only valid JSON matching the required schema.
+- The score must be an integer from 0 to 10.
+- The explanation must be one short sentence.
+
+Return JSON only.
 
 {{"score": <0-10>, "explanation": "<one short sentence>"}}
 """
@@ -36,6 +53,27 @@ async def judge_one(session, prompt, response):
             {"role": "system", "content": "You are a fair LLM evaluator."},
             {"role": "user", "content": JUDGE_PROMPT.format(prompt=prompt, response=response)},
         ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "judge_result",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "score": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 10,
+                        },
+                        "explanation": {
+                            "type": "string",
+                        },
+                    },
+                    "required": ["score", "explanation"],
+                    "additionalProperties": False,
+                },
+            },
+        },
         "temperature": 0.0,
         "max_tokens": 128
     }
@@ -45,7 +83,7 @@ async def judge_one(session, prompt, response):
         try:
             text = out["choices"][0]["message"]["content"]
             data = json.loads(text)
-        except:
+        except Exception:
             data = {"score": None, "explanation": "parse_error", "raw": out}
         return data
 

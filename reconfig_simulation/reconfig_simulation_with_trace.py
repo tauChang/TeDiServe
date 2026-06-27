@@ -214,9 +214,12 @@ async def main():
     # Planner
     # -------------------------
     latency_profile_paths = {
-        1: "/work2/10446/tchang85/stampede3/dllm/latency_profiles/GSAI-ML_LLaDA-8B-Instruct/H100/TP1.json",
-        2: "/work2/10446/tchang85/stampede3/dllm/latency_profiles/GSAI-ML_LLaDA-8B-Instruct/H100/TP2.json",
-        4: "/work2/10446/tchang85/stampede3/dllm/latency_profiles/GSAI-ML_LLaDA-8B-Instruct/H100/TP4.json",
+        # 1: "/work2/10446/tchang85/stampede3/dllm/latency_profiles/GSAI-ML_LLaDA-8B-Instruct/H100/TP1.json",
+        # 2: "/work2/10446/tchang85/stampede3/dllm/latency_profiles/GSAI-ML_LLaDA-8B-Instruct/H100/TP2.json",
+        # 4: "/work2/10446/tchang85/stampede3/dllm/latency_profiles/GSAI-ML_LLaDA-8B-Instruct/H100/TP4.json",
+        1: "/u/tchang85/dllm/latency_profiles/GSAI-ML_LLaDA-8B-Instruct/GH200/TP1.json",
+        2: "/u/tchang85/dllm/latency_profiles/GSAI-ML_LLaDA-8B-Instruct/GH200/TP2.json",
+        4: "/u/tchang85/dllm/latency_profiles/GSAI-ML_LLaDA-8B-Instruct/GH200/TP4.json",
     }
 
     planner = MILPReconfigPlanner(

@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import atexit
 import argparse
 import multiprocessing
+import signal
 import time
 from datetime import datetime
 from collections import OrderedDict
@@ -33,6 +35,61 @@ logger = init_logger(__name__)
 
 T = TypeVar("T")
 FLUSH_INTERVAL = 5
+
+_REGISTERED_FLUSH_WRITERS = weakref.WeakSet()
+_FLUSH_HANDLER_LOCK = threading.Lock()
+_FLUSH_SIGNAL_HANDLERS_INSTALLED = False
+_PREVIOUS_FLUSH_SIGNAL_HANDLERS: dict[int, Any] = {}
+
+
+def _flush_registered_writers() -> None:
+    logger.info("Flushing registered BufferedAsyncFileWriters ...")
+    with _FLUSH_HANDLER_LOCK:
+        writers = list(_REGISTERED_FLUSH_WRITERS)
+
+    for writer in writers:
+        try:
+            writer.flush()
+        except Exception:
+            logger.exception(
+                "BufferedAsyncFileWriter: flush failed for %s",
+                writer.file_path,
+            )
+
+
+def _handle_flush_signal(signum: int, frame) -> None:
+    _flush_registered_writers()
+
+    previous_handler = _PREVIOUS_FLUSH_SIGNAL_HANDLERS.get(signum,
+                                                           signal.SIG_DFL)
+    if previous_handler == signal.SIG_IGN:
+        return
+    if previous_handler == signal.default_int_handler:
+        previous_handler(signum, frame)
+        return
+    if callable(previous_handler):
+        previous_handler(signum, frame)
+        return
+
+    raise SystemExit(128 + signum)
+
+
+def _install_flush_exit_handlers() -> None:
+    global _FLUSH_SIGNAL_HANDLERS_INSTALLED
+
+    with _FLUSH_HANDLER_LOCK:
+        if _FLUSH_SIGNAL_HANDLERS_INSTALLED:
+            return
+
+        atexit.register(_flush_registered_writers)
+
+        if threading.current_thread() is threading.main_thread():
+            for signum in (signal.SIGTERM, signal.SIGINT):
+                _PREVIOUS_FLUSH_SIGNAL_HANDLERS[signum] = signal.getsignal(
+                    signum)
+                signal.signal(signum, _handle_flush_signal)
+
+        _FLUSH_SIGNAL_HANDLERS_INSTALLED = True
 
 class ConstantList(Generic[T], Sequence):
 
@@ -376,6 +433,10 @@ class BufferedAsyncFileWriter:
         )
         self._thread.start()
 
+        _install_flush_exit_handlers()
+        with _FLUSH_HANDLER_LOCK:
+            _REGISTERED_FLUSH_WRITERS.add(self)
+
     # ---------------------------------------------------------
     # Public API
     # ---------------------------------------------------------
@@ -397,6 +458,7 @@ class BufferedAsyncFileWriter:
         with open(self.file_path, "a") as f:
             for entry in to_write:
                 f.write(json.dumps(entry) + "\n")
+        logger.info("BufferedAsyncFileWriter completed: flushing to %s completed", self.file_path)
 
     # ---------------------------------------------------------
     # Background thread

@@ -265,12 +265,17 @@ class Worker(WorkerBase):
         for num_tokens in tqdm.tqdm(num_tokens_list, desc="Profiling Latency"):
             
             logger.info("Profile latency for %d tokens", num_tokens)
-            raw_data = self.model_runner.\
-                latency_profile_run(num_tokens, 
-                                    self.profile_config.num_profile_runs,
-                                    self.profile_config.num_profile_warmup_runs)
-            # compute average
-            results[num_tokens] = sum(raw_data) / len(raw_data)
+            try:
+                raw_data = self.model_runner.\
+                    latency_profile_run(num_tokens, 
+                                        self.profile_config.num_profile_runs,
+                                        self.profile_config.num_profile_warmup_runs)
+                # compute average
+                results[num_tokens] = sum(raw_data) / len(raw_data)
+                logger.info("Profile latency for %d tokens: %.4f ms", num_tokens, results[num_tokens])
+            except Exception as e:
+                logger.error("Failed to profile latency for %d tokens: %s. Skipping.", num_tokens, e)
+                continue
 
             torch.cuda.empty_cache()
             gc.collect()
@@ -295,7 +300,8 @@ class Worker(WorkerBase):
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def compile_or_warm_up_model(self) -> None:
-        # return None
+        if self.model_config.enforce_eager:
+            return None
         
         # warm up sizes that are not in cudagraph capture sizes,
         # but users still want to compile for better performance,

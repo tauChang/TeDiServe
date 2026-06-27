@@ -13,22 +13,26 @@ cp run_lmeval.sh $EXPERIMENT_DIR/
 
 SLO=10
 # VLLM Args
+VLLM_LOGGING_LEVEL=INFO
 # MODEL=Dream-org/Dream-v0-Instruct-7B
 # MODEL=Dream-org/Dream-v0-Base-7B
 MODEL=GSAI-ML/LLaDA-8B-Instruct
 # MODEL=GSAI-ML/LLaDA-8B-Base
-NUM_GPUS_PER_MODEL_EXECUTOR=1,
+NUM_GPUS_PER_MODEL_EXECUTOR=1
 # NUM_GPUS_PER_MODEL_EXECUTOR=1,1,1,1
+SYNC_STEP_PREDICTION=false
+
 # SCHEDULER_CLASS=vllm.v1.core.sched.cluster_scheduler.ClusterScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.infaas_scheduler.InFaaSScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.llumnix_scheduler.LlumnixScheduler
 
 # SCHEDULER_CLASS=vllm.v1.core.sched.infaas_aligned_dynamic_confidence_scheduler.InFaaSAlignedScheduler
 
-SCHEDULER_CLASS=vllm.v1.core.sched.infaas_aligned_scheduler.InFaaSAlignedScheduler
+# SCHEDULER_CLASS=vllm.v1.core.sched.infaas_aligned_scheduler.InFaaSAlignedScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.llumnix_fcfs_scheduler.LlumnixFCFSScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.tedi_correct_tput_scheduler.TeDiLightScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.tedi_new_correct_tput_scheduler.TeDiLightScheduler
+SCHEDULER_CLASS=vllm.v1.core.sched.tedi_new_correct_tput_async_update_scheduler.TeDiLightScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.tedi_new_correct_tput_step_predict_once_scheduler.TeDiLightScheduler
 
 # SCHEDULER_CLASS=vllm.v1.core.sched.tedi_new_correct_tput_migrate_scheduler.TeDiLightScheduler
@@ -40,6 +44,10 @@ SCHEDULER_CLASS=vllm.v1.core.sched.infaas_aligned_scheduler.InFaaSAlignedSchedul
 # SCHEDULER_CLASS=vllm.v1.core.sched.urgent_opportunistic_scheduler_min_best_effort.UrgentOpportunisticScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.urgent_opportunistic_with_budget_scheduler.UrgentOpportunisticWithBudgetScheduler
 DEFAULT_CONFIDENCE_THRESHOLD=0.9
+# CANDIDATE_CONFIDENCE_THRESHOLDS="0.9 0.8 0.7 0.6 0.5"
+CANDIDATE_CONFIDENCE_THRESHOLDS="0.9 0.8 0.7 0.6 0.5"
+STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA=1
+CONFIDENCE_THRESHOLD_TPUT_DEMAND_CHANGE_RATIO=100000000
 NUM_PROFILE_RUNS=8
 NUM_PROFILE_WARMUP_RUNS=3
 STEP_ESTIMATOR_MODEL_CLASS=vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine.LightGradientBoostMachine
@@ -56,37 +64,46 @@ DENOISE_BLOCK_SIZE=32
 CACHE_PREFIX=true
 CACHE_SUFFIX=true
 
-if [ "$CACHE_PREFIX" = true ] && [ "$CACHE_SUFFIX" = true ]; then
-    # use dual_cache_256_32 model
-    # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_256_32/model.bin
-    # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_256_32/features.txt
-    # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_32_1120/model.bin
-    # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_32_1120/features.txt
-    # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_1120_256_32/model.bin
-    # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_1120_256_32/features.txt
-    # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_1120_256_32_tiny/model.bin
-    # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_1120_256_32_tiny/features.txt
+STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/model.bin
+STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/features.txt
 
-    STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_avg/model.bin
-    STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_avg/features.txt
+# if [ "$CACHE_PREFIX" = true ] && [ "$CACHE_SUFFIX" = true ]; then
+#     # use dual_cache_256_32 model
+#     # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_256_32/model.bin
+#     # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_256_32/features.txt
+#     # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_32_1120/model.bin
+#     # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_32_1120/features.txt
+#     # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_1120_256_32/model.bin
+#     # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_1120_256_32/features.txt
+#     # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_1120_256_32_tiny/model.bin
+#     # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/dual_cache_1120_256_32_tiny/features.txt
 
-    # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/mbpp_1208/model.bin
-    # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/mbpp_1208/features.txt
+#     # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_avg/model.bin
+#     # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_avg/features.txt
 
-    # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/1207_ablation_no_confidence/model.bin
-    # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/1207_ablation_no_confidence/features.txt
+#     STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/model.bin
+#     STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/features.txt
 
-    # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_avg/model.bin
-    # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_avg/features.txt
-    # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_quantile_0.7/model.bin
-    # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_quantile_0.7/features.txt
-elif [ "$CACHE_PREFIX" = true ] && [ "$CACHE_SUFFIX" = false ]; then
-    STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/prefix_cache_256_32/model.bin
-    STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/prefix_cache_256_32/features.txt
-elif [ "$CACHE_PREFIX" = false ] && [ "$CACHE_SUFFIX" = false ]; then
-    STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/no_cache_256_32/model.bin
-    STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/no_cache_256_32/features.txt
-fi
+#     # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_no_confidence_features/model.bin
+#     # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_no_confidence_features/features.txt
+
+#     # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/mbpp_1208/model.bin
+#     # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/mbpp_1208/features.txt
+
+#     # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/1207_ablation_no_confidence/model.bin
+#     # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/1207_ablation_no_confidence/features.txt
+
+#     # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_avg/model.bin
+#     # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_avg/features.txt
+#     # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_quantile_0.7/model.bin
+#     # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_quantile_0.7/features.txt
+# elif [ "$CACHE_PREFIX" = true ] && [ "$CACHE_SUFFIX" = false ]; then
+#     STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/prefix_cache_256_32/model.bin
+#     STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/prefix_cache_256_32/features.txt
+# elif [ "$CACHE_PREFIX" = false ] && [ "$CACHE_SUFFIX" = false ]; then
+#     STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/no_cache_256_32/model.bin
+#     STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/no_cache_256_32/features.txt
+# fi
 
 # ----------------------
 STEP_DATA_FILE=${STEP_DATA_DIR}/step_data.json
@@ -99,7 +116,7 @@ REQUEST_PLOTS_DIR=${EXPERIMENT_DIR}/request_plots
 # TASK=mbpp_instruct
 TASK=gsm8k
 # TASK=mmlu_pro
-# LIMIT=100
+# LIMIT=1
 # AVG_INTER_ARRIVAL_TIME=0.5
 # ARRIVAL_PATTERN="50:1:0,150:0.5:0"
 # ARRIVAL_PATTERN="300:0.5,300:0.2"
@@ -110,9 +127,10 @@ TASK=gsm8k
 # ARRIVAL_PATTERN="474:0.1111"
 # ARRIVAL_PATTERN="474:0.03333"
 # ARRIVAL_PATTERN="300:0.1"
-ARRIVAL_PATTERN="100:0"
+# ARRIVAL_PATTERN="120:0"
+# ARRIVAL_PATTERN="500:0.0625"
 # ARRIVAL_PATTERN="100:0.0625"
-# ARRIVAL_PATTERN="5:0"
+ARRIVAL_PATTERN="240:0"
 # ARRIVAL_PATTERN="100:1:0"
 # Calculate TOTAL_NUM_REQUESTS based on ARRIVAL_PATTERN
 if [ -n "$ARRIVAL_PATTERN" ]; then
@@ -126,8 +144,9 @@ if [ "$TASK" = "mmlu_pro" ]; then
     TOTAL_NUM_REQUESTS=$(( TOTAL_NUM_REQUESTS * 14 ))
 fi
 
-# NUM_CONCURRENT=$TOTAL_NUM_REQUESTS
-NUM_CONCURRENT=100
+NUM_CONCURRENT=$TOTAL_NUM_REQUESTS
+# NUM_CONCURRENT=10
+# NUM_CONCURRENT=
 OUTPUT_LENGTH=256
 WRITE_RESULTS=true
 RESULTS_DIR=$EXPERIMENT_DIR/results
@@ -155,6 +174,9 @@ VLLM_CMD="vllm serve --trust-remote-code ${MODEL} \
     --num-gpus-per-model-executor ${NUM_GPUS_PER_MODEL_EXECUTOR} \
     --scheduler_cls ${SCHEDULER_CLASS} \
     --default-confidence-threshold ${DEFAULT_CONFIDENCE_THRESHOLD} \
+    --candidate-confidence-thresholds ${CANDIDATE_CONFIDENCE_THRESHOLDS} \
+    --step-estimator-refresh-unmasked-token-delta ${STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA} \
+    --confidence-threshold-tput-demand-change-ratio ${CONFIDENCE_THRESHOLD_TPUT_DEMAND_CHANGE_RATIO} \
     --num-profile-runs ${NUM_PROFILE_RUNS} \
     --num-profile-warmup-runs ${NUM_PROFILE_WARMUP_RUNS} \
     --step-estimator-model-class ${STEP_ESTIMATOR_MODEL_CLASS} \
@@ -165,6 +187,7 @@ VLLM_CMD="vllm serve --trust-remote-code ${MODEL} \
     --total-num-requests ${TOTAL_NUM_REQUESTS} \
     --compilation-config '{\"full_cuda_graph\": true}' \
     "
+    # --enforce-eager \
 
 if [ "$CACHE_PREFIX" = "true" ]; then
   VLLM_CMD="$VLLM_CMD --cache-prefix"
@@ -178,6 +201,9 @@ fi
 if [ -n "$KV_TRANSFER_CONFIG" ]; then
     VLLM_CMD="$VLLM_CMD --kv-transfer-config '${KV_TRANSFER_CONFIG}'"
 fi
+if [ "$SYNC_STEP_PREDICTION" = "true" ]; then
+    VLLM_CMD="$VLLM_CMD --sync-step-prediction"
+fi
 
 EVAL_CMD="python eval/run_lmeval.py \
     --model $MODEL \
@@ -185,6 +211,7 @@ EVAL_CMD="python eval/run_lmeval.py \
     --output-length $OUTPUT_LENGTH \
     --output-path $OUTPUT_PATH \
     --num-concurrent $NUM_CONCURRENT \
+    --vllm-port $VLLM_PORT \
     --warmup"
 
 # If ARRIVAL_PATTERN is set → use it and skip limit/avg-inter-arrival
@@ -209,7 +236,7 @@ tmux new-session -d -s $SESSION
 
 # Pane 1: vllm serve
 # tmux send-keys -t $SESSION "$VLLM_CMD 2>&1 | tee $EXPERIMENT_DIR/vllm_serve.log dllm_serve_multi.log" C-m
-tmux send-keys -t $SESSION "$VLLM_CMD 2>&1 | tee $LOG_DIR/vllm_serve.log" C-m
+tmux send-keys -t $SESSION "export VLLM_LOGGING_LEVEL=$VLLM_LOGGING_LEVEL && $VLLM_CMD 2>&1 | tee $LOG_DIR/vllm_serve.log" C-m
 
 # Split into 3 vertical panes
 tmux split-window -h -t $SESSION
@@ -249,23 +276,26 @@ if [[ "$SCHEDULER_CLASS" == *TeDi* ]]; then
 fi
 
 
-# log_and_send "$SESSION.1" \
-#     "python analysis/profiler_analysis/scheduler/run_schedule.py \"$EXPERIMENT_DIR/profiles/scheduler/schedule.jsonl\" 2>&1 | tee \"$LOG_DIR/schedule_analysis.log\""
+log_and_send "$SESSION.1" \
+    "python analysis/profiler_analysis/scheduler/run_schedule.py \"$EXPERIMENT_DIR/profiles/scheduler/schedule.jsonl\" 2>&1 | tee \"$LOG_DIR/schedule_analysis.log\""
 
-# log_and_send "$SESSION.1" \
-#     "python analysis/calculate_num_recompute/run.py --path \"$EXPERIMENT_DIR/system_log.json\" 2>&1 | tee \"$LOG_DIR/num_recompute.log\""
+log_and_send "$SESSION.1" \
+    "python analysis/calculate_num_recompute/run.py --path \"$EXPERIMENT_DIR/system_log.json\" 2>&1 | tee \"$LOG_DIR/num_recompute.log\""
 
-# log_and_send "$SESSION.1" \
-#     "python analysis/profiler_analysis/scheduler/run_update.py \"$EXPERIMENT_DIR/profiles/scheduler/update.jsonl\" 2>&1 | tee \"$LOG_DIR/update_analysis.log\""
+log_and_send "$SESSION.1" \
+    "python analysis/profiler_analysis/scheduler/run_update.py \"$EXPERIMENT_DIR/profiles/scheduler/update.jsonl\" 2>&1 | tee \"$LOG_DIR/update_analysis.log\""
 
-# log_and_send "$SESSION.1" \
-#     "python analysis/profiler_analysis/model_runner/run.py \"$EXPERIMENT_DIR/profiles/model_runners/\" 2>&1 | tee \"$LOG_DIR/model_runner_analysis.log\""
+log_and_send "$SESSION.1" \
+    "python analysis/profiler_analysis/model_runner/run.py \"$EXPERIMENT_DIR/profiles/model_runners/\" 2>&1 | tee \"$LOG_DIR/model_runner_analysis.log\""
 
-# log_and_send "$SESSION.1" \
-#     "python analysis/profiler_analysis/step_estimator/run.py \"$EXPERIMENT_DIR/profiles/step_estimator/predict.jsonl\" 2>&1 | tee \"$LOG_DIR/step_estimator_analysis.log\""
+log_and_send "$SESSION.1" \
+    "python analysis/profiler_analysis/step_estimator/run.py \"$EXPERIMENT_DIR/profiles/step_estimator/predict.jsonl\" 2>&1 | tee \"$LOG_DIR/step_estimator_analysis.log\""
 
-# log_and_send "$SESSION.1" \
-#     "python analysis/profiler_analysis/executor/run.py \"$EXPERIMENT_DIR/profiles/executors\" 2>&1 | tee \"$LOG_DIR/executor_analysis.log\""
+log_and_send "$SESSION.1" \
+    "python analysis/profiler_analysis/executor/run.py \"$EXPERIMENT_DIR/profiles/executors\" 2>&1 | tee \"$LOG_DIR/executor_analysis.log\""
+
+log_and_send "$SESSION.1" \
+    "python analysis/experiment_summary/run.py --result-path \"$OUTPUT_PATH\" --slo \"$SLO\" --scheduler-summary \"$EXPERIMENT_DIR/profiles/scheduler/schedule_summary.txt\" --predict-summary \"$EXPERIMENT_DIR/profiles/step_estimator/predict_summary.txt\" --confidence-stats \"$REQUEST_PLOTS_DIR/avg_confidence_stats.json\" 2>&1 | tee \"$LOG_DIR/experiment_summary.log\""
 
 # Pane 3: nvidia-smi monitor
 tmux send-keys -t $SESSION.2 "watch -n 0.1 nvidia-smi" C-m

@@ -1,0 +1,52 @@
+{
+  "sbatch": {
+    "job_name": "lmeval_input_ablation",
+    "output": "sbatch_experiment_dir/slurm-%x-%j.out",
+    "error": "sbatch_experiment_dir/slurm-%x-%j.err",
+    "time": "00:30:00",
+    "partition": "ghx4",
+    "account": "bftv-dtai-gh",
+    "gpus": 1,
+    "cpus_per_gpu": 36,
+    "mail_type": "BEGIN,END,FAIL",
+    "mail_user": "tchang85@wisc.edu"
+  },
+  "common": {
+    "VLLM_LOGGING_LEVEL": "INFO",
+    "MODEL": "GSAI-ML/LLaDA-8B-Instruct",
+    "NUM_GPUS_PER_MODEL_EXECUTOR": 1,
+    "DISTRIBUTED_EXECUTOR_BACKEND": "ray",
+    "DEFAULT_CONFIDENCE_THRESHOLD": 0.9,
+    "CANDIDATE_CONFIDENCE_THRESHOLDS": ["0.9", "0.8", "0.7"],
+    "SLO": 12.5,
+    "TOKENIZER": "GSAI-ML/LLaDA-8B-Instruct",
+    "MAX_REQUEST_LEN": 4096,
+    "VLLM_PORT": 8083,
+    "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 8,
+    "ARRIVAL_PATTERN": "100:100",
+    "NUM_CONCURRENT": 1,
+    "MAX_NUM_UNFINISHED_REQUESTS": 100,
+    "OUTPUT_LENGTH": 256,
+    "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine.LightGradientBoostMachine",
+    "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0423_all_features/features.txt",
+    "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0423_all_features/model.bin",
+    "TASK": "gsm8k"
+  },
+  "experiments": [
+    {
+      "name": "infaas_64",
+      "SCHEDULER_CLASS": "vllm.v1.core.sched.infaas_aligned_drop_scheduler.InFaaSAlignedScheduler",
+      "NUM_FEWSHOT": 2
+    },
+    {
+      "name": "infaas_256",
+      "SCHEDULER_CLASS": "vllm.v1.core.sched.infaas_aligned_drop_scheduler.InFaaSAlignedScheduler",
+      "NUM_FEWSHOT": 5
+    },
+    {
+      "name": "infaas_1024",
+      "SCHEDULER_CLASS": "vllm.v1.core.sched.infaas_aligned_drop_scheduler.InFaaSAlignedScheduler",
+      "NUM_FEWSHOT": 8
+    }
+  ]
+}

@@ -6,7 +6,7 @@ import random
 SERVER_URL = "http://localhost:8000/v1/completions"   # <-- change if needed
 N_REQUESTS = 3
 N_WARMUP = 1
-OUTPUT_TOKENS = 256
+OUTPUT_TOKENS = 128
 INPUT_TOKENS = 1792
 
 random.seed(42)

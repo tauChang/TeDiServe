@@ -31,10 +31,10 @@ def main():
     # ------------------------------------------------------
     # EDIT THESE VALUES DIRECTLY
     # ------------------------------------------------------
-    IN_FILE = "burstgpt_8hrs_35qps.txt"
-    OUT_FILE = "burstgpt_8hrs_35qps_170_to_190.txt"
-    START_MIN = 170
-    END_MIN = 190
+    IN_FILE = "burstgpt_2hrs_19qps.txt"
+    OUT_FILE = "burstgpt_2hrs_19qps_75_to_76.txt"
+    START_MIN = 75
+    END_MIN = 76
     # ------------------------------------------------------
 
     arrivals = load_arrivals(IN_FILE)

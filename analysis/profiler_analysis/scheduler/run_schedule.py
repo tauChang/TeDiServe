@@ -70,9 +70,11 @@ def analyze_and_plot(input_path):
     with open(out_report, "w") as f:
 
         f.write("=== TABLE 1: Overall Latency Breakdown ===\n")
-        f.write(f"total_avg_latency = {total_avg:.4f} sec\n\n")
-        f.write(f"{'stage':>10} | {'avg(sec)':>10} | {'%total':>8}\n")
+        f.write(f"total_avg_latency = {total_avg:.4f} ms\n\n")
+        f.write(f"{'stage':>10} | {'avg(ms)':>10} | {'%total':>8}\n")
         f.write("-" * 36 + "\n")
+
+        print(f"total_avg_latency = {total_avg:.4f} ms\n\n")
 
         stage_order = sorted(stage_avg.keys(), key=lambda x: (x != "total", x))
 
@@ -113,7 +115,7 @@ def analyze_and_plot(input_path):
     plt.figure(figsize=(7, 5))
     plt.plot(xs, ys, "-o", linewidth=2)
     plt.xlabel("Number of Requests")
-    plt.ylabel("Average Total Latency (sec)")
+    plt.ylabel("Average Total Latency (ms)")
     plt.title("Scheduler Overhead (Mean Total Latency)")
     plt.grid(True, linestyle="--", alpha=0.5)
     plt.tight_layout()
@@ -128,7 +130,7 @@ def analyze_and_plot(input_path):
     plt.figure(figsize=(7, 5))
     plt.boxplot(data, labels=xs, showmeans=True)
     plt.xlabel("Number of Requests")
-    plt.ylabel("Total Latency (sec)")
+    plt.ylabel("Total Latency (ms)")
     plt.title("Scheduler Overhead Distribution")
     plt.grid(True, linestyle="--", alpha=0.5)
     plt.tight_layout()
@@ -163,7 +165,7 @@ def analyze_and_plot(input_path):
     plt.plot(timestamps, total_vals, marker=".", linewidth=1)
     plt.title("Scheduler Total Latency Over Time")
     plt.xlabel("Timestamp")
-    plt.ylabel("Total Latency (sec)")
+    plt.ylabel("Total Latency (ms)")
     plt.grid(True, linestyle="--", alpha=0.4)
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
     plt.gcf().autofmt_xdate()

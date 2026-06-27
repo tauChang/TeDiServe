@@ -2,7 +2,7 @@ from dataclasses import dataclass, asdict
 import pandas as pd
 import os
 import time
-from typing import Optional
+from typing import Optional, Dict
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import resolve_obj_by_qualname
@@ -42,6 +42,8 @@ class StepStats:
     # last_recompute_avg_output_confidence: Optional[float] = None
     # cur_avg_output_confidence: Optional[float] = None
 
+    pred_num_steps_left: Optional[Dict[float, float]] = None # confidence_threshold -> pred_num_steps_left
+
 class StepEstimator:
     def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
@@ -60,7 +62,9 @@ class StepEstimator:
             self.estimator_model = Model(
                 model_path=self.scheduler_config.step_estimator_model_path,
                 features_path=self.scheduler_config.step_estimator_features_path,
-                features=self.scheduler_config.step_estimator_features
+                features=self.scheduler_config.step_estimator_features,
+                scheduler_config=self.scheduler_config,
+                model_config=self.model_config,
             )
         else:
             self.estimator_model = None
@@ -111,7 +115,9 @@ class StepEstimator:
     # Public API
     # ------------------------------------------------------------
 
-    def add_data_point(self, stats: StepStats):
+    def add_data_point(self, stats: StepStats, pred_num_steps_left: Optional[Dict[float, float]] = None):
+        if pred_num_steps_left is not None:
+            stats.pred_num_steps_left = pred_num_steps_left
         """Fast, thread-safe append."""
         row = asdict(stats)
         self.file_writer.add(row)
@@ -133,3 +139,19 @@ class StepEstimator:
         self.predict_profiler.commit()
 
         return result
+
+    def get_initial_default_predictions(self, stats: StepStats) -> dict[float, float]:
+        """Get initial default predictions from stats.
+        
+        Delegates to the estimator model.
+        
+        Args:
+            stats (StepStats): The stat to get initial defaults for.
+        
+        Returns:
+            dict[float, float]: Predictions for each confidence threshold.
+        """
+        if self.estimator_model is None:
+            return {}
+        
+        return self.estimator_model.get_initial_default_predictions(stats)

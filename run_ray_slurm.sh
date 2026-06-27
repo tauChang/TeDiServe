@@ -32,6 +32,6 @@ echo "All Ray nodes started."
 wait
 
 ray start --head --port=6379 --num-cpus=32 --block &
-ray start --address=c563-002:6379 --num-cpus=32 --block &
+ray start --address=gh003:6379 --num-cpus=32 --block &
 ray start --address=c561-006:6379 --num-cpus=32 --block &
 ray start --address=c562-005:6379 --num-cpus=32 --block &

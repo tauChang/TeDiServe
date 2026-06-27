@@ -3,6 +3,7 @@
 
 import asyncio
 from concurrent.futures import Future
+import inspect
 from typing import Optional, Union
 
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
@@ -130,48 +131,37 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
         Returns:
             The model runner output.
         """
-        logger.debug(f"inside execute_model_async, scheduler_output: {scheduler_output}")
         # Build the compiled DAG for the first time.
         if self.forward_dag is None:  # type: ignore
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=True)
 
-        # refs = await self.forward_dag.execute_async(scheduler_output)  # type: ignore
         refs = await self.forward_dag.execute_async(scheduler_output)
-        logger.debug(f"execute_model_async, refs after await once: {refs}")
-        refs = await refs[0]
-        logger.debug(f"execute_model_async, refs after await twice: {refs}")
-        # logger.debug(f"execute_model_async, futures: {futures}")
-        # refs = futures
-        # if isinstance(futures, list):
-        #     refs = await asyncio.gather(*futures)
-        # else:
-        #     refs = futures
 
-        # futures = await self.forward_dag.execute_async(scheduler_output)
-        # logger.debug(f"execute_model_async, futures: {futures}")
-        # refs = futures
-        # if isinstance(futures, list):
-        #     refs = await asyncio.gather(*futures)
-        # else:
-        #     refs = futures
-        # logger.debug(f"execute_model_async, refs: {refs}")
+        # Some Ray compiled-DAG async paths return a singleton container with
+        # an awaitable payload. Normalize to a list of per-worker awaitables.
+        if isinstance(refs, list) and len(refs) == 1 and inspect.isawaitable(
+                refs[0]):
+            refs = await refs[0]
 
-        return refs
+        if not isinstance(refs, list):
+            refs = [refs]
 
         if not self.has_connector:
             # Get output only from a single worker (output_rank)
             # When PP is not used, we block here until the result is available.
             if self.max_concurrent_batches == 1:
-                return refs[0].get()
+                first = refs[0]
+                return await first if inspect.isawaitable(first) else first
 
             # When PP is used, we return a FutureWrapper immediately so that
             # the scheduler can yield to the next batch.
             return AsyncFutureWrapper(refs)
 
-       # Get output from all workers when connector is present
+        # Get output from all workers when connector is present
         if self.max_concurrent_batches == 1:
             # Block and get results from all workers
-            outputs = [ref.get() for ref in refs]
+            outputs = [await ref if inspect.isawaitable(ref) else ref
+                       for ref in refs]
             return self.kv_output_aggregator.aggregate(outputs)
 
         # Return a future that will aggregate outputs from all workers

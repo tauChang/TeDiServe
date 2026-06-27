@@ -1,0 +1,152 @@
+{
+  "common": {
+    "VLLM_LOGGING_LEVEL": "INFO",
+    "MODEL": "GSAI-ML/LLaDA-8B-Instruct",
+    "NUM_GPUS_PER_MODEL_EXECUTOR": 1,
+    "SCHEDULER_CLASS": "vllm.v1.core.sched.tedi_new_correct_tput_async_update_scheduler.TeDiLightScheduler",
+    "DEFAULT_CONFIDENCE_THRESHOLD": 0.9,
+    "CANDIDATE_CONFIDENCE_THRESHOLDS": ["0.9", "0.8", "0.7", "0.6", "0.5"],
+    "CONFIDENCE_THRESHOLD_TPUT_DEMAND_CHANGE_RATIO": 100000000,
+    "NUM_PROFILE_RUNS": 8,
+    "NUM_PROFILE_WARMUP_RUNS": 3,
+    "TASK": "gsm8k",
+    "OUTPUT_LENGTH": 256,
+    "WRITE_RESULTS": true,
+    "VLLM_PORT": 8083,
+    "DENOISE_BLOCK_SIZE": 32,
+    "CACHE_PREFIX": true,
+    "CACHE_SUFFIX": true,
+    "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 1000,
+    "SYNC_STEP_PREDICTION": false,
+    "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/features.txt",
+    "NUM_CONCURENT": 200
+  },
+  "experiments": [
+    {
+      "name": "oracle_slo_6_ap_1319_007",
+      "SLO": 6,
+      "ARRIVAL_PATTERN": "1319:0.07",
+      "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.oracle.Oracle",
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/gsm8k_oracle/req_denoise_counts_by_conf.json"
+    },
+    {
+      "name": "oracle_slo_6_ap_1319_005",
+      "SLO": 6,
+      "ARRIVAL_PATTERN": "1319:0.05",
+      "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.oracle.Oracle",
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/gsm8k_oracle/req_denoise_counts_by_conf.json"
+    },
+    {
+      "name": "oracle_slo_6_ap_1319_003",
+      "SLO": 6,
+      "ARRIVAL_PATTERN": "1319:0.03",
+      "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.oracle.Oracle",
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/gsm8k_oracle/req_denoise_counts_by_conf.json"
+    },
+    {
+      "name": "oracle_slo_8_ap_1319_007",
+      "SLO": 8,
+      "ARRIVAL_PATTERN": "1319:0.07",
+      "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.oracle.Oracle",
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/gsm8k_oracle/req_denoise_counts_by_conf.json"
+    },
+    {
+      "name": "oracle_slo_8_ap_1319_005",
+      "SLO": 8,
+      "ARRIVAL_PATTERN": "1319:0.05",
+      "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.oracle.Oracle",
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/gsm8k_oracle/req_denoise_counts_by_conf.json"
+    },
+    {
+      "name": "oracle_slo_8_ap_1319_003",
+      "SLO": 8,
+      "ARRIVAL_PATTERN": "1319:0.03",
+      "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.oracle.Oracle",
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/gsm8k_oracle/req_denoise_counts_by_conf.json"
+    },
+    {
+      "name": "oracle_slo_10_ap_1319_007",
+      "SLO": 10,
+      "ARRIVAL_PATTERN": "1319:0.07",
+      "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.oracle.Oracle",
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/gsm8k_oracle/req_denoise_counts_by_conf.json"
+    },
+    {
+      "name": "oracle_slo_10_ap_1319_005",
+      "SLO": 10,
+      "ARRIVAL_PATTERN": "1319:0.05",
+      "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.oracle.Oracle",
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/gsm8k_oracle/req_denoise_counts_by_conf.json"
+    },
+    {
+      "name": "oracle_slo_10_ap_1319_003",
+      "SLO": 10,
+      "ARRIVAL_PATTERN": "1319:0.03",
+      "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.oracle.Oracle",
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/gsm8k_oracle/req_denoise_counts_by_conf.json"
+    },
+    {
+      "name": "lightgbm_slo_6_ap_1319_007",
+      "SLO": 6,
+      "ARRIVAL_PATTERN": "1319:0.07",
+      "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine.LightGradientBoostMachine",
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/model.bin"
+    },
+    {
+      "name": "lightgbm_slo_6_ap_1319_005",
+      "SLO": 6,
+      "ARRIVAL_PATTERN": "1319:0.05",
+      "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine.LightGradientBoostMachine",
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/model.bin"
+    },
+    {
+      "name": "lightgbm_slo_6_ap_1319_003",
+      "SLO": 6,
+      "ARRIVAL_PATTERN": "1319:0.03",
+      "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine.LightGradientBoostMachine",
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/model.bin"
+    },
+    {
+      "name": "lightgbm_slo_8_ap_1319_007",
+      "SLO": 8,
+      "ARRIVAL_PATTERN": "1319:0.07",
+      "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine.LightGradientBoostMachine",
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/model.bin"
+    },
+    {
+      "name": "lightgbm_slo_8_ap_1319_005",
+      "SLO": 8,
+      "ARRIVAL_PATTERN": "1319:0.05",
+      "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine.LightGradientBoostMachine",
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/model.bin"
+    },
+    {
+      "name": "lightgbm_slo_8_ap_1319_003",
+      "SLO": 8,
+      "ARRIVAL_PATTERN": "1319:0.03",
+      "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine.LightGradientBoostMachine",
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/model.bin"
+    },
+    {
+      "name": "lightgbm_slo_10_ap_1319_007",
+      "SLO": 10,
+      "ARRIVAL_PATTERN": "1319:0.07",
+      "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine.LightGradientBoostMachine",
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/model.bin"
+    },
+    {
+      "name": "lightgbm_slo_10_ap_1319_005",
+      "SLO": 10,
+      "ARRIVAL_PATTERN": "1319:0.05",
+      "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine.LightGradientBoostMachine",
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/model.bin"
+    },
+    {
+      "name": "lightgbm_slo_10_ap_1319_003",
+      "SLO": 10,
+      "ARRIVAL_PATTERN": "1319:0.03",
+      "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine.LightGradientBoostMachine",
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/model.bin"
+    }
+  ]
+}

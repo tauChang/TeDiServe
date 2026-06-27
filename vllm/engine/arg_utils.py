@@ -328,6 +328,8 @@ class EngineArgs:
     long_prefill_token_threshold: int = \
         SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: Optional[int] = SchedulerConfig.max_num_seqs
+    max_num_unfinished_requests: Optional[int] = \
+        SchedulerConfig.max_num_unfinished_requests
     max_logprobs: int = ModelConfig.max_logprobs
     disable_log_stats: bool = False
     revision: Optional[str] = ModelConfig.revision
@@ -442,10 +444,23 @@ class EngineArgs:
         ParallelConfig.enable_multimodal_encoder_data_parallel
 
     async_scheduling: bool = SchedulerConfig.async_scheduling
+    sync_step_prediction: bool = SchedulerConfig.sync_step_prediction
+    enable_dropping: bool = SchedulerConfig.enable_dropping
+    step_estimate_update_interval: float = \
+        SchedulerConfig.step_estimate_update_interval
+    max_confidence_update_interval: float = \
+        SchedulerConfig.max_confidence_update_interval
 
     mask_token_id: int = ModelConfig.mask_token_id
+    request_latency_slo: float = ModelConfig.request_latency_slo
     num_gpus_per_model_executor: Union[str]= ClusterConfig.num_gpus_per_model_executor
     default_confidence_threshold: float = SchedulerConfig.default_confidence_threshold
+    candidate_confidence_thresholds: list[float] = \
+        get_field(SchedulerConfig, "candidate_confidence_thresholds")
+    step_estimator_refresh_unmasked_token_delta: int = \
+        SchedulerConfig.step_estimator_refresh_unmasked_token_delta
+    confidence_threshold_tput_demand_change_ratio: float = \
+        SchedulerConfig.confidence_threshold_tput_demand_change_ratio
     step_estimator_model_class: Optional[str] = SchedulerConfig.step_estimator_model_class
     step_estimator_model_path: Optional[str] = SchedulerConfig.step_estimator_model_path
     step_estimator_features_path: Optional[str] = SchedulerConfig.step_estimator_features_path
@@ -457,6 +472,7 @@ class EngineArgs:
     latency_profile_dir: Optional[str] = ProfileConfig.latency_profile_dir
     num_profile_runs: int = ProfileConfig.num_profile_runs
     num_profile_warmup_runs: int = ProfileConfig.num_profile_warmup_runs
+    reconfig_interval: int = ClusterConfig.reconfig_interval
 
     experiment_dir: Optional[str] = ExperimentConfig.experiment_dir
     total_num_requests: Optional[int] = ExperimentConfig.total_num_requests
@@ -564,6 +580,8 @@ class EngineArgs:
                                  **model_kwargs["override_attention_dtype"])
         model_group.add_argument("--mask-token-id",
                                  **model_kwargs["mask_token_id"])
+        model_group.add_argument("--request-latency-slo",
+                     **model_kwargs["request_latency_slo"])
         model_group.add_argument("--denoise-block-size",
                                  **model_kwargs["denoise_block_size"])
         model_group.add_argument("--cache-prefix",
@@ -696,6 +714,8 @@ class EngineArgs:
         cluster_group.add_argument(
             "--num-gpus-per-model-executor",
             **cluster_kwargs["num_gpus_per_model_executor"])
+        cluster_group.add_argument("--reconfig-interval",
+                                   **cluster_kwargs["reconfig_interval"])
         
 
         # KV cache arguments
@@ -860,6 +880,9 @@ class EngineArgs:
         scheduler_group.add_argument("--max-num-seqs",
                                      **scheduler_kwargs["max_num_seqs"])
         scheduler_group.add_argument(
+            "--max-num-unfinished-requests",
+            **scheduler_kwargs["max_num_unfinished_requests"])
+        scheduler_group.add_argument(
             "--max-num-partial-prefills",
             **scheduler_kwargs["max_num_partial_prefills"])
         scheduler_group.add_argument(
@@ -896,8 +919,28 @@ class EngineArgs:
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
         scheduler_group.add_argument("--async-scheduling",
                                      **scheduler_kwargs["async_scheduling"])
+        scheduler_group.add_argument("--sync-step-prediction",
+                                     **scheduler_kwargs["sync_step_prediction"])
+        scheduler_group.add_argument("--enable-dropping",
+                                     **scheduler_kwargs["enable_dropping"])
+        scheduler_group.add_argument(
+            "--step-estimate-update-interval",
+            **scheduler_kwargs["step_estimate_update_interval"])
+        scheduler_group.add_argument(
+            "--max-confidence-update-interval",
+            **scheduler_kwargs["max_confidence_update_interval"])
         scheduler_group.add_argument("--default-confidence-threshold",
                                      **scheduler_kwargs["default_confidence_threshold"])
+        scheduler_group.add_argument(
+            "--candidate-confidence-thresholds",
+            **scheduler_kwargs["candidate_confidence_thresholds"])
+        scheduler_group.add_argument(
+            "--step-estimator-refresh-unmasked-token-delta",
+            **scheduler_kwargs["step_estimator_refresh_unmasked_token_delta"])
+        scheduler_group.add_argument(
+            "--confidence-threshold-tput-demand-change-ratio",
+            **scheduler_kwargs[
+                "confidence_threshold_tput_demand_change_ratio"])
         scheduler_group.add_argument("--step-estimator-model-class",
                                      **scheduler_kwargs["step_estimator_model_class"])
         scheduler_group.add_argument("--step-estimator-model-path",
@@ -1015,6 +1058,7 @@ class EngineArgs:
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
             mask_token_id=self.mask_token_id,
+            request_latency_slo=self.request_latency_slo,
             denoise_block_size=self.denoise_block_size,
             cache_prefix=self.cache_prefix,
             cache_suffix=self.cache_suffix,
@@ -1260,6 +1304,7 @@ class EngineArgs:
 
         cluster_config = ClusterConfig(
             num_gpus_per_model_executor=self.num_gpus_per_model_executor,
+            reconfig_interval=self.reconfig_interval,
         )
 
         speculative_config = self.create_speculative_config(
@@ -1296,6 +1341,7 @@ class EngineArgs:
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
+            max_num_unfinished_requests=self.max_num_unfinished_requests,
             max_model_len=model_config.max_model_len,
             cuda_graph_sizes=self.cuda_graph_sizes,
             num_lookahead_slots=num_lookahead_slots,
@@ -1316,12 +1362,22 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.
             disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            enable_dropping=self.enable_dropping,
+            step_estimate_update_interval=self.step_estimate_update_interval,
+            max_confidence_update_interval=
+            self.max_confidence_update_interval,
             default_confidence_threshold=self.default_confidence_threshold,
+            candidate_confidence_thresholds=self.candidate_confidence_thresholds,
+            step_estimator_refresh_unmasked_token_delta=
+            self.step_estimator_refresh_unmasked_token_delta,
+            confidence_threshold_tput_demand_change_ratio=
+            self.confidence_threshold_tput_demand_change_ratio,
             step_estimator_model_class=self.step_estimator_model_class,
             step_estimator_model_path=self.step_estimator_model_path,
             step_estimator_features_path=self.step_estimator_features_path,
             step_estimator_features=self.step_estimator_features,
             step_data_dir=self.step_data_dir,
+            sync_step_prediction=self.sync_step_prediction,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
@@ -1566,7 +1622,7 @@ class EngineArgs:
         if (self.pipeline_parallel_size > 1
                 and self.distributed_executor_backend
                 not in (ParallelConfig.distributed_executor_backend, "ray",
-                        "mp", "external_launcher")):
+                "mp", "external_launcher", "fake")):
             name = "Pipeline Parallelism without Ray distributed executor " \
                     "or multiprocessing executor or external launcher"
             _raise_or_fallback(feature_name=name, recommend_to_remove=False)

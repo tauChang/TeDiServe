@@ -11,7 +11,7 @@ from datetime import datetime
 # Helper functions
 # ----------------------------
 
-def compute_stats(arr):
+def compute_stats(arr, batch_sizes):
     arr = np.array(arr)
     return {
         "count": len(arr),
@@ -21,6 +21,7 @@ def compute_stats(arr):
         "min": float(np.min(arr)),
         "max": float(np.max(arr)),
         "stddev": float(np.std(arr)),
+        "total_samples_processed": int(np.sum(batch_sizes)),
     }
 
 
@@ -49,6 +50,9 @@ def load_entries(path):
 # ----------------------------
 
 def analyze_file(input_path):
+    if not os.path.isfile(input_path):
+        print(f"File not found: {input_path}")
+        return
 
     entries = load_entries(input_path)
 
@@ -66,7 +70,7 @@ def analyze_file(input_path):
     timestamps, predict_times, batch_sizes = map(list, zip(*zipped))
 
     # Stats
-    stats = compute_stats(predict_times)
+    stats = compute_stats(predict_times, batch_sizes)
 
     # Output paths
     base_dir = os.path.dirname(os.path.abspath(input_path))
@@ -87,6 +91,12 @@ def analyze_file(input_path):
         f.write(f"min     : {stats['min']:.4f}\n")
         f.write(f"max     : {stats['max']:.4f}\n")
         f.write(f"stddev  : {stats['stddev']:.4f}\n")
+        f.write(f"total_samples_processed: {stats['total_samples_processed']}\n")
+
+    # Print to stdout
+    print("=== PREDICT LATENCY SUMMARY ===\n")
+    print(f"count   : {stats['count']}")
+    print(f"total_samples_processed: {stats['total_samples_processed']}")
 
     # ----------------------------
     # Plot: predict time vs timestamp

@@ -23,13 +23,18 @@ REQUEST_PLOTS_DIR=${EXPERIMENT_DIR}/request_plots
 ##############################################
 
 # VLLM Args
+VLLM_LOGGING_LEVEL=DEBUG
 MODEL="GSAI-ML/LLaDA-8B-Instruct"
 NUM_GPUS_PER_MODEL_EXECUTOR=1
 # SCHEDULER_CLASS=vllm.v1.core.sched.infaas_scheduler.InFaaSScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.infaas_aligned_scheduler.InFaaSAlignedScheduler
-SCHEDULER_CLASS=vllm.v1.core.sched.tedi_new_correct_tput_scheduler.TeDiLightScheduler
+SCHEDULER_CLASS=vllm.v1.core.sched.tedi_new_correct_tput_async_update_scheduler.TeDiLightScheduler
 # SCHEDULER_CLASS=vllm.v1.core.sched.llumnix_fcfs_scheduler.LlumnixFCFSScheduler
 DEFAULT_CONFIDENCE_THRESHOLD=0.9
+CANDIDATE_CONFIDENCE_THRESHOLDS="0.9 0.8 0.7 0.6 0.5"
+STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA=1
+CONFIDENCE_THRESHOLD_TPUT_DEMAND_CHANGE_RATIO=0.1
+SYNC_STEP_PREDICTION=false
 NUM_PROFILE_RUNS=8
 NUM_PROFILE_WARMUP_RUNS=3
 STEP_ESTIMATOR_MODEL_CLASS=vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine.LightGradientBoostMachine
@@ -49,8 +54,10 @@ CACHE_SUFFIX=true
 if [ "$CACHE_PREFIX" = true ] && [ "$CACHE_SUFFIX" = true ]; then
     # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_avg/model.bin
     # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/1121_dual_256_512_1024_avg/features.txt
-    STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/sharegpt_1130/model.bin
-    STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/sharegpt_1130/features.txt
+    # STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/sharegpt_1130/model.bin
+    # STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/sharegpt_1130/features.txt
+    STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/model.bin
+    STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/features.txt
 elif [ "$CACHE_PREFIX" = true ] && [ "$CACHE_SUFFIX" = false ]; then
     STEP_ESTIMATOR_MODEL_PATH=./analysis/denoise_step_prediction/models/lgb/prefix_cache_256_32/model.bin
     STEP_ESTIMATOR_FEATURES_PATH=./analysis/denoise_step_prediction/models/lgb/prefix_cache_256_32/features.txt
@@ -64,9 +71,10 @@ fi
 # (from your run_sharegpt-style script)
 ##############################################
 TOKENIZER="GSAI-ML/LLaDA-8B-Instruct"
-IP_PORTS=("localhost:8000")
-DATASET_PATH="eval/sharegpt_gpt4_clean.jsonl"
-MAX_REQUEST_LEN=2048
+IP_PORTS=("localhost:8080")
+# DATASET_PATH="eval/sharegpt_gpt4_clean.jsonl"
+DATASET_PATH="eval/sharegpt_gpt4_clean_train.jsonl"
+MAX_REQUEST_LEN=4096
 LOG_LATENCIES=0
 FAIL_ON_ERROR=0
 VERBOSE=1
@@ -80,12 +88,12 @@ TRUST_REMOTE_CODE=0
 # ARRIVAL_TIME_FILE="/work2/10446/tchang85/stampede3/BurstGPT/burstgpt_2hrs_17qps_20_to_60.txt"
 # ARRIVAL_TIME_FILE="/work2/10446/tchang85/stampede3/BurstGPT/burstgpt_2hrs_18qps_20_to_60.txt"
 # ARRIVAL_TIME_FILE="/work2/10446/tchang85/stampede3/BurstGPT/burstgpt_8hrs_35qps_170_to_190.txt"
-ARRIVAL_TIME_FILE="/work2/10446/tchang85/stampede3/BurstGPT/arrival_trace_4_12_20.txt"
+# ARRIVAL_TIME_FILE="/work2/10446/tchang85/stampede3/BurstGPT/arrival_trace_4_12_20.txt"
 
 # ARRIVAL_TIME_FILE="/work2/10446/tchang85/stampede3/BurstGPT/burstgpt_2hrs_22qps.txt"
 # ARRIVAL_TIME_FILE="/work2/10446/tchang85/stampede3/BurstGPT/burstgpt_2hrs_24qps.txt"
-# LIMIT=4
-# NUM_REQUESTS=1000
+LIMIT=10
+NUM_REQUESTS=10
 SLO=12.5
 
 ##############################################
@@ -93,10 +101,12 @@ SLO=12.5
 ##############################################
 VLLM_CMD="vllm serve --trust-remote-code ${MODEL} \
     --distributed-executor-backend ray \
-    --enforce-eager \
     --num-gpus-per-model-executor ${NUM_GPUS_PER_MODEL_EXECUTOR} \
     --scheduler_cls ${SCHEDULER_CLASS} \
     --default-confidence-threshold ${DEFAULT_CONFIDENCE_THRESHOLD} \
+    --candidate-confidence-thresholds ${CANDIDATE_CONFIDENCE_THRESHOLDS} \
+    --step-estimator-refresh-unmasked-token-delta ${STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA} \
+    --confidence-threshold-tput-demand-change-ratio ${CONFIDENCE_THRESHOLD_TPUT_DEMAND_CHANGE_RATIO} \
     --num-profile-runs ${NUM_PROFILE_RUNS} \
     --num-profile-warmup-runs ${NUM_PROFILE_WARMUP_RUNS} \
     --step-estimator-model-class ${STEP_ESTIMATOR_MODEL_CLASS} \
@@ -104,7 +114,11 @@ VLLM_CMD="vllm serve --trust-remote-code ${MODEL} \
     --step-estimator-features-path ${STEP_ESTIMATOR_FEATURES_PATH} \
     --step-data-dir ${STEP_DATA_DIR} \
     --experiment-dir ${EXPERIMENT_DIR} \
+    --compilation-config '{\"full_cuda_graph\": true}' \
+    --port ${IP_PORTS[0]##*:} \
+    --request-latency-slo $SLO \
     "
+# --enforce-eager \
 
 # mirror cache flags
 if [ "$CACHE_PREFIX" = "true" ]; then
@@ -118,6 +132,9 @@ if [ "$DENOISE_BLOCK_SIZE" -gt -1 ]; then
 fi
 if [ -n "$KV_TRANSFER_CONFIG" ]; then
     VLLM_CMD="$VLLM_CMD --kv-transfer-config '${KV_TRANSFER_CONFIG}'"
+fi
+if [ "$SYNC_STEP_PREDICTION" = "true" ]; then
+    VLLM_CMD="$VLLM_CMD --sync-step-prediction"
 fi
 
 ##############################################
@@ -168,12 +185,15 @@ echo "# Commands used for this experiment" > "$EXPERIMENT_DIR/commands.txt"
 
 # Pane 0: vllm serve
 log_and_send "$SESSION.0" \
-    "$VLLM_CMD 2>&1 | tee \"$LOG_DIR/vllm_serve.log\""
+    "export VLLM_LOGGING_LEVEL=$VLLM_LOGGING_LEVEL && \
+    $VLLM_CMD 2>&1 | tee \"$LOG_DIR/vllm_serve.log\""
 
 # Pane 1: ShareGPT loadgen
 tmux split-window -h -t $SESSION
 log_and_send "$SESSION.1" \
     "$SHAREGPT_CMD 2>&1 | tee \"$LOG_DIR/sharegpt_run.log\""
+
+log_and_send "$SESSION.1" "sleep 10"
 
 log_and_send "$SESSION.1" "python analysis/sharegpt_slo_attainment/run.py \
     --path \"$LOG_DIR/benchmark_latency_info.json\" \
@@ -181,6 +201,24 @@ log_and_send "$SESSION.1" "python analysis/sharegpt_slo_attainment/run.py \
 
 # log_and_send "$SESSION.1" \
 #     "python analysis/confidence_over_time/plot.py --step-data \"$STEP_DATA_FILE\" --workload-history \"$WORKLOAD_FILE\" --output-dir \"$REQUEST_PLOTS_DIR\" 2>&1 | tee \"$LOG_DIR/confidence_over_time.log\""
+
+log_and_send "$SESSION.1" \
+    "python analysis/profiler_analysis/scheduler/run_schedule.py \"$EXPERIMENT_DIR/profiles/scheduler/schedule.jsonl\" 2>&1 | tee \"$LOG_DIR/schedule_analysis.log\""
+
+log_and_send "$SESSION.1" \
+    "python analysis/calculate_num_recompute/run.py --path \"$EXPERIMENT_DIR/system_log.json\" 2>&1 | tee \"$LOG_DIR/num_recompute.log\""
+
+log_and_send "$SESSION.1" \
+    "python analysis/profiler_analysis/scheduler/run_update.py \"$EXPERIMENT_DIR/profiles/scheduler/update.jsonl\" 2>&1 | tee \"$LOG_DIR/update_analysis.log\""
+
+log_and_send "$SESSION.1" \
+    "python analysis/profiler_analysis/model_runner/run.py \"$EXPERIMENT_DIR/profiles/model_runners/\" 2>&1 | tee \"$LOG_DIR/model_runner_analysis.log\""
+
+log_and_send "$SESSION.1" \
+    "python analysis/profiler_analysis/step_estimator/run.py \"$EXPERIMENT_DIR/profiles/step_estimator/predict.jsonl\" 2>&1 | tee \"$LOG_DIR/step_estimator_analysis.log\""
+
+log_and_send "$SESSION.1" \
+    "python analysis/profiler_analysis/executor/run.py \"$EXPERIMENT_DIR/profiles/executors\" 2>&1 | tee \"$LOG_DIR/executor_analysis.log\""
 
 # Pane 2: nvidia-smi monitor
 tmux split-window -h -t $SESSION

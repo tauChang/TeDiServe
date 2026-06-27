@@ -156,8 +156,8 @@ def visualize_trace(arrival_times, window_minutes, outdir="trace_plots"):
 # 4. Main
 # =============================================================
 if __name__ == "__main__":
-    total_hours = 8
-    max_qps = 35
+    total_hours = 2
+    max_qps = 12
     # 1) Compute diurnal hourly pattern
     avg_qps = compute_average_hourly_qps("data/BurstGPT_1.csv")
 

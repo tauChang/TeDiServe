@@ -34,6 +34,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+DEFAULT_NUM_FEWSHOT_BY_TASK = {
+    "gsm8k": 5,
+    "mmlu_pro": 0,
+    "mbpp": 3,
+    "mbpp_instruct": 3,
+}
+
 SHOULD_APPLY_CHAT_TEMPLATE = {
     "GSAI-ML/LLaDA-8B-Instruct": True,
     "GSAI-ML/LLaDA-8B-Base": False,
@@ -42,10 +49,26 @@ SHOULD_APPLY_CHAT_TEMPLATE = {
 }
 
 def get_slurm_assigned_cpus():
+    affinity_override = os.environ.get("CPU_AFFINITY")
+    if affinity_override:
+        cpu_list = []
+        for part in affinity_override.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                start, end = map(int, part.split("-"))
+                cpu_list.extend(range(start, end + 1))
+            else:
+                cpu_list.append(int(part))
+        return cpu_list
+
     job_id = os.environ.get("SLURM_JOB_ID")
     if job_id is None:
-        return range(0, psutil.cpu_count(logical=True))
-        raise RuntimeError("Not running under SLURM")
+        try:
+            return list(psutil.Process().cpu_affinity())
+        except AttributeError:
+            return list(range(psutil.cpu_count(logical=True) or 1))
 
     uid = os.getuid()
     path = f"/sys/fs/cgroup/cpuset/slurm/uid_{uid}/job_{job_id}/cpuset.cpus"
@@ -83,11 +106,16 @@ def get_slurm_assigned_cpus():
 def parse_arrival_pattern(pattern_str: str, task: str, default_cv: float = 1.0):
     """
     Parse a string like:
-        '50:1.0, 50:3.0'
-        '50:1.0:2.0, 100:0.5'
-    
+        '50:10, 50:5'
+        '50:10:2.0, 100:5'
+
+    where each segment is:
+        num_requests:rps[:cv]
+
     Returns a list of:
         (num_requests, mean_interarrival, cv)
+
+    mean_interarrival is computed as 1 / rps.
     If cv is omitted, default_cv is used.
     """
     phases = []
@@ -98,22 +126,30 @@ def parse_arrival_pattern(pattern_str: str, task: str, default_cv: float = 1.0):
 
         parts = phase.split(":")
         if len(parts) == 2:
-            # Format: num:mean
-            num, mean = parts
+            # Format: num:rps
+            num, rps = parts
             cv = default_cv
         elif len(parts) == 3:
-            # Format: num:mean:cv
-            num, mean, cv = parts
+            # Format: num:rps:cv
+            num, rps, cv = parts
         else:
             raise ValueError(
                 f"Invalid arrival pattern segment '{phase}'. "
-                f"Expected num:mean or num:mean:cv"
+                f"Expected num:rps or num:rps:cv"
             )
-        
+
+        rps = float(rps)
+        if rps <= 0:
+            raise ValueError(
+                f"Invalid RPS '{rps}' in segment '{phase}'. RPS must be > 0."
+            )
+
+        mean_interarrival = 1.0 / rps
+
         if task == "mmlu_pro":
             num = str(int(num) * 14)  # scale up for mmlu_pro
 
-        phases.append((int(num), float(mean), float(cv)))
+        phases.append((int(num), mean_interarrival, float(cv)))
 
     return phases
 
@@ -199,10 +235,16 @@ def clean_configs_for_json(results):
             del cfg[k]
 
 
+def get_num_fewshot(args):
+    if args.num_fewshot is not None:
+        return args.num_fewshot
+    return DEFAULT_NUM_FEWSHOT_BY_TASK.get(args.task)
+
+
 def run_test(args):
     """Run the end to end accuracy test."""
     logger.info(f"Running test with args: {args}")
-    real_base_url = "http://localhost:8000/v1"
+    real_base_url = f"http://localhost:{args.vllm_port}/v1"
 
     logger.info(f"launching proxy to {real_base_url}")
 
@@ -236,13 +278,7 @@ def run_test(args):
         f"tokenized_requests=False,"
         f"timeout=10000")
 
-    num_fewshot = None
-    if args.task == "gsm8k":
-        num_fewshot = 5
-    elif args.task == "mmlu_pro":
-        num_fewshot = 0
-    elif args.task in ["mbpp", "mbpp_instruct"]:
-        num_fewshot = 3
+    num_fewshot = get_num_fewshot(args)
 
     results = lm_eval.simple_evaluate(
         model="local-completions",
@@ -300,14 +336,23 @@ def main():
     parser.add_argument(
         "--arrival-pattern",
         type=str,
-        help="Arrival pattern in 'num:interval,num:interval;...' format. "
-            "Example: '50:1.0,50:3.0' means first 50 req at 1s gaps, next 50 at 3s."
+        help="Arrival pattern in 'num:rps,num:rps;...' format (optional cv: 'num:rps:cv'). "
+            "Example: '50:10,50:5' means first 50 req at 10 RPS, next 50 at 5 RPS."
     )
     parser.add_argument(
         "--output-length", type=int, help="Output length"
     )
     parser.add_argument(
+        "--num-fewshot",
+        type=int,
+        default=None,
+        help="Override the number of few-shot examples. If omitted, task-specific defaults are used.",
+    )
+    parser.add_argument(
         "--output-path", type=str, help="Output path"
+    )
+    parser.add_argument(
+        "--vllm-port", type=int, default=8000, help="Port where the vLLM server is listening"
     )
     parser.add_argument(
         "--write-results", action="store_true", help="Whether to write results to output path"
@@ -331,6 +376,6 @@ def main():
 if __name__ == "__main__":
     p = psutil.Process()
     all_cpus = get_slurm_assigned_cpus()
-    cpus_to_use = all_cpus[len(all_cpus) * 3 // 4 :]
-    p.cpu_affinity(cpus_to_use)
+    p.cpu_affinity(all_cpus)
+    logger.info("Using CPU affinity: %s", all_cpus)
     main()

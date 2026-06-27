@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import logging
 import os
 import gc
 import time
@@ -73,6 +74,7 @@ else:
         "xgrammar.kernels.apply_token_bitmask_inplace_torch_compile")
 
 logger = init_logger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
@@ -823,12 +825,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
                 with self.time_profiler.section("padding_and_input_prep"):
                     num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+                    # if is_global_first_rank():
+                    #     logger.info(f"num_scheduled_tokens: {num_scheduled_tokens}, ")
                     if (self.use_cuda_graph
                             and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
                         # Use piecewise CUDA graphs.
                         # Add padding to the batch size.
                         num_input_tokens = self.vllm_config.pad_for_cudagraph(
                             num_scheduled_tokens)
+                        # if is_global_first_rank():
+                        #     logger.info(f"Using CUDA graph for batch size {num_scheduled_tokens} "
+                        #                 f"with padded input tokens {num_input_tokens}")
                     else:
                         # Eager mode.
                         # Pad tokens to multiple of tensor_parallel_size when
@@ -839,6 +846,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             num_input_tokens = round_up(num_scheduled_tokens, tp_size)
                         else:
                             num_input_tokens = num_scheduled_tokens
+                        # if is_global_first_rank():
+                        #     logger.info(f"Using eager mode for batch size {num_scheduled_tokens} "
+                        #                 f"with input tokens {num_input_tokens}")
 
                     # Padding for DP
                     num_pad, num_tokens_across_dp = self.get_dp_padding(num_input_tokens)
@@ -1334,6 +1344,145 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_ids.fill_(0)
 
     @torch.inference_mode()
+    def _dummy_run_for_latency_profile(
+        self,
+        num_tokens: int,
+        capture_attn_cudagraph: bool = False,
+        skip_eplb: bool = False,
+        is_profile: bool = False,
+        use_attn_metadata: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+
+        # Padding for DP
+        num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
+        logger.debug(f"Dummy run with num_tokens: {num_tokens}, "
+                     f"num_pad: {num_pad}, ")
+        num_tokens += num_pad
+
+        # Set num_scheduled_tokens based on num_tokens and max_num_seqs
+        # for dummy run with LoRA so that the num_reqs collectively
+        # has num_tokens in total.
+        assert num_tokens <= self.scheduler_config.max_num_batched_tokens
+        # num_reqs = min(num_tokens, max_num_reqs)
+        # if (self.model_config.cache_prefix and \
+        #     self.model_config.cache_suffix) and \
+        #         self.model_config.denoise_block_size > 0:
+        #     seq_len = self.model_config.denoise_block_size
+        # else:
+        #     # seq_len = min(num_tokens, 512)
+        #     # has to use num_tokens
+        #     seq_len = min(num_tokens, self.max_model_len)
+
+        seq_len = min(num_tokens, self.max_model_len)
+        # num_reqs = max(1, num_tokens // seq_len)
+        num_reqs = max(1, -(-num_tokens // seq_len))  # Ceiling division
+        # num_reqs = max(1, num_tokens // 32)
+        # max_num_reqs = self.scheduler_config.max_num_seqs
+        # num_reqs = min(num_tokens , max_num_reqs)
+        logger.debug(f"Dummy run with num_reqs: {num_reqs} and num_tokens: {num_tokens}")
+        min_tokens_per_req = num_tokens // num_reqs
+        num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
+        num_scheduled_tokens_list[-1] += num_tokens % num_reqs
+        assert sum(num_scheduled_tokens_list) == num_tokens
+        assert len(num_scheduled_tokens_list) == num_reqs
+        num_scheduled_tokens = np.array(num_scheduled_tokens_list,
+                                        dtype=np.int32)
+
+        attn_metadata: Optional[dict[str, Any]] = None
+        # if capture_attn_cudagraph:
+        # if use_attn_metadata:
+        if capture_attn_cudagraph or use_attn_metadata:
+            attn_metadata = {}
+
+            # Make sure max_model_len is used at the graph capture time.
+            self.seq_lens_np[:num_reqs] = self.max_model_len
+            self.seq_lens_np[num_reqs:] = 0
+            self.seq_lens[:num_reqs].copy_(self.seq_lens_cpu[:num_reqs],
+                                           non_blocking=True)
+            seq_lens = self.seq_lens[:num_reqs]
+
+            cu_num_tokens, arange = self._get_cumsum_and_arange(
+            num_scheduled_tokens)
+            
+            logger.debug(f"cu_num_tokens: {cu_num_tokens}")
+            self.query_start_loc_np[0] = 0
+            self.query_start_loc_np[1:num_reqs +1] = cu_num_tokens
+            self.query_start_loc[:num_reqs + 1].copy_(
+                self.query_start_loc_cpu[:num_reqs + 1], non_blocking=True)
+            self.query_start_loc[num_reqs +1:].fill_(
+                self.query_start_loc_cpu[num_reqs].item())
+            logger.debug(f"query_start_loc: {self.query_start_loc[:num_reqs+1]}")
+            logger.debug(f"seq_lens: {self.seq_lens[:num_reqs]}")
+
+            for kv_cache_group_id, kv_cache_group_spec in enumerate(
+                    self.kv_cache_config.kv_cache_groups):
+                common_attn_metadata = CommonAttentionMetadata(
+                    query_start_loc=self.query_start_loc[:num_reqs + 1],
+                    query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs +
+                                                                 1],
+                    seq_lens=self.seq_lens[:num_reqs],
+                    seq_lens_cpu=self.seq_lens_cpu[:num_reqs],
+                    num_computed_tokens_cpu=self.input_batch.
+                    num_computed_tokens_cpu_tensor[:num_reqs],
+                    num_reqs=num_reqs,
+                    num_actual_tokens=num_tokens,
+                    max_query_len=num_tokens,
+                    block_table_tensor=self.input_batch.block_table[
+                        kv_cache_group_id].get_device_tensor()[:num_reqs],
+                    slot_mapping=self.input_batch.
+                    block_table[kv_cache_group_id].slot_mapping[:num_tokens])
+
+                attn_metadata_i = self.attn_metadata_builders[
+                    kv_cache_group_id].build_for_cudagraph_capture(
+                        common_attn_metadata)
+                for layer_name in kv_cache_group_spec.layer_names:
+                    attn_metadata[layer_name] = attn_metadata_i
+
+        with self.maybe_dummy_run_with_lora(self.lora_config,
+                                            num_scheduled_tokens):
+            model = self.model
+            input_ids = self.input_ids[:num_tokens]
+            inputs_embeds = None
+            positions = self.positions[:num_tokens]
+
+            if get_pp_group().is_first_rank:
+                intermediate_tensors = None
+            else:
+                if self.intermediate_tensors is None:
+                    self.intermediate_tensors = (
+                        self.model.make_empty_intermediate_tensors(
+                            batch_size=self.max_num_tokens,
+                            dtype=self.model_config.dtype,
+                            device=self.device))
+
+                intermediate_tensors = self.sync_and_slice_intermediate_tensors(
+                    num_tokens, None, False)
+            
+
+            with self.maybe_randomize_inputs(input_ids), set_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_tokens,
+                    num_tokens_across_dp=num_tokens_across_dp):
+                self._sync_device()
+                start_time = time.time()
+                logger.debug(f"input_ids shape: {input_ids.shape}")
+                outputs = model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                )
+                logger.debug(f"outputs shape: {outputs.shape}")
+                self._sync_device()
+                logger.debug(f"in _dummy_run model forward took "
+                             f"{time.time() - start_time} seconds")
+            hidden_states = outputs
+
+        logit_indices = np.cumsum(num_scheduled_tokens) - 1
+        return hidden_states, hidden_states[logit_indices]
+
+    @torch.inference_mode()
     def _dummy_run(
         self,
         num_tokens: int,
@@ -1646,7 +1795,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self._sync_device()
             start_time = time.time()
             hidden_states, last_hidden_states \
-                = self._dummy_run(num_tokens, is_profile=False, use_attn_metadata=True)
+                = self._dummy_run_for_latency_profile(num_tokens, is_profile=False, use_attn_metadata=True)
             if get_pp_group().is_last_rank:
                 if self.is_pooling_model:
                     output = self._dummy_pooler_run(hidden_states)

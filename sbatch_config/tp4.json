@@ -1,0 +1,40 @@
+{
+  "sbatch": {
+    "job_name": "multi_burst_sched",
+    "output": "sbatch_experiment_dir/slurm-%x-%j.out",
+    "error": "sbatch_experiment_dir/slurm-%x-%j.err",
+    "time": "00:15:00",
+    "partition": "ghx4",
+    "account": "bftv-dtai-gh",
+    "gpus": 4,
+    "nodes": 1,
+    "cpus_per_gpu": 36,
+    "mail_type": "BEGIN,END,FAIL",
+    "mail_user": "tchang85@wisc.edu"
+  },
+  "common": {
+    "VLLM_LOGGING_LEVEL": "INFO",
+    "MODEL": "GSAI-ML/LLaDA-8B-Instruct",
+    "NUM_GPUS_PER_MODEL_EXECUTOR": 4,
+    "DISTRIBUTED_EXECUTOR_BACKEND": "ray",
+    "DEFAULT_CONFIDENCE_THRESHOLD": 0.9,
+    "CANDIDATE_CONFIDENCE_THRESHOLDS": ["0.9", "0.8", "0.7", "0.6", "0.5"],
+    "SLO": 12.5,
+    "TOKENIZER": "GSAI-ML/LLaDA-8B-Instruct",
+    "DATASET_PATH": "eval/sharegpt_gpt4_clean_train.jsonl",
+    "MAX_REQUEST_LEN": 4096,
+    "VLLM_PORT": 8083,
+    "TRUST_REMOTE_CODE": 1,
+    "LOG_LATENCIES": 1,
+    "MAX_NUM_UNFINISHED_REQUESTS": 100,
+    "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 8,
+    "VERBOSE": 1
+  },
+  "experiments": [
+    {
+      "name": "tedi_20qps",
+      "ARRIVAL_TIME_FILE": "/u/tchang85/dllm/BurstGPT/burstgpt_10min_4qps.txt",
+      "SCHEDULER_CLASS": "vllm.v1.core.sched.tedi_async_drop_scheduler.TeDiLightScheduler"
+    }
+  ]
+}

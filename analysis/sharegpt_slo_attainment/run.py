@@ -20,6 +20,9 @@ def load_instances(json_path):
 
     df = pd.DataFrame.from_dict(instances, orient="index")
 
+    if "status" not in df.columns:
+        df["status"] = "success"
+
     # Optional: compute total tokens
     df["total_tokens"] = df["prompt_len"] + df["expected_response_len"]
 
@@ -44,9 +47,15 @@ def analyze_eval_results(json_path, slo=3.0):
     print(f"Average latency: {df['request_latency'].mean():.2f} sec")
 
     total_requests = len(df)
-    requests_within_slo = (df["request_latency"] <= slo).sum()
+    dropped_requests = (df["status"] == "dropped").sum()
+    requests_within_slo = (
+        (df["status"] == "success") &
+        (df["request_latency"] <= slo)
+    ).sum()
+    dropped_percentage = dropped_requests / total_requests * 100.0
     slo_attainment = requests_within_slo / total_requests * 100.0
 
+    print(f"Dropped requests: {dropped_percentage:.2f}% ({dropped_requests}/{total_requests})")
     print(f"SLO Attainment (@ {slo} sec): {slo_attainment:.2f}% ({requests_within_slo}/{total_requests})")
     
 # ==============================================================================

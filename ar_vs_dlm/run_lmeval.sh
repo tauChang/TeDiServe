@@ -11,7 +11,7 @@ ln -sfn "$EXPERIMENT_DIR" ./current_experiment
 # copy this file to experiment dir for record keeping
 cp run_lmeval.sh $EXPERIMENT_DIR/
 
-MODEL=meta-llama/Llama-3.1-8B
+MODEL=meta-llama/Meta-Llama-3-8B-Instruct
 NUM_GPUS_PER_MODEL_EXECUTOR=1
 
 SCHEDULER_CLASS=vllm.v1.core.sched.infaas_aligned_scheduler.InFaaSAlignedScheduler
@@ -99,7 +99,7 @@ TASK=gsm8k
 # ARRIVAL_PATTERN="474:0.1111"
 # ARRIVAL_PATTERN="474:0.03333"
 # ARRIVAL_PATTERN="300:0.1"
-ARRIVAL_PATTERN="100:0"
+ARRIVAL_PATTERN="1319:0"
 # ARRIVAL_PATTERN="100:0.0625"
 # ARRIVAL_PATTERN="5:0"
 # ARRIVAL_PATTERN="100:1:0"
@@ -117,7 +117,7 @@ fi
 
 # NUM_CONCURRENT=$TOTAL_NUM_REQUESTS
 NUM_CONCURRENT=1
-OUTPUT_LENGTH=256
+OUTPUT_LENGTH=1024
 WRITE_RESULTS=true
 RESULTS_DIR=$EXPERIMENT_DIR/results
 # make results_dir prefix with confidence

@@ -1,0 +1,151 @@
+{
+  "common": {
+    "VLLM_LOGGING_LEVEL": "INFO",
+    "MODEL": "GSAI-ML/LLaDA-8B-Instruct",
+    "NUM_GPUS_PER_MODEL_EXECUTOR": 1,
+    "SCHEDULER_CLASS": "vllm.v1.core.sched.tedi_new_correct_tput_async_update_scheduler.TeDiLightScheduler",
+    "DEFAULT_CONFIDENCE_THRESHOLD": 0.9,
+    "CANDIDATE_CONFIDENCE_THRESHOLDS": ["0.9", "0.8", "0.7", "0.6", "0.5"],
+    "CONFIDENCE_THRESHOLD_TPUT_DEMAND_CHANGE_RATIO": 100000000,
+    "NUM_PROFILE_RUNS": 8,
+    "NUM_PROFILE_WARMUP_RUNS": 3,
+    "STEP_ESTIMATOR_MODEL_CLASS": "vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine.LightGradientBoostMachine",
+    "TASK": "gsm8k",
+    "OUTPUT_LENGTH": 256,
+    "WRITE_RESULTS": true,
+    "VLLM_PORT": 8083,
+    "ARRIVAL_PATTERN": "200:0.06",
+    "DENOISE_BLOCK_SIZE": 32,
+    "CACHE_PREFIX": true,
+    "CACHE_SUFFIX": true,
+    "SYNC_STEP_PREDICTION": false
+  },
+  "experiments": [
+    {
+      "name": "all_features_delta_8_slo_10",
+      "SLO": 10,
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/model.bin",
+      "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/features.txt",
+      "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 8
+    },
+    {
+      "name": "no_confidence_features_delta_8_slo_10",
+      "SLO": 10,
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_no_confidence_features/model.bin",
+      "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_no_confidence_features/features.txt",
+      "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 8
+    },
+    {
+      "name": "threshold_only_delta_1000_slo_10",
+      "SLO": 10,
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_threshold_only/model.bin",
+      "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_threshold_only/features.txt",
+      "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 1000
+    },
+    {
+      "name": "all_features_delta_8_slo_9",
+      "SLO": 9,
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/model.bin",
+      "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/features.txt",
+      "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 8
+    },
+    {
+      "name": "no_confidence_features_delta_8_slo_9",
+      "SLO": 9,
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_no_confidence_features/model.bin",
+      "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_no_confidence_features/features.txt",
+      "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 8
+    },
+    {
+      "name": "threshold_only_delta_1000_slo_9",
+      "SLO": 9,
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_threshold_only/model.bin",
+      "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_threshold_only/features.txt",
+      "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 1000
+    },
+    {
+      "name": "all_features_delta_8_slo_8",
+      "SLO": 8,
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/model.bin",
+      "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/features.txt",
+      "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 8
+    },
+    {
+      "name": "no_confidence_features_delta_8_slo_8",
+      "SLO": 8,
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_no_confidence_features/model.bin",
+      "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_no_confidence_features/features.txt",
+      "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 8
+    },
+    {
+      "name": "threshold_only_delta_1000_slo_8",
+      "SLO": 8,
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_threshold_only/model.bin",
+      "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_threshold_only/features.txt",
+      "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 1000
+    },
+    {
+      "name": "all_features_delta_8_slo_7",
+      "SLO": 7,
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/model.bin",
+      "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/features.txt",
+      "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 8
+    },
+    {
+      "name": "no_confidence_features_delta_8_slo_7",
+      "SLO": 7,
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_no_confidence_features/model.bin",
+      "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_no_confidence_features/features.txt",
+      "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 8
+    },
+    {
+      "name": "threshold_only_delta_1000_slo_7",
+      "SLO": 7,
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_threshold_only/model.bin",
+      "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_threshold_only/features.txt",
+      "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 1000
+    },
+    {
+      "name": "all_features_delta_8_slo_6",
+      "SLO": 6,
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/model.bin",
+      "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/features.txt",
+      "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 8
+    },
+    {
+      "name": "no_confidence_features_delta_8_slo_6",
+      "SLO": 6,
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_no_confidence_features/model.bin",
+      "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_no_confidence_features/features.txt",
+      "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 8
+    },
+    {
+      "name": "threshold_only_delta_1000_slo_6",
+      "SLO": 6,
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_threshold_only/model.bin",
+      "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_threshold_only/features.txt",
+      "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 1000
+    },
+    {
+      "name": "all_features_delta_8_slo_5",
+      "SLO": 5,
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/model.bin",
+      "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_all_features/features.txt",
+      "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 8
+    },
+    {
+      "name": "no_confidence_features_delta_8_slo_5",
+      "SLO": 5,
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_no_confidence_features/model.bin",
+      "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_no_confidence_features/features.txt",
+      "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 8
+    },
+    {
+      "name": "threshold_only_delta_1000_slo_5",
+      "SLO": 5,
+      "STEP_ESTIMATOR_MODEL_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_threshold_only/model.bin",
+      "STEP_ESTIMATOR_FEATURES_PATH": "./analysis/denoise_step_prediction/models/lgb/sharegpt_0415_threshold_only/features.txt",
+      "STEP_ESTIMATOR_REFRESH_UNMASKED_TOKEN_DELTA": 1000
+    }
+  ]
+}

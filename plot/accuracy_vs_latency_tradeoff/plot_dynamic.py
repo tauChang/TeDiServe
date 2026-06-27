@@ -3,12 +3,12 @@ import numpy as np
 
 plt.rcParams.update({
     "font.family": "serif",
-    "font.size": 22,
-    "axes.labelsize": 22,
-    "xtick.labelsize": 20,
-    "ytick.labelsize": 20,
-    "legend.fontsize": 22,
-    "lines.linewidth": 2.5,
+    "font.size": 7,
+    "axes.labelsize": 7,
+    "xtick.labelsize": 6.5,
+    "ytick.labelsize": 6.5,
+    "legend.fontsize": 7.0,
+    "lines.linewidth": 1.3,
 })
 
 # ----------------------------
@@ -20,7 +20,7 @@ steps = np.array([40.16, 42.14, 44.27, 46.6, 49.285, 52.18, 56.04, 59.84, 64.92,
 
 accuracy = accuracy_raw / 10.0  # 717 → 71.7%
 
-fig, ax = plt.subplots(figsize=(7, 6))
+fig, ax = plt.subplots(figsize=(1.82, 1.34))
 
 # Trend line
 ax.plot(steps, accuracy, "--", color="gray", linewidth=1)
@@ -29,9 +29,9 @@ ax.plot(steps, accuracy, "--", color="gray", linewidth=1)
 sc = ax.scatter(
     steps,
     accuracy,
-    c=1-portion,
+    c=1 - portion,
     cmap="viridis",
-    s=180,
+    s=30,
     edgecolor="black",
     zorder=3,
 )
@@ -39,33 +39,38 @@ sc = ax.scatter(
 # ----------------------------
 # Axes settings
 # ----------------------------
-ax.set_xlabel("Number of denoising steps")
-ax.set_ylabel("Accuracy (%)")
+ax.set_xlabel("Number of denoising steps", labelpad=1)
+ax.set_ylabel("Accuracy (%)", labelpad=1)
+ax.tick_params(axis="both", direction="in", pad=1.0, length=1.5)
 ax.grid(alpha=0.3)
 ax.set_ylim(70, 80)
 ax.set_xlim(38, 82)
+ax.set_yticks([70, 72, 74, 76, 78, 80])
+ax.set_xticks([40, 50, 60, 70, 80])
 
-# Leave room at the top for the colorbar
-plt.tight_layout(rect=[0, 0, 1, 0.82])
+# Manually pack the axes to reduce dead border space on the small figure.
+fig.subplots_adjust(left=0.18, right=0.98, bottom=0.19, top=0.78)
 
 # ----------------------------
-# Horizontal colorbar ABOVE the plot, with label on top & frame
+# Horizontal colorbar ABOVE the plot, with a compact wrapped title
 # ----------------------------
-# [left, bottom, width, height] in figure coordinates
-cbar_ax = fig.add_axes([0.15, 0.86, 0.7, 0.02])
+cbar_ax = fig.add_axes([0.20, 0.88, 0.72, 0.028])
 cbar = fig.colorbar(sc, cax=cbar_ax, orientation="horizontal")
+cbar.ax.tick_params(labelsize=6.5, pad=1, length=1.5)
+# set tick at 0, 0.2, 0.4, 0.6, 0.8, 1
+cbar.set_ticks([0, 0.2, 0.4, 0.6, 0.8, 1])
+cbar.set_ticklabels(["0", "0.2", "0.4", "0.6", "0.8", "1"])
+# ax.tick_params(axis="both", direction="in", pad=2.0, length=1.5)
 
-# Put text ABOVE the bar
 cbar_ax.set_title(
-    "Fraction of steps using conf threshold = 0.6",
-    fontsize=22,
-    pad=10,
+    "Fraction of steps using\nconfidence threshold = 0.6",
+    fontsize=7.2,
+    pad=1,
 )
 
-# Draw a frame around the colorbar
 for spine in cbar_ax.spines.values():
     spine.set_visible(True)
-    spine.set_linewidth(1.2)
+    spine.set_linewidth(0.8)
 
-plt.savefig("accuracy_vs_steps_dynamic.png", dpi=300, bbox_inches="tight")
-plt.savefig("accuracy_vs_steps_dynamic.pdf", dpi=300, bbox_inches="tight")
+plt.savefig("accuracy_vs_steps_dynamic.png", dpi=300, bbox_inches="tight", pad_inches=0.02)
+plt.savefig("accuracy_vs_steps_dynamic.pdf", dpi=300, bbox_inches="tight", pad_inches=0.02)

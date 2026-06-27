@@ -31,6 +31,7 @@ class Request:
         request_id: str,
         prompt_token_ids: list[int],
         mask_token_id: int,
+        latency_slo: Optional[float],
         multi_modal_inputs: Optional[list[MultiModalKwargs]],
         multi_modal_hashes: Optional[list[str]],
         multi_modal_placeholders: Optional[list[PlaceholderRange]],
@@ -146,9 +147,7 @@ class Request:
         self.num_nans_in_logits = 0
 
         # self.last_recompute_avg_output_confidence = None
-        # TODO: fix SLO
-        # self.latency_slo = 4.446
-        self.latency_slo = 12.5
+        self.latency_slo = latency_slo
 
         # for ablation study
         self.num_recompute = 0
@@ -157,6 +156,7 @@ class Request:
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest,
                                  mask_token_id: int,
+                                 latency_slo: Optional[float],
                                  denoise_block_size: int) -> "Request":
         if request.mm_inputs is not None:
             assert isinstance(request.mm_inputs, list)
@@ -168,6 +168,7 @@ class Request:
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
             mask_token_id=mask_token_id,
+            latency_slo=latency_slo,
             multi_modal_inputs=request.mm_inputs,
             multi_modal_hashes=request.mm_hashes,
             multi_modal_placeholders=request.mm_placeholders,
@@ -329,7 +330,7 @@ class Request:
         if self.latency_slo is None:
             return float("inf")
         elapsed = time.time() - self.arrival_time
-        return self.latency_slo * 0.8 - elapsed
+        return self.latency_slo * 0.9 - elapsed
         # return self.latency_slo * 0.9 - elapsed
     
 class RequestStatus(enum.IntEnum):

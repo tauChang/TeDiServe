@@ -1725,6 +1725,7 @@ async def init_app_state(
 
 
 def create_server_socket(addr: tuple[str, int]) -> socket.socket:
+    logger.info("Binding server to address %s:%d", addr[0] or "<all interfaces>", addr[1])
     family = socket.AF_INET
     if is_valid_ipv6_address(addr[0]):
         family = socket.AF_INET6

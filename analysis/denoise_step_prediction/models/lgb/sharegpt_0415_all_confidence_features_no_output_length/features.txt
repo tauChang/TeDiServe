@@ -1,0 +1,8 @@
+full_progress
+full_unmask_progress
+confidence_threshold
+output_min_confidence
+output_q25_confidence
+output_median_confidence
+output_avg_confidence
+output_q75_confidence

@@ -1,0 +1,8 @@
+Granularity: 1.0, Overhead: 0.2000, WMAPE: 0.1926
+Granularity: 2.0, Overhead: 0.1569, WMAPE: 0.1939
+Granularity: 4.0, Overhead: 0.1258, WMAPE: 0.1973
+Granularity: 8.0, Overhead: 0.0991, WMAPE: 0.2012
+Granularity: 16.0, Overhead: 0.0772, WMAPE: 0.2145
+Granularity: 32.0, Overhead: 0.0661, WMAPE: 0.2479
+Granularity: 64.0, Overhead: 0.0359, WMAPE: 0.2880
+Granularity: 100000.0, Overhead: 0.0036, WMAPE: 0.5434

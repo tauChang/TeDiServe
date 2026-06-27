@@ -134,7 +134,7 @@ class RequestState:
                 tokenizer=tokenizer,
                 request=request,
             )
-            logger.info(f"mask_token_id in RequestState: {mask_token_id}")
+            # logger.info(f"mask_token_id in RequestState: {mask_token_id}")
             detokenizer = IncrementalDetokenizer.from_new_request(
                 tokenizer=tokenizer,
                 request=request,

@@ -418,6 +418,8 @@ class ModelConfig:
     """Override dtype for attention"""
     mask_token_id: Optional[int] = 126336
     """The token ID to use for the mask token."""
+    request_latency_slo: float = 12.5
+    """Default latency SLO, in seconds, for generated requests."""
     denoise_block_size: Optional[int] = -1
     """The block size for each denoising block. If -1, the entire
     output is treated as a single denoising block."""
@@ -1885,7 +1887,7 @@ class LoadConfig:
             self.ignore_patterns = ["original/**/*"]
 
 
-DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
+DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher", "fake"]
 
 
 @config
@@ -2185,14 +2187,15 @@ class ParallelConfig:
         from vllm.executor.executor_base import ExecutorBase
         from vllm.platforms import current_platform
         if self.distributed_executor_backend not in (
-                "ray", "mp", "uni",
-                "external_launcher", None) and not (isinstance(
+            "ray", "mp", "uni", "fake",
+            "external_launcher", None) and not (isinstance(
                     self.distributed_executor_backend, type) and issubclass(
                         self.distributed_executor_backend, ExecutorBase)):
             raise ValueError(
                 "Unrecognized distributed executor backend "
                 f"{self.distributed_executor_backend}. Supported "
-                "values are 'ray', 'mp' 'uni', 'external_launcher' or"
+            "values are 'ray', 'mp', 'uni', 'fake', "
+            "'external_launcher' or"
                 " custom ExecutorBase subclass.")
         if self.use_ray:
             from vllm.executor import ray_utils
@@ -2217,6 +2220,9 @@ class ClusterConfig:
     num_gpus_per_model_executor: Union[str] = "1"
     """Number of GPUs to use per model executor. Parsed to int or dict, and 
     eventually parsed as dict of {model_executor_index: num_gpus}."""
+
+    reconfig_interval: int = -1
+    """Interval in seconds between background reconfiguration runs. Set to -1 to disable periodic reconfiguration."""
     
     placement_group: Optional["PlacementGroup"] = None
     """ray distributed model workers placement group."""
@@ -2386,9 +2392,24 @@ class SchedulerConfig:
     async scheduling is currently not supported with some features such as
     structured outputs, speculative decoding, and pipeline parallelism.
     """
+    sync_step_prediction: bool = False
+    """If set to True, wait for pending step-prediction updates to drain before each scheduling step."""
+
+    enable_dropping: bool = False
+    """If set to True, deferred requests may be dropped when the scheduler decides they can no longer be served."""
+
+    step_estimate_update_interval: float = 1.0
+    """Seconds the async TeDi step-estimate worker waits to batch additional updates."""
+
+    max_confidence_update_interval: float = 1.0
+    """Seconds the async max-confidence updater waits to debounce and batch updates."""
 
     default_confidence_threshold: float = 0.9
     """Default confidence threshold for dllm unmasking."""
+
+    candidate_confidence_thresholds: list[float] = field(
+        default_factory=lambda: [0.9, 0.8, 0.7, 0.6, 0.5])
+    """Confidence thresholds considered by the step estimator and scheduler."""
 
     step_estimator_model_class: Optional[str] = None
     """Class name of the step estimator. If None, no step estimator is used."""
@@ -2398,6 +2419,18 @@ class SchedulerConfig:
     """Path to the step estimator features config."""
     step_estimator_features: Optional[list[str]] = None
     """ Features used for step estimator."""
+    step_estimator_refresh_unmasked_token_delta: int = 1
+    """Minimum unmasked-token increase required before refreshing a step estimate."""
+
+    max_num_unfinished_requests: Optional[int] = None
+    """Maximum number of unfinished requests allowed in the scheduler.
+
+    When set, new requests are deferred until the scheduler has fewer than
+    this many unfinished requests.
+    """
+
+    confidence_threshold_tput_demand_change_ratio: float = 0.1
+    """Relative change in system tput demand required to refresh max confidence thresholds."""
 
     step_data_dir: Optional[str] = "./step_data"
     """Directory of the collected step data."""
@@ -4900,9 +4933,12 @@ class VllmConfig:
                 not self.model_config.enforce_eager:
                 cuda_graph_sizes = self.scheduler_config.cuda_graph_sizes
                 if len(cuda_graph_sizes) == 1:
-                    batch_size_capture_list = [1, 2, 4] + [
-                        i for i in range(8, cuda_graph_sizes[0] + 1, 8)
-                    ]
+                    # batch_size_capture_list = [1, 2, 4] + [
+                    #     i for i in range(8, cuda_graph_sizes[0] + 1, 8)
+                    # ]
+                    # multiple of denoise block size until cuda_graph_sizes[0]
+                    batch_size_capture_list = [self.model_config.denoise_block_size * i for i in range(1, cuda_graph_sizes[0] // self.model_config.denoise_block_size + 1)]  # type: ignore
+                    logger.warning(f"batch_size_capture_list is set to {batch_size_capture_list}.")
                 elif len(cuda_graph_sizes) > 1:
                     batch_size_capture_list = sorted(cuda_graph_sizes)
                 else:

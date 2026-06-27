@@ -50,6 +50,9 @@ class Executor(ExecutorBase):
             # TODO: make v1 scheduling deterministic
             # to support external launcher
             executor_class = ExecutorWithExternalLauncher
+        elif distributed_executor_backend == "fake":
+            from vllm.v1.executor.fake_executor import FakeExecutor  # noqa
+            executor_class = FakeExecutor
         else:
             raise ValueError("Unknown distributed executor backend: "
                              f"{distributed_executor_backend}")

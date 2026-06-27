@@ -71,17 +71,23 @@ class LatencyProfile:
         self.cached_lookup_max_batch_size = {}
         self.cached_lookup_cache_throughput = {}
 
-    def lookup(self, num_tokens: int) -> tuple[int, float]:
+    def lookup(self, num_tokens: int) -> Optional[tuple[int, float]]:
         """Find the closest batch size >= num_tokens and return (batch_size, latency)."""
+        if num_tokens <= 0:
+            return None
+
         if num_tokens in self.cached_lookup:
             return self.cached_lookup[num_tokens]
 
         idx = bisect.bisect_left(self.batch_sizes, num_tokens)
         if idx == len(self.batch_sizes):
-            idx -= 1
+            # If the request is larger than our largest profiled batch size, 
+            # we return None to indicate we cannot support this batch size.
+            return None
 
-        self.cached_lookup[num_tokens] = (self.batch_sizes[idx], self.latencies[idx])
-        return self.batch_sizes[idx], self.latencies[idx]
+        result = (self.batch_sizes[idx], self.latencies[idx])
+        self.cached_lookup[num_tokens] = result
+        return result
     
     def lookup_max_batch_size(self, max_latency: float) -> int:
         """Find the maximum batch size that can be processed within max_latency."""
@@ -189,3 +195,32 @@ class SystemLogger:
         """Fast path: just append a snapshot (tiny overhead)."""
         snapshot = SystemSnapshot.from_states(self.scheduler)
         self.file_writer.add(asdict(snapshot))
+
+
+@dataclass
+class MaxConfidenceThresholdSnapshot:
+    throughput_supply: float
+    current_tput_demand: float
+    request_max_confidence_thresholds: Dict[str, float]
+    request_tput_demand: Dict[str, float]
+    reqs_by_progress: List[str]
+    timestamp: str = field(default_factory=get_cur_timestamp)
+
+
+class MaxConfidenceThresholdLogger:
+    def __init__(self, log_dir: str, scheduler: object):
+        self.scheduler = scheduler
+        self.log_file = os.path.join(
+            scheduler.vllm_config.experiment_config.experiment_dir,
+            "max_confidence_threshold_log.json"
+        )
+
+        self.file_writer = BufferedAsyncFileWriter(file_path=self.log_file)
+
+    def log(self, snapshot: MaxConfidenceThresholdSnapshot):
+        try:
+            data = asdict(snapshot)
+            data = {"timestamp": data["timestamp"], **data}  # move to front
+            self.file_writer.add(data)
+        except Exception:
+            logger.exception("Failed to write max-confidence-threshold snapshot.")

@@ -107,6 +107,8 @@ async def inner_query_model_vllm_v1(prompt, verbose, ip_ports, server_req_func):
     global num_request_in_progress
     global finished_pbar
 
+    arrival_time = time.time()
+
     async with aiohttp.ClientSession(timeout=timeout) as session:
         request = server_req_func(prompt, expected_response_len)
         # if verbose:
@@ -118,8 +120,11 @@ async def inner_query_model_vllm_v1(prompt, verbose, ip_ports, server_req_func):
                 # if verbose:
                 #     print('Done')
                 output = await resp.json()
+                completion_time = time.time()
                 # necessary for latency calc
                 output['response_len'] = expected_response_len
+                output['arrival_time'] = arrival_time
+                output['completion_time'] = completion_time
                 # if verbose and 'choices' in output:
                 #     print(json.dumps(output["choices"][0]["message"]["content"]))
                 num_finished_requests += 1
@@ -401,6 +406,8 @@ class MeasureLatency:
         self._all_decode_token_latencies = []
         self._inference_latencies = []
         self._per_token_latency_breakdown_list = []
+        self._arrival_times = []
+        self._completion_times = []
 
     def measure(self, f):
         async def measured(*args, **kwargs):
@@ -409,6 +416,10 @@ class MeasureLatency:
             # Do not record latency if request failed.
             latency = time.time() - start
             self._request_latencies.append(latency)
+            if 'arrival_time' in output:
+                self._arrival_times.append(output['arrival_time'])
+            if 'completion_time' in output:
+                self._completion_times.append(output['completion_time'])
             try:
                 self._per_token_latencies.append(
                     latency / output['response_len'])
@@ -554,7 +565,9 @@ async def benchmark(
            m._all_decode_token_latencies, \
            m._per_token_latency_breakdown_list, \
             prompts, \
-            responses
+            responses, \
+            m._arrival_times, \
+            m._completion_times
 
 def gen_random_response_lens(distribution: str, len_mean, len_range, num_prompts):
     if distribution == 'uniform':
@@ -745,7 +758,7 @@ def main():
     # set seed
 
     # read arrival time file
-    if args.arrival_time_file != "":
+    if args.arrival_time_file:
         print(f"start loading file")
         arrival_times = np.loadtxt(args.arrival_time_file).tolist()
         print(f"loading finished")
@@ -813,7 +826,9 @@ def main():
     all_decode_token_latencies, \
     per_token_latency_breakdown_list, \
     prompts, \
-    responses = asyncio.run(benchmark(
+    responses, \
+    arrival_times, \
+    completion_times = asyncio.run(benchmark(
         tokenizer,
         prompts,
         arrival_times,
@@ -828,11 +843,14 @@ def main():
     if throughput is None:
         return
 
+    import datetime
     instances = {
         str(i): {
             "prompt_len": prompt_lens[i],
             "expected_response_len": response_lens[i],
             "request_latency": request_latencies[i],
+            "arrival_time": datetime.datetime.fromtimestamp(arrival_times[i]).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+            "completion_time": datetime.datetime.fromtimestamp(completion_times[i]).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
             "prompt": prompts[i],
             "response": responses[i],
         }
@@ -841,7 +859,6 @@ def main():
 
     file_name = os.path.splitext(args.log_filename)[0] + "_latency_info.json"
     results = []
-    import datetime
     current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
     file_name = os.path.splitext(args.log_filename)[0] + "_latency_info.json"
     try:

@@ -10,10 +10,12 @@ from gurobipy import Model, GRB, quicksum
 import asyncio
 from concurrent.futures import ProcessPoolExecutor
 import os
+import logging
 from typing import Optional
 import psutil
 
 NUM_THREADS = 8
+PLANNER_PINNED_CPUS: Optional[list[int]] = None
 
 logger = init_logger(__name__)
 
@@ -21,6 +23,61 @@ def get_timestamp(include_ms: bool = False) -> str:
     if not include_ms:
         return datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
     return datetime.now().strftime("%Y-%m-%d_%H:%M:%S.%f")[:-3]
+
+
+def _attach_file_logger(log_file: str):
+    """Attach a module-level FileHandler writing DEBUG logs to `log_file`.
+
+    This is idempotent: if a FileHandler already exists for the same
+    absolute path it will not be added again. Uses append mode so the
+    Gurobi log (written by the solver) and our logger can share the file.
+    """
+    if not log_file:
+        return
+    try:
+        abs_path = os.path.abspath(log_file)
+    except Exception:
+        return
+
+    # Remove any FileHandlers pointing to a different file to avoid log mixing
+    for h in list(logger.handlers):
+        try:
+            if isinstance(h, logging.FileHandler):
+                h_path = os.path.abspath(getattr(h, "baseFilename", ""))
+                if h_path != abs_path:
+                    logger.removeHandler(h)
+                    h.close()
+        except Exception:
+            continue
+
+    # Add handler for current file if not already present
+    for h in logger.handlers:
+        try:
+            if isinstance(h, logging.FileHandler) and os.path.abspath(getattr(h, "baseFilename", "")) == abs_path:
+                return  # Already attached
+        except Exception:
+            continue
+
+    fh = logging.FileHandler(abs_path, mode="a")
+    fh.setLevel(logging.DEBUG)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s Line %(lineno)d: %(message)s")
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+
+    # Ensure there's a console/stream handler so messages are visible on CLI.
+    has_stream = False
+    for h in logger.handlers:
+        try:
+            if isinstance(h, logging.StreamHandler):
+                has_stream = True
+                break
+        except Exception:
+            continue
+    if not has_stream:
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.INFO)
+        ch.setFormatter(logging.Formatter("%(asctime)s %(levelname)s Line %(lineno)d: %(message)s"))
+        logger.addHandler(ch)
 
 def get_minimum_movement_config(
         x_ng: dict,                       # {(node, g): Var/float/int} -> solved MILP counts (aggregate per g)
@@ -307,7 +364,27 @@ def get_maximum_confidence_abstract_config(
         else:
             DB_k[k] = 0
 
+    # Pre-solve SLO diagnostics.
+    # This is not the exact constraint value, but it gives a quick lower-bound
+    # style check using the fastest latency profile available.
+    # slo_lb_by_class = {}
+    # for k in K:
+    #     fastest_latency = min(L_gb[(g, b)] for g in G for b in B[g])
+    #     slo_lb_by_class[k] = RPS_k[k] * (P_k[k] + O_k[k]) * fastest_latency
+    # logger.info(
+    #     "SLO lower-bound diagnostics: "
+    #     + ", ".join(
+    #         f"{k}: demand_rps={RPS_k[k]:.4f}, prompt={P_k[k]}, output={O_k[k]}, "
+    #         f"fastest_latency={min(L_gb[(g, b)] for g in G for b in B[g]):.6f}, "
+    #         f"lhs_lower_bound={slo_lb_by_class[k]:.6f}, rhs={SLO_k[k]:.6f}"
+    #         for k in K
+    #     )
+    # )
+
     # Create model
+    # Ensure module logger writes to the same Gurobi log file
+    # _attach_file_logger(log_file)
+
     m = Model("reconfig_planner")
     
     # --- Decision Variables ---
@@ -331,7 +408,7 @@ def get_maximum_confidence_abstract_config(
                 for g in G for b in B[g]}
     
     # SLO slack per class k
-    r_k = m.addVars(K, lb=0.0, vtype=GRB.CONTINUOUS, name="r_k")
+    r_k = m.addVars(K, lb=-1000000.0, vtype=GRB.CONTINUOUS, name="r_k")
 
     m.update()
     
@@ -408,6 +485,10 @@ def get_maximum_confidence_abstract_config(
                     name=f"one_bin[{g}]")
         m.addConstr(quicksum(zp_gb[(g,b)] for b in B[g]) == 1,
                     name=f"one_binp[{g}]")
+        # limit zp_gb <= 512
+        # for b in B[g]:
+        #     if b > 512:
+        #         m.addConstr(zp_gb[(g,b)] == 0, name=f"cache_bin_limit[{g},{b}]")
     
     # 5) Node capacity
     for n in N:
@@ -482,10 +563,28 @@ def get_maximum_confidence_abstract_config(
     m.setParam("LogToConsole", 0) 
     m.setParam("Threads", NUM_THREADS)
     m.setParam("MIPGap", 0.01)
-    m.setParam("TimeLimit", 30)
+    m.setParam("TimeLimit", 20)
     m.ObjNAbsTol = 0.0
     m.ObjNRelTol = 0.0
     m.optimize()
+
+    if m.SolCount > 0:
+        for k in K:
+            lhs_val = 0.0
+            for g in G:
+                rec_sec_per_reqstep = sum(L_gb[(g, b)] * z_gb[(g, b)].X for b in B[g])
+                cache_sec_per_reqstep = sum(L_gb[(g, b)] * zp_gb[(g, b)].X for b in B[g])
+                lhs_val += (
+                    s_kg[k, g].X * rec_sec_per_reqstep +
+                    sp_kg[k, g].X * cache_sec_per_reqstep
+                )
+            logger.info(
+                "SLO solution value for %s: lhs=%.6f rhs=%.6f slack=%.6f",
+                k,
+                lhs_val,
+                SLO_k[k],
+                r_k[k].X,
+            )
 
     x_ng_sol = {}
     if m.SolCount == 0:
@@ -558,14 +657,32 @@ def plan_reconfiguration(
     # create a subfolder using date/time
     log_dir = os.path.join(log_dir, f"{datetime.now().strftime("%Y%m%d")}", f"{datetime.now().strftime("%H%M%S")}")
     os.makedirs(log_dir, exist_ok=True)
+    # attach a file handler so module logger writes to the same files
+    _attach_file_logger(f"{log_dir}/planner.log")
 
 
     p = psutil.Process()
-    all_cpus = get_slurm_assigned_cpus()
-    cpus_to_use = all_cpus[len(all_cpus)//2:len(all_cpus) * 3//4]  # use half of the assigned CPUs
-    p.cpu_affinity(cpus_to_use)
-    logger.info(f"EngineCore process pinned to CPUs: {cpus_to_use}")
-    global NUM_THREADS
+    global NUM_THREADS, PLANNER_PINNED_CPUS
+    if PLANNER_PINNED_CPUS is None:
+        all_cpus = get_slurm_assigned_cpus()
+        eligible_cpus = p.cpu_affinity()
+        cpus_to_use = [cpu for cpu in all_cpus if cpu in eligible_cpus]
+        if not cpus_to_use:
+            cpus_to_use = eligible_cpus
+        cpus_to_use = cpus_to_use[len(cpus_to_use)//2:len(cpus_to_use) * 3//4]  # use half of the assigned CPUs
+        if not cpus_to_use:
+            cpus_to_use = eligible_cpus[:max(1, len(eligible_cpus)//2)]
+
+        p.cpu_affinity(cpus_to_use)
+        PLANNER_PINNED_CPUS = list(cpus_to_use)
+        logger.info(f"EngineCore process pinned to CPUs: {PLANNER_PINNED_CPUS}")
+    else:
+        logger.info(
+            "EngineCore process affinity already pinned; reusing CPUs: %s",
+            PLANNER_PINNED_CPUS,
+        )
+
+    cpus_to_use = PLANNER_PINNED_CPUS
     NUM_THREADS = min(32, len(cpus_to_use))
 
     logger.debug(f"Reconfig planner in process {p.pid}")
@@ -575,7 +692,7 @@ def plan_reconfiguration(
     
     # scale workload classes RPS by 2 to provide buffer
     for wc in workload_classes:
-        # wc.rps = wc.rps * 2
+        wc.rps = wc.rps * 1.5
         logger.debug(f"Scaled workload class {wc.name} RPS to {wc.rps}")
     
     # read latency profile

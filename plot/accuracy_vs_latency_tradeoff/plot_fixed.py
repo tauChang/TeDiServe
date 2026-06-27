@@ -1,14 +1,15 @@
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.lines import Line2D
 
 plt.rcParams.update({
     "font.family": "serif",
-    "font.size": 22,
-    "axes.labelsize": 22,
-    "xtick.labelsize": 20,
-    "ytick.labelsize": 20,
-    "legend.fontsize": 20,
-    "lines.linewidth": 2.5,
+    "font.size": 7,
+    "axes.labelsize": 7,
+    "xtick.labelsize": 6.5,
+    "ytick.labelsize": 6.5,
+    "legend.fontsize": 7.0,
+    "lines.linewidth": 1.3,
 })
 
 # --------------------------------------
@@ -31,7 +32,7 @@ colors = {
 # --------------------------------------
 # Plot
 # --------------------------------------
-fig, ax = plt.subplots(figsize=(7, 5))
+fig, ax = plt.subplots(figsize=(1.82, 1.42))
 
 for c, acc, st in zip(conf, accuracy, steps):
     ax.scatter(
@@ -39,8 +40,7 @@ for c, acc, st in zip(conf, accuracy, steps):
         acc,
         color=colors[c],
         edgecolor="black",
-        s=180,
-        label=f"{c}",   # Just the numeric confidence value
+        s=52,
         zorder=3
     )
 
@@ -48,44 +48,46 @@ for c, acc, st in zip(conf, accuracy, steps):
 order = np.argsort(steps)
 ax.plot(steps[order], accuracy[order], "--", color="gray", linewidth=1)
 
-# Legend (outside plot)
-handles, labels = ax.get_legend_handles_labels()
-unique = dict(zip(labels, handles))
-# order from low to high confidence
-unique = dict(sorted(unique.items(), key=lambda item: float(item[0])))
-# legend = ax.legend(
-#     unique.values(),
-#     unique.keys(),
-#     title="Confidence\nThreshold",
-#     frameon=True,
-#     loc="center left",
-#     bbox_to_anchor=(1.02, 0.5)
-# )
-# legend._legend_title_box._children[0].set_ha("center")
-legend = ax.legend(
-    unique.values(),
-    unique.keys(),
-    title="Confidence Threshold",
+legend_order = [0.5, 0.6, 0.7, 0.8, 0.9]
+legend_handles = [
+    Line2D(
+        [0],
+        [0],
+        linestyle="None",
+        marker="o",
+        markerfacecolor=colors[c],
+        markeredgecolor="black",
+        markersize=5.0,
+        label=f"{c:.1f}",
+    )
+    for c in legend_order
+]
+legend = fig.legend(
+    legend_handles,
+    [handle.get_label() for handle in legend_handles],
+    title="Confidence threshold",
     loc="upper center",
-    bbox_to_anchor=(0.5, 1.4),  # move legend further above figure
-    ncol=len(unique),
+    bbox_to_anchor=(0.565, 1.02),
+    ncol=5,
     frameon=True,
-    handletextpad=-0.2,
-    columnspacing=0.5,
+    handlelength=0.6,
+    handletextpad=0.28,
+    labelspacing=0.1,
+    columnspacing=0.72,
+    borderpad=0.35,
 )
-legend._legend_title_box._children[0].set_ha("center")
+legend.get_title().set_ha("center")
+legend.get_title().set_fontsize(6.8)
 
-plt.tight_layout(rect=[0, 0, 1, 0.92])  # reserve extra space so legend never overlaps
-
-
-
-ax.set_xlabel("Number of denoising steps")
-ax.set_ylabel("Accuracy (%)")
+ax.set_xlabel("Number of denoising steps", labelpad=1)
+ax.set_ylabel("Accuracy (%)", labelpad=1)
+ax.tick_params(axis="both", direction="in", pad=2.0, length=1.5)
 ax.grid(alpha=0.3)
-# set y limit to 65 to 80
-ax.set_ylim(65, 80)
-ax.set_xlim(30, 82)
+ax.set_ylim(64, 80)
+ax.set_xlim(28, 82)
+ax.set_yticks([65, 70, 75, 80])
+ax.set_xticks([30, 40, 50, 60, 70, 80])
 
-plt.tight_layout()
-plt.savefig("accuracy_vs_steps_fixed.png", dpi=300, bbox_inches="tight")
-plt.savefig("accuracy_vs_steps_fixed.pdf", dpi=300, bbox_inches="tight")
+fig.tight_layout(rect=[0, 0, 1, 0.81], pad=0.02)
+plt.savefig("accuracy_vs_steps_fixed.png", dpi=300, bbox_inches="tight", pad_inches=0.01)
+plt.savefig("accuracy_vs_steps_fixed.pdf", dpi=300, bbox_inches="tight", pad_inches=0.01)

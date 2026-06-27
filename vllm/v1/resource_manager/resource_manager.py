@@ -287,6 +287,7 @@ class ConfigRecord:
     timestamp: float
     config: Dict[int, List[int]]
     workload_classes: List[WorkloadClass]
+    aggregate_rps: float
 
 class ResourceManager:
     
@@ -301,12 +302,16 @@ class ResourceManager:
         self.bundle_to_node: Dict[int, str] = {}
         self.config: Dict[int, List[int]] = {}
 
-        self.workload_monitor = WorkloadMonitor(vllm_config, time_window=300)
+        self.workload_monitor = WorkloadMonitor(vllm_config, time_window=60)
         # delay until first time reconfig planner is called to create, since reconfig planner needs latency profile,
         # which requires vllm_config.cluster_config.placement_group.bundle_specs to be initialized
         self.reconfig_planner = None 
         self.config_history: List[ConfigRecord] = []
         self.config_history_path = f"{self.vllm_config.experiment_config.experiment_dir}/config_history.json"
+
+    @staticmethod
+    def _aggregate_workload_rps(workload_classes: List[WorkloadClass]) -> float:
+        return sum(workload_class.rps for workload_class in workload_classes)
     
     def write_config_history(self):
         """Write config history to JSON file on disk."""
@@ -336,7 +341,10 @@ class ResourceManager:
                 f"current platform {current_platform.device_name} does not "
                 "support ray.")
 
-        if isinstance(cluster_config.num_gpus_per_model_executor,
+        # Skip GPU requirement check for fake executor since it doesn't use GPUs
+        if self.vllm_config.parallel_config.distributed_executor_backend == "fake":
+            device_required = None
+        elif isinstance(cluster_config.num_gpus_per_model_executor,
                         dict):
             device_required = sum(
                 cluster_config.num_gpus_per_model_executor.values())
@@ -491,6 +499,14 @@ class ResourceManager:
         logger.debug(f"num_gpus_per_model_executor: "
                         f"{self.cluster_config.num_gpus_per_model_executor}")
 
+        # Skip GPU assignment for fake executor since it doesn't use GPUs
+        if self.vllm_config.parallel_config.distributed_executor_backend == "fake":
+            logger.debug("Using fake executor; skipping GPU bundle assignment")
+            # just act like we have one bundle per executor for simplicity
+            for me_id in self.cluster_config.num_gpus_per_model_executor.keys():
+                config[me_id] = [me_id]  # assign a unique dummy bundle ID to each executor
+            return config
+
         used_bundles = set()
         node_assigned_count = defaultdict(int)
         for me_id, num_gpus in \
@@ -583,7 +599,8 @@ class ResourceManager:
         record = ConfigRecord(
             timestamp=datetime.fromtimestamp(timestamp).strftime(TIME_FORMAT),
             config=new_config,
-            workload_classes=workload_classes
+            workload_classes=workload_classes,
+            aggregate_rps=self._aggregate_workload_rps(workload_classes),
         )
         self.config_history.append(record)
         self.write_config_history()
@@ -633,7 +650,8 @@ class ResourceManager:
         record = ConfigRecord(
             timestamp=datetime.fromtimestamp(timestamp).strftime(TIME_FORMAT),
             config=new_config,
-            workload_classes=workload_classes
+            workload_classes=workload_classes,
+            aggregate_rps=self._aggregate_workload_rps(workload_classes),
         )
         self.config_history.append(record)
         self.write_config_history()

@@ -71,13 +71,13 @@ class WorkloadMonitor:
     def record_request_arrival(self, request: Request):
         stats = RequestArrivalStats.from_request(request)
         self.request_arrival_stats_queue.append(stats)
-        logger.info(f"Logged arrival of request {stats.request_id} at time {stats.arrival_time} "
+        logger.debug(f"Logged arrival of request {stats.request_id} at time {stats.arrival_time} "
                     f"with prompt length {stats.prompt_length} and output length {stats.output_length}.")
         
         self.file_writer.add(stats.asdict())
     
     def record_request_completion(self, request_id: str):
-        logger.info(f"Request {request_id} has completed processing.")
+        logger.debug(f"Request {request_id} has completed processing.")
         stats = RequestCompletionStats(
             request_id=request_id,
             completion_time=datetime.now().strftime(TIME_FORMAT)

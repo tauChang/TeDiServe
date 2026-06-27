@@ -105,6 +105,8 @@ class EngineCore:
         self.resource_manager.initialize_placement_group()
         reconfig_cmd = asyncio.run(self.resource_manager.reconfig())
         asyncio.run(reconfig_cmd.execute(self.executors_manager))
+
+        self.reconfig_interval = vllm_config.cluster_config.reconfig_interval
             
         self.available_gpu_memory_for_kv_cache = -1
 
@@ -258,6 +260,7 @@ class EngineCore:
 
         req = Request.from_engine_core_request(request, 
             mask_token_id=self.vllm_config.model_config.mask_token_id,
+            latency_slo=self.vllm_config.model_config.request_latency_slo,
             denoise_block_size=self.vllm_config.model_config.denoise_block_size)
         # if req.use_structured_output:
         #     # Start grammar compilation asynchronously
@@ -486,10 +489,6 @@ class EngineCoreProc(EngineCore):
         client_handshake_address: Optional[str] = None,
         engine_index: int = 0,
     ):
-        from vllm.v1.executor.ray_distributed_executor import (  # noqa
-                RayDistributedExecutor)
-        assert executor_class == RayDistributedExecutor
-
         # self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.input_queue = asyncio.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
@@ -727,7 +726,11 @@ class EngineCoreProc(EngineCore):
         # set affinity
         p = psutil.Process()
         all_cpus = get_slurm_assigned_cpus()
-        cpus_to_use = all_cpus[:len(all_cpus)//2]
+        eligible_cpus = p.cpu_affinity()
+        cpus_to_use = [cpu for cpu in all_cpus if cpu in eligible_cpus]
+        if not cpus_to_use:
+            cpus_to_use = eligible_cpus
+        cpus_to_use = cpus_to_use[:max(1, len(cpus_to_use)//2)]
         p.cpu_affinity(cpus_to_use)
         logger.info(f"EngineCore process pinned to CPUs: {cpus_to_use}")
         
@@ -738,18 +741,23 @@ class EngineCoreProc(EngineCore):
                 self.addresses.coordinator_input,
                 self.identity
             ),
-            # self.run_reconfigure_loop(),
+            *([
+                self.run_reconfigure_loop()
+            ] if self.reconfig_interval > 0 else []),
         )
 
     async def run_reconfigure_loop(self):
+        if self.reconfig_interval <= 0:
+            return
         logger.debug("Starting EngineCore reconfiguration loop.")
         while True:
-            logger.debug(f"Reconfiguration loop sleeping for 5 min...")
-            await asyncio.sleep(300)
-            logger.debug(f"Reconfiguration loop woke up.")
+            logger.debug("Reconfiguration loop sleeping for %s seconds...",
+                         self.reconfig_interval)
+            await asyncio.sleep(self.reconfig_interval)
+            logger.info(f"Reconfiguration loop woke up.")
             reconfig_cmd = await self.resource_manager.reconfig()
-            # await reconfig_cmd.execute(self.executors_manager)
-            logger.debug(f"after reconfig, executors_manager: "
+            await reconfig_cmd.execute(self.executors_manager)
+            logger.info(f"after reconfig, executors_manager: "
                          f"{self.executors_manager}")
 
     async def run_busy_loop(self):

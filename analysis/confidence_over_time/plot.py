@@ -178,9 +178,24 @@ def main(step_data_path: str, workload_history_path: str, output_dir: str):
         rid: (sum(v) / len(v)) for rid, v in per_job_vals.items() if v
     }
 
-    # Flatten all confidence values
+    # Weighted average per token: sum(confidence * num_tokens_unmasked) / total_tokens_unmasked
+    total_weighted_conf = 0.0
+    total_tokens_unmasked = 0
+    for rid, entries in step_data.items():
+        for e in entries:
+            conf = e.get("confidence_threshold")
+            tokens = e.get("num_cur_unmasked_tokens", 0)
+            if conf is not None and tokens is not None:
+                total_weighted_conf += conf * tokens
+                total_tokens_unmasked += tokens
+    
+    overall_avg_conf = (
+        total_weighted_conf / total_tokens_unmasked
+        if total_tokens_unmasked > 0 else None
+    )
+
+    # Keep the raw record count for reference.
     all_vals = [v for lst in per_job_vals.values() for v in lst]
-    overall_avg_conf = sum(all_vals) / len(all_vals) if all_vals else None
 
     # Aggregate step statistics
     total_steps = sum(per_job_steps.values())

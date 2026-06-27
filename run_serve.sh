@@ -28,7 +28,7 @@ VLLM_CMD="vllm serve \
   --step-data-dir ${EXPERIMENT_DIR} \
   --experiment-dir ${EXPERIMENT_DIR} \
   --total-num-requests 100 \
-  --denoise-block-size 32 \
+  --denoise-block-size 128 \
   --compilation-config {\"full_cuda_graph\":true} \
   "
 

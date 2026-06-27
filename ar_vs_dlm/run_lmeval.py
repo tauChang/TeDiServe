@@ -39,14 +39,35 @@ SHOULD_APPLY_CHAT_TEMPLATE = {
     "GSAI-ML/LLaDA-8B-Base": False,
     "Dream-org/Dream-v0-Instruct-7B": True,
     "Dream-org/Dream-v0-Base-7B": False,
+    "meta-llama/Meta-Llama-3-8B-Instruct": True,
+    "meta-llama/Meta-Llama-3-8B": False,
+    "meta-llama/Llama-3.1-8B-Instruct": True,
     "meta-llama/Llama-3.1-8B": False,
+    "meta-llama/Meta-Llama-3.1-8B": False,
 }
 
+
 def get_slurm_assigned_cpus():
+    affinity_override = os.environ.get("CPU_AFFINITY")
+    if affinity_override:
+        cpu_list = []
+        for part in affinity_override.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                start, end = map(int, part.split("-"))
+                cpu_list.extend(range(start, end + 1))
+            else:
+                cpu_list.append(int(part))
+        return cpu_list
+
     job_id = os.environ.get("SLURM_JOB_ID")
     if job_id is None:
-        return range(0, psutil.cpu_count(logical=True))
-        raise RuntimeError("Not running under SLURM")
+        try:
+            return list(psutil.Process().cpu_affinity())
+        except AttributeError:
+            return list(range(psutil.cpu_count(logical=True) or 1))
 
     uid = os.getuid()
     path = f"/sys/fs/cgroup/cpuset/slurm/uid_{uid}/job_{job_id}/cpuset.cpus"
@@ -238,13 +259,14 @@ def run_test(args):
         f"timeout=10000")
 
     num_fewshot = None
-    if args.task == "gsm8k":
+    if "gsm8k" in args.task:
         num_fewshot = 5
     elif args.task == "mmlu_pro":
         num_fewshot = 0
     elif args.task in ["mbpp", "mbpp_instruct"]:
         num_fewshot = 3
 
+    print(f"num_fewshot: {num_fewshot}")
     results = lm_eval.simple_evaluate(
         model="local-completions",
         model_args=model_args,
@@ -332,6 +354,5 @@ def main():
 if __name__ == "__main__":
     p = psutil.Process()
     all_cpus = get_slurm_assigned_cpus()
-    cpus_to_use = all_cpus[len(all_cpus) * 3 // 4 :]
-    p.cpu_affinity(cpus_to_use)
+    p.cpu_affinity(all_cpus)
     main()

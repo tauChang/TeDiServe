@@ -9,6 +9,7 @@ import threading
 import uvicorn
 import atexit
 import os
+import hashlib
 import numpy as np
 
 from fastapi import FastAPI, Request
@@ -24,6 +25,27 @@ logging.basicConfig(
 app = FastAPI()
 
 import random
+
+_VOLATILE_REQUEST_FIELDS = {"request_id"}
+
+
+def _normalize_for_hash(obj):
+    if isinstance(obj, dict):
+        return {k: _normalize_for_hash(v) for k, v in sorted(obj.items())}
+    if isinstance(obj, list):
+        return [_normalize_for_hash(v) for v in obj]
+    return obj
+
+
+def make_stable_request_id(payload: dict) -> str:
+    base_payload = {k: v for k, v in payload.items() if k not in _VOLATILE_REQUEST_FIELDS}
+    canonical = json.dumps(
+        _normalize_for_hash(base_payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return "req_" + hashlib.blake2b(canonical.encode("utf-8"), digest_size=12).hexdigest()
 
 def generate_request_arrival_times(arrival_pattern, default_cv=1.0):
     """Generate arrival times. Each tuple may be:
@@ -122,12 +144,14 @@ async def proxy_completions(request: Request):
     data = await request.json()
     # logger.info(f"Received request data: {data}")
 
-    req_id = int(data["request_id"])
+    # request_id from caller is arrival-order index used for schedule lookup.
+    arrival_req_id = int(data["request_id"])
+    stable_req_id = make_stable_request_id(data)
 
     # ============================================================
     # 1. Warmup using request 0's payload
     # ============================================================
-    if req_id == 0:
+    if arrival_req_id == 0:
         await wait_upstream_ready(app.state.upstream_url)
         # if app.state.does_warmup:
         #     logger.info("⚠️ Warmup triggered by request 0 — sending warmup call.")
@@ -161,15 +185,15 @@ async def proxy_completions(request: Request):
                         await client.post(
                             f"{app.state.upstream_url}/completions",
                             json=warmup_data,
-                            headers={"X-Request-Id": f"warmup-{i}"
-                        })
+                            headers={"X-Request-Id": f"warmup-{i}"},
+                        )
                         logger.info(f"Warmup request {i} succeeded.")
                     except Exception as e:
                         logger.warning(f"Warmup request {i} failed: {e}")
 
             # Launch 30 warmup requests concurrently
-            tasks = [asyncio.create_task(send_one(i)) for i in range(3)]
-            # tasks = [asyncio.create_task(send_one(i)) for i in range(3)]
+            # tasks = [asyncio.create_task(send_one(i)) for i in range(20)]
+            tasks = [asyncio.create_task(send_one(i)) for i in range(20)]
             await asyncio.gather(*tasks)
 
             logger.info("All warmup requests completed.")
@@ -203,7 +227,7 @@ async def proxy_completions(request: Request):
     delay = max(
         0.0,
         app.state.first_request_arrival_time
-        + app.state.request_arrival_time[req_id]
+        + app.state.request_arrival_time[arrival_req_id]
         - time.monotonic()
     )
 
@@ -217,22 +241,31 @@ async def proxy_completions(request: Request):
     # logger.info(f"Prompt (first 200 chars): {data['prompt'][:200]}")
 
     # Forward real request to upstream
-    start_time = time.monotonic()
+    theoretical_release_time = app.state.first_request_arrival_time + app.state.request_arrival_time[arrival_req_id]
+    actual_release_time = time.monotonic()
+    # combined_req_id = f"{arrival_req_id}-{stable_req_id}"
+    combined_req_id = stable_req_id
     async with httpx.AsyncClient(timeout=1200) as client:
         resp = await client.post(
             f"{app.state.upstream_url}/completions",
             json=data,
-            headers={"X-Request-Id": str(req_id)}
+            headers={"X-Request-Id": combined_req_id},
         )
         resp.raise_for_status()
 
-    elapsed = time.monotonic() - start_time
-    app.state.resp_time[req_id] = elapsed
+    elapsed = time.monotonic() - actual_release_time # time since when request was supposed to be released
+    app.state.resp_time[arrival_req_id] = elapsed
+    app.state.stable_req_id_by_arrival[arrival_req_id] = stable_req_id
+    app.state.resp_time_by_stable_req_id.setdefault(stable_req_id, []).append(elapsed)
+
+    resp_json = resp.json()
+    output_text = ""
+    if "choices" in resp_json and resp_json["choices"]:
+        output_text = resp_json["choices"][0].get("text", "")
 
     # count num output tokens
     num_tokenized = 0
     if app.state.tokenizer is not None:
-        output_text = resp.json()["choices"][0]["text"]
         tokenized = app.state.tokenizer(
             output_text,
             return_tensors="pt",
@@ -245,9 +278,12 @@ async def proxy_completions(request: Request):
 
     logger.info(f"tput so far: {app.state.token_count / (time.monotonic() - app.state.first_request_arrival_time):.2f} tokens/s")
     # post again
-    resp_json = resp.json()
+    resp_json["_proxy_meta"] = {
+        "arrival_request_id": arrival_req_id,
+        "stable_request_id": stable_req_id,
+    }
     # logger.info(f"Request {req_id} got response: {resp_json}")
-    logger.info(f"Time since first request arrival: {time.monotonic() - app.state.first_request_arrival_time:.3f}s")
+    # logger.info(f"Time since first request arrival: {time.monotonic() - app.state.first_request_arrival_time:.3f}s")
 
     return resp_json
 
@@ -265,6 +301,8 @@ def write_response_times(file_path: str):
     
     data["response_times"] = app.state.resp_time
     data["average_response_time"] = sum(app.state.resp_time.values()) / len(app.state.resp_time)
+    data["stable_request_id_by_arrival"] = app.state.stable_req_id_by_arrival
+    data["response_times_by_stable_request_id"] = app.state.resp_time_by_stable_req_id
     
     with open(file_path, "w") as f:
         json.dump(data, f, indent=2)
@@ -302,6 +340,8 @@ def launch_proxy(upstream_url: str,
     app.state.req_count = 0
     app.state.next_release_time = None
     app.state.resp_time = {}
+    app.state.stable_req_id_by_arrival = {}
+    app.state.resp_time_by_stable_req_id = {}
     app.state.does_warmup = warmup
     app.state.warmup_done = False
     app.state.token_count = 0

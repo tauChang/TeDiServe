@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import bisect
-from collections import defaultdict, OrderedDict
+from collections import defaultdict, OrderedDict, deque
 from collections.abc import Iterable
 import heapq
 import itertools
@@ -404,6 +404,8 @@ class LlumnixFCFSScheduler(SchedulerInterface):
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs # assume this is per executor
+        self.max_num_unfinished_requests = (
+            self.scheduler_config.max_num_unfinished_requests)
         self.max_num_scheduled_tokens = \
             self.scheduler_config.max_num_batched_tokens
         self.max_model_len = self.scheduler_config.max_model_len
@@ -507,6 +509,7 @@ class LlumnixFCFSScheduler(SchedulerInterface):
         self.update_profiler = TimeProfiler("Update", profiler_path)
 
         self.request_added_or_removed = False
+        self.deferred_requests: deque[Request] = deque()
         self.requests_need_update_step_estimates: list[str] = []
     
     def get_profile_latency(self, tp_degree: int, batch_size: int) -> float:
@@ -533,6 +536,8 @@ class LlumnixFCFSScheduler(SchedulerInterface):
         # return self.requests[req_id].slo_time_remaining > self.get_min_time_left(req_id) * self.request_states[req_id].pred_num_steps_left[
     
     async def schedule(self) -> SchedulerOutput:
+        self._admit_deferred_requests()
+
         # utils
         def determine_new_exec_tokens(request: Request) -> int:
             request.exec_start_pos = 0
@@ -1308,12 +1313,8 @@ class LlumnixFCFSScheduler(SchedulerInterface):
 
         return running_reqs, scheduled_reqs + unscheduled_reqs
 
-    def add_request(self, request: Request) -> None:
-        # if len(self.executor_states) == 0:
-        #     # we need this for update_request_max_confidence_thresholds
-        #     self.update_executors()
-        logger.debug(f"Scheduler adding request {request.request_id}")
-        # self.unscheduled.append(request.request_id)
+    def _admit_request(self, request: Request) -> None:
+        logger.debug(f"Scheduler admitting request {request.request_id}")
         self.requests[request.request_id] = request
         self.request_states[request.request_id] = RequestState(request)
         self.requests_need_update_step_estimates.append(request.request_id)
@@ -1322,6 +1323,44 @@ class LlumnixFCFSScheduler(SchedulerInterface):
         self.system_logger.log()
 
         self.request_added_or_removed = True
+
+    def _admit_deferred_requests(self) -> None:
+        if self.max_num_unfinished_requests is None:
+            while self.deferred_requests:
+                self._admit_request(self.deferred_requests.popleft())
+            return
+
+        while (self.deferred_requests and
+               self.get_num_unfinished_requests() <
+               self.max_num_unfinished_requests):
+            self._admit_request(self.deferred_requests.popleft())
+
+    def _drop_deferred_requests(self, request_ids: set[str]) -> None:
+        if not request_ids:
+            return
+
+        self.deferred_requests = deque(
+            request for request in self.deferred_requests
+            if request.request_id not in request_ids)
+
+    def add_request(self, request: Request) -> None:
+        # if len(self.executor_states) == 0:
+        #     # we need this for update_request_max_confidence_thresholds
+        #     self.update_executors()
+        logger.debug(f"Scheduler adding request {request.request_id}")
+        if (self.max_num_unfinished_requests is not None and
+                self.get_num_unfinished_requests() >=
+                self.max_num_unfinished_requests):
+            logger.debug(
+                "Deferring request %s because scheduler already has %d unfinished requests (limit=%d)",
+                request.request_id,
+                self.get_num_unfinished_requests(),
+                self.max_num_unfinished_requests,
+            )
+            self.deferred_requests.append(request)
+            return
+
+        self._admit_request(request)
 
     def finish_requests(
         self,
@@ -1338,6 +1377,8 @@ class LlumnixFCFSScheduler(SchedulerInterface):
             request_ids = (request_ids, )
         else:
             request_ids = set(request_ids)
+
+        self._drop_deferred_requests(set(request_ids))
 
         running_requests_to_remove = []
         waiting_requests_to_remove = []
@@ -1374,6 +1415,8 @@ class LlumnixFCFSScheduler(SchedulerInterface):
         for request in valid_requests:
             request.status = finished_status
             self._free_request(request, True)
+
+        self._admit_deferred_requests()
         
         self.request_added_or_removed = True
         

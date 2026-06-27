@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import bisect
-from collections import defaultdict, OrderedDict
+from collections import defaultdict, OrderedDict, deque
 from collections.abc import Iterable
 import heapq
 import itertools
@@ -532,6 +532,7 @@ class TeDiLightScheduler(SchedulerInterface):
         
         self.cache_prefix = vllm_config.model_config.cache_prefix
         self.cache_suffix = vllm_config.model_config.cache_suffix
+        self.request_latency_slo = vllm_config.model_config.request_latency_slo
         self.denoise_block_size = vllm_config.model_config.denoise_block_size
 
         self.step_estimator = StepEstimator(vllm_config)
@@ -563,6 +564,9 @@ class TeDiLightScheduler(SchedulerInterface):
         self.request_added_or_removed = False
         self.requests_need_update_step_estimates: set[str] = set()
         self.cum_requests_need_update_step_estimates: set[str] = set()
+        self.max_num_unfinished_requests = (
+            self.scheduler_config.max_num_unfinished_requests)
+        self.deferred_requests: deque[Request] = deque()
         self.last_update_request = 0.0
         self.update_request_interval = 1.0 # seconds
 
@@ -588,6 +592,69 @@ class TeDiLightScheduler(SchedulerInterface):
             return 1536
         total_tokens = sum(req.num_tokens for req in self.requests.values())
         return total_tokens / len(self.requests)
+
+    def _admit_request(self, request: Request) -> None:
+        logger.debug(f"Scheduler adding request {request.request_id}")
+        self.requests[request.request_id] = request
+        self.request_states[request.request_id] = RequestState(request)
+        self.requests_need_update_step_estimates.add(request.request_id)
+        if self.log_stats:
+            request.record_event(EngineCoreEventType.QUEUED)
+        self.system_logger.log()
+
+        self.rps_window.append(request.arrival_time)
+        self.request_added_or_removed = True
+
+    def _admit_deferred_requests(self) -> None:
+        while self.deferred_requests and (
+                self.max_num_unfinished_requests is None or
+                self.get_num_unfinished_requests() <
+                self.max_num_unfinished_requests):
+            self._admit_request(self.deferred_requests.popleft())
+
+    def _drop_deferred_requests(self, request_ids: set[str]) -> None:
+        if not self.deferred_requests:
+            return
+
+        kept_requests: deque[Request] = deque()
+        for request in self.deferred_requests:
+            if request.request_id in request_ids:
+                logger.debug("Dropping deferred request %s due to abort.",
+                             request.request_id)
+                continue
+            kept_requests.append(request)
+        self.deferred_requests = kept_requests
+
+    def _admit_request(self, request: Request) -> None:
+        logger.debug(f"Scheduler adding request {request.request_id}")
+        self.requests[request.request_id] = request
+        self.request_states[request.request_id] = RequestState(request)
+        self.requests_need_update_step_estimates.add(request.request_id)
+        if self.log_stats:
+            request.record_event(EngineCoreEventType.QUEUED)
+        self.system_logger.log()
+        self.rps_window.append(request.arrival_time)
+        self.request_added_or_removed = True
+
+    def _admit_deferred_requests(self) -> None:
+        while self.deferred_requests and (
+                self.max_num_unfinished_requests is None or
+                self.get_num_unfinished_requests() <
+                self.max_num_unfinished_requests):
+            self._admit_request(self.deferred_requests.popleft())
+
+    def _drop_deferred_requests(self, request_ids: set[str]) -> None:
+        if not self.deferred_requests:
+            return
+
+        kept_requests: deque[Request] = deque()
+        for request in self.deferred_requests:
+            if request.request_id in request_ids:
+                logger.debug("Dropping deferred request %s due to abort.",
+                             request.request_id)
+                continue
+            kept_requests.append(request)
+        self.deferred_requests = kept_requests
     
     def update_throughput_supply(self) -> None:
         start_time = time.time()
@@ -767,7 +834,8 @@ class TeDiLightScheduler(SchedulerInterface):
         #             f"{5*(avg_tput_demand_per_req_using_max_conf / self.tp_degree_to_throughput_supply[1])}")
         # logger.info(f"throughput_supply: {self.throughput_supply}")
         # total_throughput_budget = 4.446 * self.throughput_supply * 0.8
-        total_throughput_budget = 12.5 * self.throughput_supply * 0.8
+        total_throughput_budget = (
+            self.request_latency_slo * self.throughput_supply * 0.8)
         # logger.debug(
         #     f"throughput supply: {self.throughput_supply}, "
         #     f"rps: {self.get_rps()}, "
@@ -807,6 +875,8 @@ class TeDiLightScheduler(SchedulerInterface):
             #     req_state.max_confidence_threshold_idx = len(self.candidate_confidence_thresholds) - 1
     
     async def schedule(self) -> SchedulerOutput:
+        self._admit_deferred_requests()
+
         # utils
         def determine_new_exec_tokens(request: Request) -> int:
             request.exec_start_pos = 0
@@ -816,36 +886,6 @@ class TeDiLightScheduler(SchedulerInterface):
         def determine_running_exec_tokens(request: Request) -> int:
             request.exec_start_pos = request.cur_block_start if \
                 (self.cache_prefix and not request.is_start_of_new_block) \
-                    else 0
-            request.num_exec_tokens = request.denoise_block_size if \
-                (self.cache_suffix and not request.is_start_of_new_block) \
-                    else len(request._all_token_ids) - request.exec_start_pos
-            logger.debug(f"determining running exec tokens for request {request.request_id}: "
-                         f"exec_start_pos={request.exec_start_pos}, "
-                         f"num_exec_tokens={request.num_exec_tokens}"
-                         f"is_start_of_new_block={request.is_start_of_new_block}")
-            
-            return request.num_exec_tokens
-        
-        def can_migrate(request: Request) -> bool:
-            if not self.cache_prefix and not self.cache_suffix:
-                return True
-            
-            if request.is_start_of_new_block:
-                return True
-            
-            return False
-        
-        
-        def add_new_request(request: Request, executor_id: int) -> None:
-            scheduled_new_reqs[executor_id].append(request)
-            if self.cache_prefix or self.cache_suffix:
-                new_blocks = self.kv_cache_managers[executor_id].allocate_slots(
-                    request,
-                    request.num_tokens,
-                )
-                assert new_blocks is not None
-                logger.debug(f"request {request.request_id} allocated new blocks {new_blocks} on executor {executor_id}")
 
             req_to_new_block_ids[executor_id][request.request_id] = \
                 self.kv_cache_managers[executor_id].get_block_ids(
@@ -1510,7 +1550,8 @@ class TeDiLightScheduler(SchedulerInterface):
                         #     scheduler_output.confidence_thresholds[req_id]
                         with self.update_profiler.event("add_data_point",
                                                         req_id=req_id):
-                            self.step_estimator.add_data_point(stats)
+                            self.step_estimator.add_data_point(stats, 
+                                                               pred_num_steps_left=self.request_states[req_id].pred_num_steps_left)
 
                         self.request_states[req_id].last_stats = stats
 
@@ -1646,22 +1687,19 @@ class TeDiLightScheduler(SchedulerInterface):
         return running_reqs, scheduled_reqs + unscheduled_reqs
 
     def add_request(self, request: Request) -> None:
-        # if len(self.executor_states) == 0:
-        #     # we need this for update_request_max_confidence_thresholds
-        #     self.update_executors()
-        logger.debug(f"Scheduler adding request {request.request_id}")
-        # self.unscheduled.append(request.request_id)
-        self.requests[request.request_id] = request
-        self.request_states[request.request_id] = RequestState(request)
-        # self.requests_need_update_step_estimates.append(request.request_id)
-        self.requests_need_update_step_estimates.add(request.request_id)
-        if self.log_stats:
-            request.record_event(EngineCoreEventType.QUEUED)
-        self.system_logger.log()
+        if (self.max_num_unfinished_requests is not None and
+                self.get_num_unfinished_requests() >=
+                self.max_num_unfinished_requests):
+            logger.debug(
+                "Deferring request %s because scheduler already has %d unfinished requests (limit=%d)",
+                request.request_id,
+                self.get_num_unfinished_requests(),
+                self.max_num_unfinished_requests,
+            )
+            self.deferred_requests.append(request)
+            return
 
-        self.rps_window.append(request.arrival_time)
-
-        self.request_added_or_removed = True
+        self._admit_request(request)
 
     def finish_requests(
         self,
@@ -1678,6 +1716,8 @@ class TeDiLightScheduler(SchedulerInterface):
             request_ids = (request_ids, )
         else:
             request_ids = set(request_ids)
+
+        self._drop_deferred_requests(set(request_ids))
 
         running_requests_to_remove = []
         waiting_requests_to_remove = []
@@ -1714,6 +1754,8 @@ class TeDiLightScheduler(SchedulerInterface):
         for request in valid_requests:
             request.status = finished_status
             self._free_request(request, True)
+
+        self._admit_deferred_requests()
         
         self.request_added_or_removed = True
         

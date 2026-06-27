@@ -28,6 +28,9 @@ def load_instances(json_path):
     # Convert to DataFrame indexed by request ID (as string)
     df = pd.DataFrame.from_dict(instances, orient="index")
 
+    if "status" not in df.columns:
+        df["status"] = "success"
+
     # Convert index -> int request_id
     df.index = df.index.astype(int)
     df = df.sort_index()
@@ -71,10 +74,16 @@ def analyze_eval_results(json_path, trace_path, slo=3.0, t_start=0.0, t_end=9999
     print(f"Average latency (filtered): {avg_latency:.2f} sec")
 
     # Compute SLO attainment
-    within_slo = (df_window["request_latency"] <= slo).sum()
+    dropped_requests = (df_window["status"] == "dropped").sum()
+    within_slo = (
+        (df_window["status"] == "success") &
+        (df_window["request_latency"] <= slo)
+    ).sum()
     total = len(df_window)
+    dropped_percentage = dropped_requests / total * 100.0
     slo_attainment = within_slo / total * 100.0
 
+    print(f"Dropped requests: {dropped_percentage:.2f}% ({dropped_requests}/{total})")
     print(f"SLO Attainment (@ {slo} sec): {slo_attainment:.2f}% ({within_slo}/{total})")
 
 
@@ -83,20 +92,29 @@ def analyze_eval_results(json_path, trace_path, slo=3.0, t_start=0.0, t_end=9999
 # ==============================================================================
 
 if __name__ == "__main__":
-    path = "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251211/013824/logs/benchmark_latency_info.json"
-    path = "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251211/011511/logs/benchmark_latency_info.json"
-    path = "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251211/021826/logs/benchmark_latency_info.json"
-    trace = "/work2/10446/tchang85/stampede3/BurstGPT/arrival_trace_4_12_20.txt"
+    # path = "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251211/013824/logs/benchmark_latency_info.json"
+    # path = "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251211/011511/logs/benchmark_latency_info.json"
+    # path = "/work2/10446/tchang85/stampede3/dllm/experiment_dir/20251211/021826/logs/benchmark_latency_info.json"
+    # trace = "/work2/10446/tchang85/stampede3/BurstGPT/arrival_trace_4_12_20.txt"
+    paths = {
+        "TeDi": "/u/tchang85/dllm/sbatch_experiment_dir/20260507/011626_sharegpt_20_tedi_no_batch_only/0_tedi_20qps/logs/benchmark_latency_info.json",
+        "Llumnix": "/u/tchang85/dllm/sbatch_experiment_dir/20260503/163209_sharegpt_20_llumnix_only/0_llumnix_20qps/logs/benchmark_latency_info.json",
+        "InFaaS": "/u/tchang85/dllm/sbatch_experiment_dir/20260503/193754_sharegpt_20_infaas_only/0_infaas_20qps/logs/benchmark_latency_info.json",
+    }
+    trace = "/u/tchang85/dllm/BurstGPT/burstgpt_2hrs_20qps.txt"
     slo = 12.5
-    start_min = 16
-    end_min = 20
+    start_min = 45
+    end_min = 120
     t_start = start_min * 60.0
     t_end = end_min * 60.0
 
-    analyze_eval_results(
-        path,
-        trace,
-        slo=slo,
-        t_start=t_start,
-        t_end=t_end,
-    )
+    for name, path in paths.items():
+        print(f"\n================ Analyzing {name} ===")
+
+        analyze_eval_results(
+            path,
+            trace,
+            slo=slo,
+            t_start=t_start,
+            t_end=t_end,
+        )

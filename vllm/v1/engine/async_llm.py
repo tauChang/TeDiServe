@@ -264,16 +264,16 @@ class AsyncLLM(EngineClient):
                            queue: RequestOutputCollector):
 
         # Add the request to OutputProcessor (this process).
-        logger.info(f"adding request to output processor")
+        logger.debug(f"adding request to output processor")
         self.output_processor.add_request(request, prompt, parent_req, index,
                                           queue)
 
-        logger.info(f"adding request to engine core")
+        logger.debug(f"adding request to engine core")
         # Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
 
         if self.log_requests:
-            logger.info("Added request %s.", request.request_id)
+            logger.debug("Added request %s.", request.request_id)
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
