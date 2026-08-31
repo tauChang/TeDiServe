@@ -3,6 +3,10 @@
 # weights, or Gurobi. Build the GPU environment separately using README.md.
 FROM python:3.12-slim-bookworm
 
+LABEL org.opencontainers.image.source="https://github.com/tauChang/TeDiServe" \
+      org.opencontainers.image.description="TeDiServe EuroSys 2027 Artifact Evaluation smoke-test image" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
