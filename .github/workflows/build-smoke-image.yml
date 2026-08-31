@@ -30,6 +30,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Normalize image name
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}/tediserve-smoke" >> "$GITHUB_OUTPUT"
+
       - name: Build and publish smoke image
         uses: docker/build-push-action@v6
         with:
@@ -38,5 +43,5 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/tediserve-smoke:2027
-            ghcr.io/${{ github.repository_owner }}/tediserve-smoke:${{ github.sha }}
+            ${{ steps.image.outputs.name }}:2027
+            ${{ steps.image.outputs.name }}:${{ github.sha }}
