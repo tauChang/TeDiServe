@@ -1459,6 +1459,12 @@ class EngineArgs:
     def _is_v1_supported_oracle(self, model_config: ModelConfig) -> bool:
         """Oracle for whether to use V0 or V1 Engine by default."""
 
+        # The fake executor is implemented by TeDiServe's V1 engine and does
+        # not execute device kernels. It is therefore valid on a host without
+        # a detected accelerator for the artifact demonstration.
+        if self.distributed_executor_backend == "fake":
+            return True
+
         #############################################################
         # Unsupported Feature Flags on V1.
 

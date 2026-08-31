@@ -1,5 +1,0 @@
-confidence_threshold
-full_progress
-full_unmask_progress
-block_progress
-block_unmask_progress

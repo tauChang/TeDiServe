@@ -211,3 +211,6 @@ current_experiment
 core
 *step_data/
 reconfig_simulation/reconfig_simulation_outputs/
+
+# Artifact Evaluation demonstration outputs and local model caches.
+/artifact-results/

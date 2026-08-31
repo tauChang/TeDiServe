@@ -62,14 +62,13 @@ class FakeExecutor(Executor):
         return None
 
     def _load_latency_profile(self):
-        # dirname = self.vllm_config.profile_config.latency_profile_dir
-        # model_name = self.vllm_config.model_config.model.replace("/", "_")
-        # tp_degree = self.parallel_config.tensor_parallel_size
-        
-        # In a real setup, we'd detect this from ray/cluster config
-        # accel = "nvidia_a100" 
-        # profile_path = f"{dirname}/{model_name}/{accel}/TP{tp_degree}.json"
-        profile_path = "/u/tchang85/dllm/latency_profiles/GSAI-ML_LLaDA-8B-Instruct/GH200/TP1.json"
+        profile_dir = self.vllm_config.profile_config.latency_profile_dir
+        model_name = self.vllm_config.model_config.model.replace("/", "_")
+        model_name = os.environ.get("VLLM_FAKE_PROFILE_MODEL", model_name)
+        accelerator_type = os.environ.get("VLLM_FAKE_ACCELERATOR", "GH200")
+        tp_degree = len(self.bundle_ids)
+        profile_path = os.path.join(
+            profile_dir, model_name, accelerator_type, f"TP{tp_degree}.json")
         
         if os.path.exists(profile_path):
             try:

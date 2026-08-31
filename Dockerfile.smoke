@@ -1,0 +1,36 @@
+# Portable evaluator image for TeDiServe's simulated scheduler demonstration.
+# This image intentionally contains no compiled CUDA extensions, model
+# weights, or Gurobi. Build the GPU environment separately using README.md.
+FROM python:3.12-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    VLLM_TARGET_DEVICE=empty \
+    VLLM_FAKE_EXECUTOR_CPU=1
+
+WORKDIR /opt/tediserve
+
+# build-essential is only needed for packages without a wheel on the target
+# architecture; no TeDiServe CUDA code is compiled in this image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements/ /tmp/requirements/
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir \
+       --index-url https://download.pytorch.org/whl/cu124 \
+       torch==2.5.1 torchvision==0.20.1 \
+    && python -m pip install --no-cache-dir \
+       -r /tmp/requirements/build.txt \
+       -r /tmp/requirements/cuda.txt \
+       lightgbm==4.6.0 \
+    && rm -rf /tmp/requirements
+
+COPY . /opt/tediserve/
+RUN python -m pip install --no-cache-dir --no-deps -e . --no-build-isolation \
+    && python -m py_compile artifact/run_demo.py artifact/check_environment.py
+
+ENTRYPOINT ["bash", "artifact/run_demo.sh"]
+CMD ["--mode", "smoke", "--instances", "2", "--requests", "8", "--output-dir", "artifact-results/smoke"]

@@ -34,6 +34,10 @@ def get_latency_profile_path(vllm_config: VllmConfig,
                              tp_degree: int) -> Optional[str]:
     dirname = vllm_config.profile_config.latency_profile_dir
     model_name = vllm_config.model_config.model.replace("/", "_")
+    if vllm_config.parallel_config.distributed_executor_backend == "fake":
+        model_name = os.environ.get("VLLM_FAKE_PROFILE_MODEL", model_name)
+        accelerator_type = os.environ.get("VLLM_FAKE_ACCELERATOR", "GH200")
+        return f"{dirname}/{model_name}/{accelerator_type}/TP{tp_degree}.json"
     # cache_prefix = "_prefix" if vllm_config.model_config.cache_prefix else ""
     # cache_suffix = "_suffix" if vllm_config.model_config.cache_suffix else ""
     # block = ""
@@ -109,7 +113,7 @@ class ExecutorsManager:
                               bundle_ids: list[int]
                               ) -> None:
         assert executor_id not in self.used_executor_ids
-        
+
         copied_vllm_config = copy.deepcopy(self.vllm_config)
 
         if copied_vllm_config.kv_transfer_config is not None:
@@ -216,7 +220,7 @@ class ExecutorsManager:
     def initialize_kv_caches(self, executor):
         start = time.time()
         logger.debug(f"Initializing kv caches for executor {executor.id}")
-        
+
         # Get all kv cache needed by the model
         kv_cache_specs = executor.get_kv_cache_specs()
 
@@ -332,11 +336,10 @@ class ExecutorsManager:
             # Skip if overlaps with already used
             if any(p in used_ports for p in candidate_ports):
                 continue
-            
+
             self.nixl_side_channel_ports[executor_id] = [
                 (node_ip, p) for p in candidate_ports
             ]
             return self.nixl_side_channel_ports[executor_id]
-        
+
         raise RuntimeError(f"Cannot find {ports_needed} unused ports on node {node_ip} for executor {executor_id}")
-        

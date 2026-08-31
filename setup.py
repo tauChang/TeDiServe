@@ -523,7 +523,14 @@ def get_gaudi_sw_version():
 
 
 def get_vllm_version() -> str:
-    version = get_version(write_to="vllm/_version.py")
+    try:
+        version = get_version(write_to="vllm/_version.py")
+    except LookupError:
+        # Artifact archives are intentionally exported without a .git
+        # directory.  setuptools-scm cannot derive a version in that case,
+        # so use a stable local version solely for building the archived
+        # TeDiServe artifact.
+        version = "0.1.dev0"
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
     if _no_device():

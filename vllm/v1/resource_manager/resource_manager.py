@@ -8,8 +8,6 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.executors_manager import ExecutorsManager
 from vllm.v1.request import Request
 from vllm.v1.resource_manager.workload_monitor import WorkloadMonitor
-from vllm.v1.resource_manager.reconfig_planner.milp_reconfig_planner import \
-    MILPReconfigPlanner
 from vllm.v1.resource_manager.workload_monitor import WorkloadClass
 from collections import defaultdict
 
@@ -618,6 +616,11 @@ class ResourceManager:
             logger.info(f"Reconfiguration based on workload")
             workload_classes = self.workload_monitor.get_workload_classes()
             if self.reconfig_planner is None:
+                # Gurobi is an optional dependency: it is only needed after
+                # the initial configuration when dynamic reconfiguration is
+                # actually enabled.
+                from vllm.v1.resource_manager.reconfig_planner \
+                    .milp_reconfig_planner import MILPReconfigPlanner
                 self.reconfig_planner = MILPReconfigPlanner(self.vllm_config)
             new_config = await self.reconfig_planner.plan_reconfiguration_async(
                 self.node_to_bundles, self.config, workload_classes)

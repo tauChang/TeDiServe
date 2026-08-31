@@ -7,6 +7,7 @@ import enum
 import hashlib
 import inspect
 import json
+import os
 import textwrap
 import uuid
 import warnings
@@ -2638,15 +2639,27 @@ class DeviceConfig:
         return hash_str
 
     def __post_init__(self):
-        if self.device == "auto":
+        if (self.device == "auto" or
+                (not self.device and
+                 os.environ.get("VLLM_FAKE_EXECUTOR_CPU") == "1")):
             # Automated device type detection
             from vllm.platforms import current_platform
             self.device_type = current_platform.device_type
             if not self.device_type:
-                raise RuntimeError(
-                    "Failed to infer device type, please set "
-                    "the environment variable `VLLM_LOGGING_LEVEL=DEBUG` "
-                    "to turn on verbose logging to help debug the issue.")
+                # The TeDiServe fake executor does not execute model kernels.
+                # Allow its artifact demonstration to run on a host without an
+                # accelerator (for example, an evaluator's login node) without
+                # changing normal vLLM device detection semantics.
+                if os.environ.get("VLLM_FAKE_EXECUTOR_CPU") == "1":
+                    self.device_type = "cpu"
+                    logger.info(
+                        "Using CPU device configuration for the fake executor "
+                        "artifact demonstration.")
+                else:
+                    raise RuntimeError(
+                        "Failed to infer device type, please set "
+                        "the environment variable `VLLM_LOGGING_LEVEL=DEBUG` "
+                        "to turn on verbose logging to help debug the issue.")
         else:
             # Device type is assigned explicitly
             if isinstance(self.device, str):
