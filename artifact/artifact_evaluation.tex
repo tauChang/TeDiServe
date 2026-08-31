@@ -1,41 +1,54 @@
-% Include this source from the TeDiServe paper as the Artifact Evaluation appendix.
+% This file mirrors sections/14_artifact_evaluation.tex in the paper source.
 \section{Artifact Evaluation}
 \label{sec:artifact-evaluation}
 
-The TeDiServe artifact is a research fork of vLLM containing the implementation
-of the scheduler, step-cost predictor, resource manager, and reconfiguration
-logic described in \S\ref{sec:tediserve}. It targets the \emph{Artifacts
-Functional} and \emph{Artifacts Available} badges. The archival release and
-full instructions are available at \url{ARTIFACT-DOI-OR-URL}.
+The TeDiServe artifact is available at
+\url{https://github.com/tauChang/TeDiServe}. It contains the scheduler,
+step-time predictor, resource manager, and reconfiguration logic described in
+Sections~3--4. The repository README is the authoritative evaluator guide.
+
+\paragraph{Demonstration modes.}
+The recommended \emph{smoke mode} runs the real TeDiServe scheduler, control
+path, step-time predictor, and measured latency profile with two simulated
+model executors. No language model is loaded: the executors return fixed tokens
+and confidence values. It therefore validates multi-instance scheduling and
+request completion without requiring a GPU, CUDA, model weights, Ray, or
+Gurobi, but does not validate model quality or real denoising.
+
+The optional \emph{GPU mode} runs actual LLaDA model inference, checks
+the returned responses, and records per-instance work. It was tested on two
+GH200 GPUs. This is a short functional demonstration rather than a reproduction
+of a paper performance figure. Dynamic reconfiguration is disabled in both
+modes, so Gurobi is needed only for separate reconfiguration experiments.
 
 \paragraph{Evaluator workflow.}
-The supported portable workflow requires Linux, Python~3.12, and no GPU. After
-building the included vLLM fork and installing LightGBM, evaluators run
-\texttt{bash artifact/run\_demo.sh --mode smoke --instances 2 --requests 8}.
-It completes in under one minute on the reference CPU login node and reports a
-machine-readable result showing that all requests complete and that both
-simulated model instances receive work. This run executes TeDiServe's main
-deadline-aware scheduler with a simulated executor; it does not load model
-weights or run CUDA kernels. The scheduler's control code runs, but fixed
-simulated tokens/confidence values mean that this mode does not validate model
-quality or meaningful confidence-threshold adaptation. It is consequently a
-functional demonstration of multi-instance execution, not a performance or
-accuracy reproduction.
+The public smoke image supports Linux x86\_64/AMD64 and ARM64/aarch64. The
+primary Docker workflow is:
 
-Evaluators with two or more NVIDIA GPUs can additionally run
-\texttt{bash artifact/run\_demo.sh --mode gpu --instances 2 --requests 8}.
-This starts TeDiServe with two TP=1 instances of LLaDA-8B-Instruct and sends
-concurrent requests. The GPU MWE uses a GH200-compatible environment and
-downloads the model on first use. Dynamic reconfiguration is disabled in both
-MWE modes; Gurobi is required only for reconfiguration experiments.
+\begin{lstlisting}[language=bash]
+docker pull ghcr.io/tauchang/tediserve/tediserve-smoke:2027
+mkdir -p artifact-results
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v "$PWD/artifact-results:/opt/tediserve/artifact-results" \
+  ghcr.io/tauchang/tediserve/tediserve-smoke:2027
+\end{lstlisting}
 
-\paragraph{Relationship to the evaluation.}
-The artifact MWE demonstrates the central implementation path---deadline-aware
-request scheduling across model instances. It intentionally does not rerun all
-paper plots: those experiments require long trace replays, multi-GPU clusters,
-and, where reconfiguration is enabled, a licensed Gurobi installation. The
-paper's Section~5.2 and~5.4 measurements used GH200 GPUs, while the accuracy
-measurements associated with Figure~9 used H100 GPUs; Figure~9 is retained as
-research reference rather than a promised evaluator target. The artifact guide
-maps each paper component to its source location and precisely states the
-resources, commands, expected output, and unsupported workflows.
+Once downloaded, the test takes under one minute and writes a machine-readable
+result. Success means all eight requests complete, both instances receive
+work, and the result reports a true PASS flag. Podman and Apptainer can run the
+same OCI image.
+
+Evaluators with the GPU environment described in the README may additionally
+run:
+
+\begin{lstlisting}[language=bash]
+bash artifact/run_demo.sh --mode gpu --instances 2 --requests 8 \
+  --output-dir artifact-results/gpu
+\end{lstlisting}
+
+\paragraph{Scope.}
+The artifact exercises the central implementation path: deadline-aware request
+scheduling across model instances using the learned step-cost predictor. It
+retains the measured LLaDA and Dream profiles used as scheduler inputs. It does
+not package every paper-figure workflow, long trace replay, or full baseline
+comparison, which require large traces, multi-GPU clusters, and long runs.
