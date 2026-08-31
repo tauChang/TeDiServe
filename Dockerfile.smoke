@@ -36,5 +36,5 @@ COPY . /opt/tediserve/
 RUN python -m pip install --no-cache-dir --no-deps -e . --no-build-isolation \
     && python -m py_compile artifact/run_demo.py artifact/check_environment.py
 
-ENTRYPOINT ["bash", "artifact/run_demo.sh"]
-CMD ["--mode", "smoke", "--instances", "2", "--requests", "8", "--output-dir", "artifact-results/smoke"]
+ENTRYPOINT ["/bin/bash", "/opt/tediserve/artifact/run_demo.sh"]
+CMD ["--mode", "smoke", "--instances", "2", "--requests", "8", "--output-dir", "/opt/tediserve/artifact-results/smoke"]

@@ -94,7 +94,7 @@ pull and run it as follows (replace `<owner>` with the release owner):
 export APPTAINER_CACHEDIR=/tmp/$USER/apptainer-cache
 mkdir -p "$APPTAINER_CACHEDIR" artifact-results/smoke
 apptainer pull tediserve-smoke-2027.sif \
-  docker://ghcr.io/<owner>/tediserve-smoke:2027
+  docker://ghcr.io/tauchang/tediserve/tediserve-smoke:2027
 apptainer run --bind "$PWD/artifact-results:/opt/tediserve/artifact-results" \
   tediserve-smoke-2027.sif
 ```
