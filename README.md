@@ -143,7 +143,8 @@ else runs without one.
 
 ## Artifact evaluation
 
-Instructions from the EuroSys 2027 artifact evaluation are in
+TeDiServe was awarded the ACM **Artifacts Available** and **Artifacts
+Functional** badges at EuroSys 2027. The evaluation instructions are in
 [`artifact/README.md`](artifact/README.md). The evaluated version is tagged
 [`eurosys27-ae`](https://github.com/uw-mad-dash/TeDiServe/tree/eurosys27-ae).
 
@@ -153,8 +154,11 @@ Instructions from the EuroSys 2027 artifact evaluation are in
 @inproceedings{chang2027tediserve,
   title     = {{TeDiServe}: High {SLO} Attainment Serving for Diffusion Language Models},
   author    = {Chang, Tzu-Tao and Hong, Benjamin Yuanyang and Pham, Kiet and Venkataraman, Shivaram},
-  booktitle = {Proceedings of the European Conference on Computer Systems (EuroSys '27)},
-  year      = {2027}
+  booktitle = {Proceedings of the 22nd European Conference on Computer Systems (EuroSys '27)},
+  year      = {2027},
+  address   = {Rabat, Morocco},
+  publisher = {ACM},
+  doi       = {10.1145/3842654.3848543}
 }
 ```
 

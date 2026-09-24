@@ -1,8 +1,8 @@
 # TeDiServe Artifact Evaluation (EuroSys 2027)
 
 These are the instructions used for the EuroSys 2027 artifact evaluation of
-**TeDiServe** (Artifacts Functional and Artifacts Available). The exact version
-that was evaluated is tagged
+**TeDiServe**, which was awarded the ACM **Artifacts Available** and
+**Artifacts Functional** badges. The exact version that was evaluated is tagged
 [`eurosys27-ae`](https://github.com/uw-mad-dash/TeDiServe/tree/eurosys27-ae).
 For general use of TeDiServe, see the [main README](../README.md).
 

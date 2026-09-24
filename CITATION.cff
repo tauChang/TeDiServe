@@ -1,0 +1,46 @@
+cff-version: 1.2.0
+message: "If you use TeDiServe, please cite the paper below."
+title: "TeDiServe"
+abstract: >-
+  TeDiServe is a cluster-level serving system for diffusion language models
+  that targets high latency-SLO attainment through deadline-aware scheduling,
+  confidence-threshold-based load control, and cluster reconfiguration.
+type: software
+license: Apache-2.0
+repository-code: "https://github.com/uw-mad-dash/TeDiServe"
+authors:
+  - given-names: Tzu-Tao
+    family-names: Chang
+    affiliation: University of Wisconsin-Madison
+  - given-names: Benjamin Yuanyang
+    family-names: Hong
+    affiliation: University of Wisconsin-Madison
+  - given-names: Kiet
+    family-names: Pham
+    affiliation: University of Wisconsin-Madison
+  - given-names: Shivaram
+    family-names: Venkataraman
+    affiliation: University of Wisconsin-Madison and ETH Zurich
+preferred-citation:
+  type: conference-paper
+  title: "TeDiServe: High SLO Attainment Serving for Diffusion Language Models"
+  authors:
+    - given-names: Tzu-Tao
+      family-names: Chang
+    - given-names: Benjamin Yuanyang
+      family-names: Hong
+    - given-names: Kiet
+      family-names: Pham
+    - given-names: Shivaram
+      family-names: Venkataraman
+  collection-title: "Proceedings of the 22nd European Conference on Computer Systems (EuroSys '27)"
+  conference:
+    name: "EuroSys '27"
+    city: Rabat
+    country: MA
+    date-start: 2027-04-19
+    date-end: 2027-04-23
+  publisher:
+    name: ACM
+  doi: 10.1145/3842654.3848543
+  year: 2027
