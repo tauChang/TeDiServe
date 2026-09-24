@@ -96,7 +96,7 @@ reconfiguration experiments.
 
 | Location | Role |
 | --- | --- |
-| `vllm/v1/core/sched/tedi_async_drop_scheduler.py` | Main TeDiServe deadline-aware scheduler and load control |
+| `vllm/v1/core/sched/tediserve_scheduler.py` | Main TeDiServe deadline-aware scheduler and load control |
 | `vllm/v1/resource_manager/` and `vllm/v1/resource_manager/reconfig_planner/` | Resource management and optional reconfiguration |
 | `step_estimator_models/` | Step-time predictor used by the scheduler |
 | `latency_profiles/` | Measured LLaDA and Dream scheduler profiles |

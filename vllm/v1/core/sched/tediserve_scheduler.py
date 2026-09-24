@@ -397,7 +397,7 @@ class RequestState:
             self.status = RequestStateStatus.UNSCHEDULED
 
 
-class TeDiLightScheduler(SchedulerInterface):
+class TeDiServeScheduler(SchedulerInterface):
 
     def __init__(
         self,

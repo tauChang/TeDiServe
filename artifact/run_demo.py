@@ -31,7 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT_DIR = REPO_ROOT / "artifact"
 DEFAULT_MODEL = "GSAI-ML/LLaDA-8B-Instruct"
 DEFAULT_SCHEDULER = (
-    "vllm.v1.core.sched.tedi_async_drop_scheduler.TeDiLightScheduler"
+    "vllm.v1.core.sched.tediserve_scheduler.TeDiServeScheduler"
 )
 DEFAULT_ESTIMATOR = (
     "vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine."
@@ -113,8 +113,8 @@ async def run_smoke_demo(instances: int, requests: int,
     """Run the TeDiServe scheduler with simulated model execution."""
     from vllm.engine.arg_utils import AsyncEngineArgs
     from vllm.sampling_params import SamplingParams
-    from vllm.v1.core.sched.tedi_async_drop_scheduler import \
-        TeDiLightScheduler
+    from vllm.v1.core.sched.tediserve_scheduler import \
+        TeDiServeScheduler
     from vllm.v1.engine import EngineCoreRequest
     from vllm.v1.executor.executors_manager import ExecutorsManager
     from vllm.v1.executor.fake_executor import FakeExecutor
@@ -161,7 +161,7 @@ async def run_smoke_demo(instances: int, requests: int,
         manager.waiting_to_be_killed[executor_id] = False
         manager.used_executor_ids.add(executor_id)
 
-    scheduler = TeDiLightScheduler(
+    scheduler = TeDiServeScheduler(
         vllm_config, manager, StructuredOutputManager(vllm_config),
         log_stats=False)
     assignments = {str(executor_id): 0 for executor_id in range(instances)}

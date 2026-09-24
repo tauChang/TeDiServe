@@ -80,7 +80,7 @@ instances:
 vllm serve GSAI-ML/LLaDA-8B-Instruct --trust-remote-code \
   --distributed-executor-backend ray \
   --num-gpus-per-model-executor 1,1 \
-  --scheduler-cls vllm.v1.core.sched.tedi_async_drop_scheduler.TeDiLightScheduler \
+  --scheduler-cls vllm.v1.core.sched.tediserve_scheduler.TeDiServeScheduler \
   --request-latency-slo 30 \
   --default-confidence-threshold 0.9 \
   --candidate-confidence-thresholds 0.9 0.8 0.7 \
@@ -133,7 +133,7 @@ else runs without one.
 
 | Location | Contents |
 | --- | --- |
-| `vllm/v1/core/sched/tedi_async_drop_scheduler.py` | The TeDiServe scheduler, threshold adjustment and load control |
+| `vllm/v1/core/sched/tediserve_scheduler.py` | The TeDiServe scheduler, threshold adjustment and load control |
 | `vllm/v1/core/sched/step_estimator/` | Step-time predictor |
 | `vllm/v1/resource_manager/` | Resource management and the reconfiguration planner |
 | `vllm/model_executor/models/llada.py`, `dream.py` | Diffusion language models |
