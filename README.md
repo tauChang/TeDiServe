@@ -93,7 +93,7 @@ reconfiguration experiments.
 | Location | Role |
 | --- | --- |
 | `vllm/v1/core/sched/tedi_async_drop_scheduler.py` | Main TeDiServe deadline-aware scheduler and load control |
-| `vllm/v1/resource_manager/` and `vllm/v1/reconfigurator/` | Resource management and optional reconfiguration |
+| `vllm/v1/resource_manager/` and `vllm/v1/resource_manager/reconfig_planner/` | Resource management and optional reconfiguration |
 | `analysis/denoise_step_prediction/` | Step-time predictor used by the scheduler |
 | `latency_profiles/` | Measured LLaDA and Dream scheduler profiles |
 | `artifact/run_demo.py` | Smoke and GPU evaluator harness |
