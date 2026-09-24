@@ -121,9 +121,10 @@ async def run_smoke_demo(instances: int, requests: int,
     from vllm.v1.request import Request
     from vllm.v1.structured_output import StructuredOutputManager
 
-    instance_spec = ",".join("1" for _ in range(instances))
-    estimator_dir = REPO_ROOT / "analysis" / "denoise_step_prediction" / \
-        "models" / "lgb" / "gsm8k_0510_all_features"
+    # The trailing comma keeps this an explicit list of instances; a bare
+    # "1" would mean one-GPU instances on every visible GPU.
+    instance_spec = ",".join("1" for _ in range(instances)) + ","
+    estimator_dir = REPO_ROOT / "step_estimator_models" / "lgb_gsm8k"
     engine_args = AsyncEngineArgs(
         model=str(ARTIFACT_DIR / "smoke_model"),
         skip_tokenizer_init=True,
@@ -330,9 +331,10 @@ def run_gpu_demo(instances: int, requests: int, output_dir: Path,
             f"{available_gpus} GPU(s) are visible. Use --mode smoke or lower "
             "--instances.")
 
-    estimator_dir = REPO_ROOT / "analysis" / "denoise_step_prediction" / \
-        "models" / "lgb" / "gsm8k_0510_all_features"
-    instance_spec = ",".join("1" for _ in range(instances))
+    estimator_dir = REPO_ROOT / "step_estimator_models" / "lgb_gsm8k"
+    # The trailing comma keeps this an explicit list of instances; a bare
+    # "1" would mean one-GPU instances on every visible GPU.
+    instance_spec = ",".join("1" for _ in range(instances)) + ","
     # Ray workers in separate TeDiServe executors need distinct rendezvous
     # ports. Supplying a checked-free base port makes concurrent executor
     # startup deterministic; vLLM reserves subsequent ports under its lock.
