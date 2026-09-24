@@ -238,6 +238,22 @@ class FlashAttentionMetadataBuilder(
                     self.aot_schedule = False
                     aot_schedule = False
 
+        # NOTE: FA3 treats `num_splits` as an upper bound: it sizes the
+        # softmax_lse_accum / out_accum workspaces, while the per-batch split
+        # count is recomputed on the GPU and capped by that bound. The AOT
+        # scheduler metadata and the kernel launch must therefore be built with
+        # the *same* bound; otherwise the metadata can ask for more splits than
+        # the workspaces hold and the split/combine kernels run off the end of
+        # them.
+        max_num_splits = 0
+        if (self.use_full_cuda_graph
+                and num_actual_tokens <= self.max_cudagraph_size):
+            # NOTE(woosuk): Setting num_splits > 1 may increase the memory
+            # usage, because the intermediate buffers of size [num_splits,
+            # num_heads, num_tokens, head_size] are allocated. Therefore,
+            # we only set num_splits when using cuda graphs.
+            max_num_splits = self.max_num_splits
+
         def schedule(batch_size, cu_query_lens, max_query_len, seqlens,
                      max_seq_len, causal):
             if aot_schedule:
@@ -253,7 +269,7 @@ class FlashAttentionMetadataBuilder(
                     cu_seqlens_q=cu_query_lens,
                     causal=causal,
                     window_size=self.aot_sliding_window,
-                    num_splits=self.max_num_splits,
+                    num_splits=max_num_splits,
                 )
             return None
 
@@ -304,15 +320,6 @@ class FlashAttentionMetadataBuilder(
             # output buffer.
             self.scheduler_metadata[n:] = 0
             scheduler_metadata = self.scheduler_metadata[:n]
-
-        max_num_splits = 0
-        if (self.use_full_cuda_graph
-                and num_actual_tokens <= self.max_cudagraph_size):
-            # NOTE(woosuk): Setting num_splits > 1 may increase the memory
-            # usage, because the intermediate buffers of size [num_splits,
-            # num_heads, num_tokens, head_size] are allocated. Therefore,
-            # we only set num_splits when using cuda graphs.
-            max_num_splits = self.max_num_splits
 
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,

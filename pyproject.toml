@@ -40,8 +40,6 @@ Slack="https://slack.vllm.ai/"
 [project.scripts]
 vllm = "vllm.entrypoints.cli.main:main"
 
-[project.entry-points."vllm.general_plugins"]
-lora_filesystem_resolver = "vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver"
 
 [tool.setuptools_scm]
 # no extra settings needed, presence enables setuptools-scm
@@ -52,10 +50,8 @@ include = ["vllm*"]
 
 [tool.yapfignore]
 ignore_patterns = [
-    ".buildkite/**",
     "benchmarks/**",
     "build/**",
-    "examples/**",
 ]
 
 [tool.ruff]
@@ -137,9 +133,7 @@ exclude = [
 
 [tool.isort]
 skip_glob = [
-    ".buildkite/*",
     "benchmarks/*",
-    "examples/*",
 ]
 use_parentheses = true
 skip_gitignore = true
