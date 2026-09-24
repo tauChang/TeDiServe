@@ -3,7 +3,7 @@
 \label{sec:artifact-evaluation}
 
 The TeDiServe artifact is available at
-\url{https://github.com/tauChang/TeDiServe}. It contains the scheduler,
+\url{https://github.com/uw-mad-dash/TeDiServe}. It contains the scheduler,
 step-time predictor, resource manager, and reconfiguration logic described in
 Sections~3--4. The repository README is the authoritative evaluator guide.
 
@@ -26,11 +26,11 @@ The public smoke image supports Linux x86\_64/AMD64 and ARM64/aarch64. The
 primary Docker workflow is:
 
 \begin{lstlisting}[language=bash]
-docker pull ghcr.io/tauchang/tediserve/tediserve-smoke:2027
+docker pull ghcr.io/uw-mad-dash/tediserve/tediserve-smoke:2027
 mkdir -p artifact-results
 docker run --rm --user "$(id -u):$(id -g)" \
   -v "$PWD/artifact-results:/opt/tediserve/artifact-results" \
-  ghcr.io/tauchang/tediserve/tediserve-smoke:2027
+  ghcr.io/uw-mad-dash/tediserve/tediserve-smoke:2027
 \end{lstlisting}
 
 Once downloaded, the test takes under one minute and writes a machine-readable
