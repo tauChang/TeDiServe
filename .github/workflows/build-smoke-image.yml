@@ -1,8 +1,13 @@
 name: Build smoke artifact image
 
+# Build a candidate image, verify it on both architectures, and only then
+# move the public tags onto it.  Publishing :2027 before verification once
+# replaced a working image with a broken one; a failed verification must now
+# leave every public tag where it was.
+
 on:
   push:
-    branches: [main, artifact-evaluation]
+    branches: [main]
     tags: ['v*']
   workflow_dispatch:
 
@@ -11,10 +16,12 @@ permissions:
   packages: write
 
 jobs:
-  build-smoke:
+  build:
     runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.name }}
     steps:
-      - name: Check out artifact
+      - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Set up QEMU
@@ -35,20 +42,29 @@ jobs:
         shell: bash
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}/tediserve-smoke" >> "$GITHUB_OUTPUT"
 
-      - name: Build and publish smoke image
+      # Only the per-commit candidate tag is published here.
+      - name: Build and push candidate image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.smoke
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ steps.image.outputs.name }}:2027
-            ${{ steps.image.outputs.name }}:${{ github.sha }}
+          tags: ${{ steps.image.outputs.name }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
 
-  verify-amd64:
-    needs: build-smoke
-    runs-on: ubuntu-latest
+  verify:
+    needs: build
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -57,13 +73,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Run published AMD64 smoke image
+      - name: Run candidate smoke image
         shell: bash
         run: |
-          image="ghcr.io/${GITHUB_REPOSITORY,,}/tediserve-smoke:${GITHUB_SHA}"
+          image="${{ needs.build.outputs.image }}:${GITHUB_SHA}"
           mkdir -p artifact-results
-          docker pull --platform linux/amd64 "$image"
-          docker run --rm --platform linux/amd64 \
+          docker pull --platform ${{ matrix.platform }} "$image"
+          docker run --rm --platform ${{ matrix.platform }} \
             --user "$(id -u):$(id -g)" \
             -v "$PWD/artifact-results:/opt/tediserve/artifact-results" \
             "$image"
@@ -73,3 +89,30 @@ jobs:
             .used_instances == 2 and
             .passed == true
           ' artifact-results/smoke/demo_result.json
+
+  promote:
+    needs: [build, verify]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Retag the verified multi-architecture image without rebuilding it:
+      # main moves :2027 and :latest, a v1.2.3 tag adds :1.2.3.
+      - name: Promote verified image
+        shell: bash
+        run: |
+          image="${{ needs.build.outputs.image }}"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tags=(-t "$image:${GITHUB_REF_NAME#v}")
+          else
+            tags=(-t "$image:2027" -t "$image:latest")
+          fi
+          docker buildx imagetools create "${tags[@]}" "$image:${GITHUB_SHA}"
