@@ -208,7 +208,7 @@ csrc/moe/marlin_moe_wna16/kernel_*
 *experiment_dir
 current_experiment
 *.gz
-core
+/core
 *step_data/
 reconfig_simulation/reconfig_simulation_outputs/
 
