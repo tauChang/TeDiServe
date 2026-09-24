@@ -85,8 +85,8 @@ vllm serve GSAI-ML/LLaDA-8B-Instruct --trust-remote-code \
   --default-confidence-threshold 0.9 \
   --candidate-confidence-thresholds 0.9 0.8 0.7 \
   --step-estimator-model-class vllm.v1.core.sched.step_estimator.models.light_gradient_boost_machine.LightGradientBoostMachine \
-  --step-estimator-model-path analysis/denoise_step_prediction/models/lgb/gsm8k_0510_all_features/model.bin \
-  --step-estimator-features-path analysis/denoise_step_prediction/models/lgb/gsm8k_0510_all_features/features.txt \
+  --step-estimator-model-path step_estimator_models/lgb_gsm8k/model.bin \
+  --step-estimator-features-path step_estimator_models/lgb_gsm8k/features.txt \
   --latency-profile-dir latency_profiles \
   --reconfig-interval -1 \
   --enforce-eager \
@@ -104,7 +104,7 @@ Options specific to TeDiServe:
 
 | Option | Meaning |
 | --- | --- |
-| `--num-gpus-per-model-executor` | Model instances and the GPUs (tensor-parallel degree) of each, e.g. `1,1` or `2,2` |
+| `--num-gpus-per-model-executor` | Model instances and each one's GPU count (tensor-parallel degree); see below |
 | `--scheduler-cls` | The TeDiServe scheduler |
 | `--request-latency-slo` | Per-request latency SLO, in seconds |
 | `--candidate-confidence-thresholds` | Thresholds the scheduler may choose between for each request |
@@ -113,6 +113,17 @@ Options specific to TeDiServe:
 | `--latency-profile-dir` | Measured per-batch latencies, `<dir>/<model>/<GPU>/TP<n>.json`, profiled at startup if missing |
 | `--cache-prefix`, `--cache-suffix` | Approximate KV caching for the tokens before and after the block being denoised |
 | `--reconfig-interval` | Seconds between cluster reconfigurations; `-1` disables them |
+
+`--num-gpus-per-model-executor` takes one of three forms:
+
+| Value | Instances created |
+| --- | --- |
+| `2` (one number) | As many 2-GPU instances as fit in the Ray cluster, e.g. four on one 8-GPU node |
+| `1,1,1,1` or `2,1,1` (a list) | Exactly one instance per entry; entries may differ |
+| `1,` (trailing comma) | Exactly one 1-GPU instance, however many GPUs the cluster has |
+
+A single number always fills every GPU in the Ray cluster, so use the trailing
+comma to run one instance on a multi-GPU machine.
 
 **Reconfiguration** solves a mixed-integer program with
 [Gurobi](https://www.gurobi.com/), so it needs a valid Gurobi licence. Everything
@@ -126,7 +137,7 @@ else runs without one.
 | `vllm/v1/core/sched/step_estimator/` | Step-time predictor |
 | `vllm/v1/resource_manager/` | Resource management and the reconfiguration planner |
 | `vllm/model_executor/models/llada.py`, `dream.py` | Diffusion language models |
-| `analysis/denoise_step_prediction/models/` | Trained step-time predictor |
+| `step_estimator_models/` | Trained step-time predictor |
 | `latency_profiles/` | Measured latency profiles for LLaDA and Dream |
 | `artifact/` | Smoke and GPU demonstrations used for artifact evaluation |
 

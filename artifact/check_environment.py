@@ -35,8 +35,7 @@ def main() -> int:
             missing.append(f"{name} ({exc})")
     require(not missing, "Missing or broken imports: " + "; ".join(missing))
 
-    require((REPO_ROOT / "analysis/denoise_step_prediction/models/lgb/"
-             "gsm8k_0510_all_features/model.bin").is_file(),
+    require((REPO_ROOT / "step_estimator_models/lgb_gsm8k/model.bin").is_file(),
             "The checked-in step predictor model is missing.")
     require((REPO_ROOT / "artifact/smoke_model/config.json").is_file(),
             "The smoke-test model metadata is missing.")
