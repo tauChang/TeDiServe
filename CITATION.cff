@@ -8,6 +8,7 @@ abstract: >-
 type: software
 license: Apache-2.0
 repository-code: "https://github.com/uw-mad-dash/TeDiServe"
+doi: 10.5281/zenodo.22919779
 authors:
   - given-names: Tzu-Tao
     family-names: Chang

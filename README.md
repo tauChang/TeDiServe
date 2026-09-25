@@ -1,5 +1,7 @@
 # TeDiServe
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22919779.svg)](https://doi.org/10.5281/zenodo.22919779)
+
 **TeDiServe** is a cluster-level serving system for diffusion language models
 (DLMs) that targets high latency-SLO attainment. It is described in the
 EuroSys 2027 paper *TeDiServe: High SLO Attainment Serving for Diffusion
